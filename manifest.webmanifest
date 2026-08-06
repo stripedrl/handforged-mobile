@@ -1,0 +1,25 @@
+{
+  "name": "HANDFORGED",
+  "short_name": "HANDFORGED",
+  "description": "A hand of cards, a run of monsters. HANDFORGED.",
+  "display": "standalone",
+  "orientation": "landscape",
+  "start_url": "./",
+  "scope": "./",
+  "background_color": "#14101c",
+  "theme_color": "#14101c",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

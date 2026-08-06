@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="HANDFORGED">
+<meta name="theme-color" content="#14101c">
+<title>HANDFORGED</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png" sizes="192x192" type="image/png">
+<link href="fonts/fonts.css" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #14101c; height: 100%; overflow: hidden;
+               touch-action: none; -webkit-user-select: none; user-select: none;
+               -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  #game { width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center;
+          padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
+          box-sizing: border-box; }
+  canvas { max-width: 100%; max-height: 100vh; }
+  /* THE CURTAIN: landscape is the game; portrait is a polite request. */
+  #rotate { display: none; position: fixed; inset: 0; z-index: 99; background: #14101c;
+            color: #e8d3a4; font-family: Alata, sans-serif; text-align: center;
+            align-items: center; justify-content: center; flex-direction: column; }
+  #rotate .big { font-size: 42px; margin-bottom: 12px; }
+  @media (orientation: portrait) { #rotate { display: flex; } }
+</style>
+<script>window.__HF_MOBILE = true;</script>
+<script src="vendor/phaser.min.js"></script>
+</head>
+<body>
+<div id="game"></div>
+<div id="rotate"><div class="big">&#x1F4F1;&#x21BB;</div><div>ROTATE YOUR PHONE<br>HANDFORGED plays sideways</div></div>
+<script type="module" src="src/main.js"></script>
+<script>
+  /* Shell-only service worker: it makes the game installable and does nothing
+     else. Registration failing (file://, http on a non-localhost host, a
+     browser that refuses) must never cost anybody the game, so it is fired
+     after load and its rejection is swallowed. */
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function () {});
+    });
+  }
+</script>
+</body>
+</html>

@@ -33,6 +33,11 @@ import {
   SKINS, skinSections, skinTexture, isSkinUnlocked, skinRequirement, skinEarnedLine,
   skinTally, equippedSkin, equipSkin,
 } from '../core/skins.js';
+// DEFERRED ART (core/lazyload.js). The wardrobe is the single densest screen in
+// the game: fifty 900x850 models, 146 MB decoded, for a shelf you open to look
+// at. It is also the ONE screen where a texture landing late costs nothing, so
+// this is the one place the design uses POP-IN rather than a gate — see below.
+import { ensure, evict, skinShelf, skinBundle } from '../core/lazyload.js';
 
 const GOLD_TINT = 0xffd23e;
 const GOLD = '#ffd23e';
@@ -47,6 +52,27 @@ const GOLD = '#ffd23e';
 export function openSkins(scene, opts = {}) {
   if (scene.__skinsOpen) return null;
   scene.__skinsOpen = true;
+
+  /**
+   * THE WARDROBE'S OWN LOAD, AND WHY IT IS A POP-IN.
+   *
+   * Every other deferred load point in the game waits, because everywhere else a
+   * missing texture is a missing FACT — a blank map board, a fight against
+   * invisible bodies. Here it is a thumbnail on a shelf you are browsing: the
+   * tile draws the hero's shipped model in the meantime (makeTile has fallen
+   * back that way since the day a skin PNG could 404), the paint arrives a beat
+   * later, and nobody waits for a wardrobe.
+   *
+   * A GATE WOULD ALSO BE THE WRONG COST. Fifty models is 146 MB and the browser
+   * runs six requests at a time, so a gate would hold a black veil over the
+   * whole menu for the length of the slowest one. Pop-in fills the grid from the
+   * top down, which is the order it is read in.
+   *
+   * ...AND IT IS GIVEN BACK ON CLOSE. See the `close` path: everything but the
+   * five models actually being WORN is evicted when the panel goes away, so the
+   * shelf costs its 146 MB for as long as it is on screen and nothing after.
+   */
+  ensure(scene, skinShelf());
 
   const PANEL_W = 1300, PANEL_H = 900;
   const cx = GAME_W / 2, cy = GAME_H / 2;
@@ -189,6 +215,19 @@ export function openSkins(scene, opts = {}) {
     maskShape.destroy();
     window.__hfSkins = null;
     ov.destroy(true);
+    /**
+     * GIVE THE WARDROBE BACK. The fifty models were fetched to be LOOKED at;
+     * the moment the panel is gone the only ones anything will draw are the
+     * five being worn (the select card, the arena, the HUD portrait). Keeping
+     * the other forty-five would make browsing the shelf a permanent 146 MB
+     * tax on the session, which is the exact shape of the bug this whole
+     * workstream exists to remove.
+     *
+     * `evict` refuses anything still in flight, so a close taken mid-fetch
+     * leaves those keys alone and the next open finds them already there.
+     */
+    const worn = new Set(Object.keys(CHARACTERS).flatMap(id => skinBundle(equippedSkin(id))));
+    evict(scene, skinShelf().filter(k => !worn.has(k)));
   };
   dim.on('pointerup', (p) => {
     // ONLY a click that STARTED on the dimmer may close it. The overlay is
@@ -263,8 +302,30 @@ function makeTile(scene, shelf, x, y, w, h, chrId, skin, { showDetail, clearDeta
   // Fit inside the tile's art well rather than trusting one scale: every source
   // is the same 900x850 canvas, so this is one number for all 51 tiles, but
   // reading it off the texture keeps it honest if a canvas ever changes.
-  art.setScale(Math.min(150 / art.width, 132 / art.height));
+  const fit = () => art.setScale(Math.min(150 / art.width, 132 / art.height));
+  fit();
   tile.add(art);
+
+  /**
+   * THE POP-IN. The shelf's own ensure() is filling the cache from the top of
+   * the grid down (openSkins), and `addtexture-<key>` is the event the texture
+   * manager fires when one lands — the same signal CombatScene uses to swap in a
+   * boss arena that outran its fight.
+   *
+   * The listener is armed only for a tile that is CURRENTLY standing in for its
+   * skin, is removed the instant it fires, and dies with the tile either way, so
+   * a shelf opened and closed fifty times leaves nothing on the manager. `apply`
+   * is re-run rather than the tint being poked directly, because a locked tile's
+   * paint is a tint-FILL over the same image and would otherwise arrive
+   * unsilhouetted — the whole point of a locked tile is that you see the shape
+   * and not the paint.
+   */
+  let onLand = null;
+  if (skin && drawKey !== texKey) {
+    onLand = () => { art.setTexture(texKey); fit(); tile.__apply?.(); };
+    scene.textures.once('addtexture-' + texKey, onLand);
+    tile.once('destroy', () => scene.textures.off('addtexture-' + texKey, onLand));
+  }
 
   const lock = scene.add.image(0, 22, 'icon_lock').setScale(0.62).setVisible(false);
   tile.add(lock);
@@ -339,6 +400,9 @@ function makeTile(scene, shelf, x, y, w, h, chrId, skin, { showDetail, clearDeta
     }
     ring.setAlpha(worn ? 1 : 0);
   };
+  // The pop-in handler above re-runs the paint through this, so a locked tile
+  // that has just received its model gets silhouetted rather than shown.
+  tile.__apply = apply;
 
   return { x, y, skinId: skin ? skin.id : `${chrId}__original`, refresh: apply, hover };
 }

@@ -10,8 +10,8 @@ import { GAME_W, GAME_H } from '../config.js';
  * SOURCE pixels they hold for the 2340-wide mobile build too, where the same
  * painting zooms and the hearth slides right.
  *
- * Anything that has to sit ON the painting (the fire glow, the embers, the title
- * screen's hero lineup) asks here rather than typing 384 again.
+ * Anything that has to sit ON the painting (the fire glow, the embers) asks here
+ * rather than typing 384 again.
  */
 export function tavernAnchors() {
   const scale = GAME_W / 2544;
@@ -30,10 +30,12 @@ export function tavernAnchors() {
 /**
  * Caleb's forge-tavern, alive: Ken Burns drift, fire flicker, embers, window glow.
  *
- * `opts.beforeDim` is called with the scene after the painting and its lights
- * are down but BEFORE the dim rectangle, which is the only seam where something
- * can be added that reads as part of the painting rather than as furniture
- * standing in front of it (the title screen's drifting cards live there).
+ * `opts.beforeDim` is called with the scene and the anchors after the painting
+ * and its lights are down but BEFORE the dim rectangle, which is the only seam
+ * where something can be added that reads as part of the painting rather than as
+ * furniture standing in front of it. No scene uses it at the moment; it stays
+ * because it is the only place that ordering can be expressed at all, and it
+ * costs one optional call.
  */
 export function addTavernBackdrop(scene, dimAlpha = 0.45, opts = {}) {
   const anchor = tavernAnchors();

@@ -5,11 +5,15 @@ import { addTavernBackdrop } from '../ui/tavern.js';
 import { playMusic } from '../core/music.js';
 import { addSettingsButton } from '../ui/settingsMenu.js';
 import { sfx } from '../core/sfx.js';
-import { newRun } from '../core/run.js';
+import { newRun, run } from '../core/run.js';
 import { DIFFICULTIES } from '../core/difficulty.js';
 import { highestDifficultyUnlocked, isDifficultyUnlocked, isCharacterUnlocked } from '../core/progress.js';
 import { ACHIEVEMENT_BY_ID } from '../core/achievements.js';
-import { heroTextureFor } from '../core/skins.js';
+import { heroTextureFor, equippedSkin } from '../core/skins.js';
+// DEFERRED ART (core/lazyload.js). Picking a hero is the first moment the game
+// knows WHICH hero's painted deck and WHICH skin it will need, and the
+// difficulty page is a screen of pure dead time to fetch them in.
+import { ensure, heroCardfaces, skinBundle, runStartBundle } from '../core/lazyload.js';
 import { openSkins } from '../ui/skins.js';
 import { kineticScroll } from '../ui/kinetic.js';
 import { legible, burst } from '../ui/juice.js';
@@ -56,6 +60,7 @@ export class CharacterSelectScene extends Phaser.Scene {
     this.picker = null;
     this.pickerHero = null;
     this._infoFollow = null;   // the open kit parchment's walker, if any
+    this._downOnHero = null;   // which card the live gesture PRESSED, if any
     // chrId -> the two images (figure + cast shadow) on that hero's card. The
     // SKINS menu writes straight into this when a skin is equipped, so the card
     // behind the overlay changes under your hand instead of on the next visit.
@@ -64,6 +69,27 @@ export class CharacterSelectScene extends Phaser.Scene {
     window.__hfRow = null;
     playMusic(this, 'menu');
     addTavernBackdrop(this, 0.45);
+    /**
+     * THE MODELS THE PROFILE IS ACTUALLY WEARING (2026-08-06, deferred loading).
+     *
+     * The fifty skins left the boot set, and this rail is the one screen that
+     * draws several of them at once — one per hero, whichever each is wearing.
+     * The card falls back to the shipped model on its own (heroTextureFor takes
+     * `textures.exists` precisely so a missing PNG degrades instead of drawing a
+     * green box), so this is POP-IN and not a gate: the rail deals immediately
+     * and each card repaints the moment its skin lands.
+     *
+     * `repaintHero` is the same one-line swap the SKINS menu already calls when
+     * you equip something, which is why this costs no new machinery at all. A
+     * fresh profile wears nothing and this whole block is a no-op.
+     */
+    const wearing = Object.keys(CHARACTERS)
+      .map(id => [id, equippedSkin(id)]).filter(([, s]) => s);
+    for (const [id, skinId] of wearing) {
+      ensure(this, skinBundle(skinId)).then(() => {
+        if (this.scene.isActive() && this.heroArt?.[id]) this.repaintHero(id);
+      });
+    }
 
     const back = this.add.text(48, 40, '◀  BACK', {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '26px', color: '#d8c9a8', stroke: '#241505', strokeThickness: 4,
@@ -524,7 +550,16 @@ export class CharacterSelectScene extends Phaser.Scene {
     // if the gesture turned out to be a drag.
     // ...and skip it after a HOLD too (mobile): holding a card reads the kit,
     // exactly like a mouse hover; only a clean tap commits.
-    hit.on('pointerup', () => { if (!this.__rowDragged && !this._touchHoldFired) start(); });
+    // ...and ONLY a release whose press started on THIS card (the skins-dimmer
+    // idiom). Phaser fires pointerup on whatever sits under the pointer at
+    // release, so PLAY AGAIN's gesture used to spill its UP into this fresh
+    // scene and open the picker for whichever card the button overlapped.
+    hit.on('pointerdown', () => { this._downOnHero = ch.id; });
+    hit.on('pointerup', () => {
+      const armed = this._downOnHero === ch.id;
+      this._downOnHero = null;
+      if (armed && !this.__rowDragged && !this._touchHoldFired) start();
+    });
 
     /**
      * Where the parchment stands, for a given rail offset. Toward the middle of
@@ -621,6 +656,20 @@ export class CharacterSelectScene extends Phaser.Scene {
   openDifficultyPicker(ch, onBack) {
     if (this.picker) return;
     this.pickerHero = ch;
+    /**
+     * THE HERO IS DECIDED; THE RUN IS NOT. Everything between here and BEGIN is
+     * dead time — reading six difficulty plates, maybe typing a seed — and it is
+     * the only window in the game where the game knows which hero's art it needs
+     * and is not yet drawing any of it.
+     *
+     * Five painted cardfaces (7.5 MB) and one skin (2.9 MB). Fire-and-forget:
+     * beginRun awaits the same keys under its own fade, and CombatScene's gate
+     * is the backstop under that, so nothing here is load-bearing. Backing out
+     * to the rail and picking someone else simply fetches a second hero — which
+     * is why this is not in create(): five heroes at once is the shape that was
+     * just deleted from the boot set.
+     */
+    ensure(this, [...heroCardfaces(ch.id), ...skinBundle(equippedSkin(ch.id))]);
     const ov = this.add.container(0, 0).setDepth(DEPTH.overlay + 4);
     this.picker = ov;
 
@@ -928,7 +977,24 @@ export class CharacterSelectScene extends Phaser.Scene {
     this.seedText = '';
     newRun(ch.id, mode, seed);
     sfx(this, 'hand_play', { volume: 0.55 });
+    /**
+     * THE RUN'S FIRST WORLD, FETCHED UNDER THE FADE.
+     *
+     * `newRun` has just rolled which world every act turned out to be, so this
+     * is the first instant the game can know that Act I is the Verdant Forest
+     * and not the Nocturnal one. Act I's backdrop, board, banner and medallions
+     * are ~36 MB and the map cannot be painted without them.
+     *
+     * The transition waits on BOTH the camera and the fetch, not on whichever
+     * is slower to be written down: on a warm cache the fade is the long pole
+     * and this is invisible, and on a cold one the player sits on the black
+     * they were already sitting on instead of watching a progress bar. `ensure`
+     * never rejects (a 404 resolves — half this game's art is optional), so
+     * this cannot strand the screen.
+     */
+    const ready = ensure(this, runStartBundle(run, { skinId: equippedSkin(ch.id) }));
     this.cameras.main.fadeOut(260, 20, 16, 28);
-    this.cameras.main.once('camerafadeoutcomplete', () => this.scene.start('Map'));
+    this.cameras.main.once('camerafadeoutcomplete',
+      () => ready.then(() => this.scene.start('Map')));
   }
 }

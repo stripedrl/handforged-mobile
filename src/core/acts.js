@@ -26,7 +26,7 @@
  * the live tables, not remembered: the old copy of this block had drifted.
  *
  *            regular room          elite room      bosses
- *   Act I     89 → 614             284 - 561       945 / 898 / 851      (FROZEN)
+ *   Act I     89 → 614             284 - 561       945 / 898 / 851
  *   Act II    200 → 2.3k           1.4k - 2.2k     3.7k / 2.8k / 4.6k
  *   Act III   1.2k → 19k           11k - 22k       38k / 38k / 26k
  *   Act IV    5.7k → 44k           37k - 48k       71k (the double finale)
@@ -37,10 +37,32 @@
  * ROOMS sat BELOW a deep corridor, the exact shape the flat anchors exist to
  * prevent. An elite is an enemy. Flagged for sign-off.
  *
- * Every act keeps its own INTERNAL shape: the deepest ordinary room reads at
- * 0.50-0.65 of that act's heaviest boss, exactly as before, and no elite room
- * ever out-HPs the boss. Act I is deliberately untouched — it is the tutorial
- * and it already reads right.
+ * 2026-08-06 HANDS-OVERHAUL PARITY PASS (JC's numbers, derived by him, not
+ * re-derived here). The hands overhaul put a base VALUE on the SCORE side of
+ * every poker hand, on top of the mult it already carried, so player damage
+ * output rose across the whole game and every table above was suddenly a
+ * softer fight than the table it came from. HP came up to meet it. This is a
+ * PARITY restoration and not a raise: the target is the same fight it always
+ * was, measured against the new output.
+ *
+ *   Act I    x1.52 at row 0, drifting to ~x1.69 by the last ordinary row
+ *            (curve.G 1.09 -> 1.1042 is what tilts it), boss flat x1.70
+ *   Act II   x1.78 flat, all three handles
+ *   Act III  x1.80 flat, all three handles
+ *   Act IV   x1.80 flat, all three handles
+ *
+ * ACT I IS NO LONGER FROZEN, and that is the one real change of policy here.
+ * The freeze protected how the tutorial FELT against the damage a starting deck
+ * could produce; the overhaul moved that damage, so holding the number would
+ * have thrown the feeling away to keep the digits. The act's SHAPE is untouched
+ * — same ratios, elites still on the row curve, no `eliteHpMult` — only its
+ * altitude. Every act keeps its own internal shape for the same reason: within
+ * Acts II-IV a SINGLE multiplier rides all three handles, so the deepest
+ * ordinary room still reads at 0.50-0.65 of that act's heaviest boss and no
+ * elite room ever out-HPs the boss.
+ *
+ * The room totals above are the PRE-parity numbers and are left as the record
+ * of what this ladder was; multiply by the factors listed for today's.
  */
 import { ENEMY_DEFS as E, hasWaveMechanic } from './enemies.js';
 import { MAP_ROWS, FORGED_HP_MULT, FORGED_DMG_MULT } from './map.js';
@@ -57,10 +79,18 @@ export const ACTS = [
     num: 1, numeral: 'I', name: 'Verdant Forest', mechanic: 'Bleed',
     bgKey: 'bg_forest_verdant', bgTint: 0xffffff, ambience: 'forest',
     music: { fight: 'fight_forest', boss: 'boss_forest' },
-    // FROZEN (JC, 2026-07-31): Act I is exactly right and is never retuned.
-    // It also declares no `eliteHpMult`, so its elites keep riding the row
-    // curve — byte-for-byte the act that shipped.
-    curve: { A: 0.85, G: 1.09 }, dmgBase: 1.0, fx: 0, bossHpMult: 1.8,
+    // THE FREEZE IS OVER (JC, 2026-08-06). Act I was declared frozen on
+    // 2026-07-31 because it read right against the damage the player could
+    // actually produce. The hands overhaul changed that side of the equation:
+    // every poker hand now carries a base VALUE on the SCORE side on top of its
+    // mult, so the same deck deletes the old Act I. The freeze protected a
+    // FEELING, not a number, and the only way to keep the feeling was to move
+    // the number. Act I therefore rises x1.52 at row 0 and drifts to ~x1.69 by
+    // the last ordinary row (G 1.09 -> 1.1042 is what tilts the curve), with the
+    // boss on a flat x1.70. That is net difficulty PARITY, not a raise.
+    // It still declares no `eliteHpMult`, so its elites keep riding the row
+    // curve — the act's SHAPE is untouched, only its altitude.
+    curve: { A: 1.292, G: 1.1042 }, dmgBase: 1.0, fx: 0, bossHpMult: 3.06,
     bossIcon: 'boss_icon_wolfowl',
     bossName: 'WOLFOWL',
     bossBlurb: 'Hypnotic Gaze: one card in your hand is marked and must be played with your next hand. Discarding it only marks another.',
@@ -127,7 +157,13 @@ export const ACTS = [
     // 1,710 — the "~1.5k elite, ~3.5k boss" the player asked for. The row
     // curve was pulled down with them (A 5.2 → 2.0) so the deepest ordinary
     // room still reads at ~0.63 of the Phoenix, the ratio it always had.
-    curve: { A: 2.0, G: 1.12 }, dmgBase: 1.2, fx: 1, bossHpMult: 5.46875, eliteHpMult: 4.5,
+    // 2026-08-06 HANDS-OVERHAUL PARITY PASS: every handle in this act took a
+    // flat x1.78 (A 2.0 -> 3.56, elites 4.5 -> 8.01, boss 5.46875 -> 9.734).
+    // One multiplier across all three means the reference act is still the
+    // reference act — the elite:boss ratio, the deepest-room-at-0.63-of-the-boss
+    // shape and the 1.5k/3.5k relationship between them all survive intact; the
+    // Phoenix simply reads ~6.2k now because the player hits that much harder.
+    curve: { A: 3.56, G: 1.12 }, dmgBase: 1.2, fx: 1, bossHpMult: 9.734, eliteHpMult: 8.01,
     bossIcon: 'boss_icon_phoenix',
     bossName: 'THE WINTER PHOENIX',
     bossBlurb: 'Blizzard: cards in your hand freeze solid and cannot be played for a turn.',
@@ -209,7 +245,11 @@ export const ACTS = [
     // 30,000 -> 36,000 before the global +5% lever). Rows and elites are
     // untouched, so the act's shape is the same fight, one notch taller at the
     // top.
-    curve: { A: 9.6, G: 1.15 }, dmgBase: 1.5, fx: 1, bossHpMult: 45, eliteHpMult: 32,
+    // 2026-08-06 HANDS-OVERHAUL PARITY PASS: a flat x1.80 on all three handles
+    // (A 9.6 -> 17.28, elites 32 -> 57.6, boss 45 -> 81). Same act, same
+    // internal ratios, measured against a player who now scores a base VALUE on
+    // every hand as well as a mult.
+    curve: { A: 17.28, G: 1.15 }, dmgBase: 1.5, fx: 1, bossHpMult: 81.0, eliteHpMult: 57.6,
     bossIcon: 'boss_icon_keeper',
     bossName: 'THE KEEPER',
     bossBlurb: 'Eternal Keep: the wheel spins and seals one suit. Those cards are unplayable until it spins again.',
@@ -295,7 +335,11 @@ export const ACTS = [
     // holding them back inverted the act's shape: 27.5k-35.7k elite rooms sat
     // BELOW a 44.3k deep corridor, which is the same bug the flat anchors were
     // introduced to kill. They stay a little over half the finale, as designed.
-    curve: { A: 22.95, G: 1.155 }, dmgBase: 1.9, fx: 2, bossHpMult: 47.25, eliteHpMult: 62,
+    // 2026-08-06 HANDS-OVERHAUL PARITY PASS: a flat x1.80, same as the Abyss
+    // (A 22.95 -> 41.31, elites 62 -> 111.6, boss 47.25 -> 85.05). The
+    // compression off Act III is preserved exactly, because both acts moved by
+    // the same factor.
+    curve: { A: 41.31, G: 1.155 }, dmgBase: 1.9, fx: 2, bossHpMult: 85.05, eliteHpMult: 111.6,
     bossIcon: 'boss_icon_phoenix',
     bossName: 'THE TWIN CALAMITY',
     bossBlurb: 'The Phoenix and the Keeper fight as one. Blizzard and the Eternal Keep, both at once.',
@@ -352,9 +396,14 @@ export const ACTS = [
  *
  * TUNING IS INHERITED, NOT INVENTED. Each alternate copies the curve, dmgBase,
  * fx, bossHpMult and eliteHpMult of the act it replaces, character for
- * character — Act I is declared FROZEN and the Nocturnal Forest is Act I, so it
- * is frozen too. That is what makes "either one" an honest offer: the run does
- * not get easier or harder for which world it drew, only different.
+ * character. That is what makes "either one" an honest offer: the run does not
+ * get easier or harder for which world it drew, only different.
+ *
+ * THE COPIES ARE LITERAL, WHICH MEANS THEY MUST BE MOVED IN LOCKSTEP. These are
+ * transcribed values, not references to ACTS, so every retune of a primary act
+ * has to be typed out here as well — the 2026-08-06 parity pass moved all four
+ * pairs together, and the day one pair drifts is the day the world you drew
+ * starts deciding how hard the run is.
  *
  * MUSIC. Every alternate now has its OWN set — 34 tracks, delivered 2026-08-03
  * ("cant believe i left out music for new acts, just threw them all in"). The
@@ -378,9 +427,11 @@ export const ALT_ACTS = [
     // borrowing this file flagged as least defensible. Six nocturnal fight
     // tracks, two for an elite and three for the Night Mother's court.
     music: { fight: 'fight_nocturnal', elite: 'elite_nocturnal', boss: 'boss_nocturnal' },
-    // ACT I IS FROZEN, so this is ACTS[0]'s tuning transcribed, not re-derived.
+    // ACTS[0]'s tuning transcribed, not re-derived — including the 2026-08-06
+    // parity pass that ended Act I's freeze. The wood at night is Act I, so it
+    // moves the day Act I moves, or the offer stops being honest.
     // No eliteHpMult on purpose: Act I's elites ride the row curve.
-    curve: { A: 0.85, G: 1.09 }, dmgBase: 1.0, fx: 0, bossHpMult: 1.8,
+    curve: { A: 1.292, G: 1.1042 }, dmgBase: 1.0, fx: 0, bossHpMult: 3.06,
     bossIcon: 'boss_icon_night_mother',
     bossName: 'THE NIGHT MOTHER',
     bossBlurb: 'Scale Dust: her wings shed light and your cards come to hand face down. You can still play them. You just cannot read them.',
@@ -449,8 +500,9 @@ export const ALT_ACTS = [
     // the game. It no longer stands in the Wayside's cold crystalline music;
     // this set is the drifting, weightless one written for the Plains.
     music: { fight: 'fight_ethereal', elite: 'elite_ethereal', boss: 'boss_ethereal' },
-    // ACTS[1]'s tuning, transcribed. The Plains ARE Act II.
-    curve: { A: 2.0, G: 1.12 }, dmgBase: 1.2, fx: 1, bossHpMult: 5.46875, eliteHpMult: 4.5,
+    // ACTS[1]'s tuning, transcribed, through the 2026-08-06 parity pass. The
+    // Plains ARE Act II.
+    curve: { A: 3.56, G: 1.12 }, dmgBase: 1.2, fx: 1, bossHpMult: 9.734, eliteHpMult: 8.01,
     bossIcon: 'boss_icon_pale_architect',
     bossName: 'THE PALE ARCHITECT',
     bossBlurb: 'Scaffold: he raises a wall each turn and shows the one hand type that breaks it. Nothing reaches him until it does.',
@@ -521,8 +573,9 @@ export const ALT_ACTS = [
     // Demolition Crew — and there is no fourth biome for them to belong to. It
     // no longer borrows the Abyss's dread; it brings its own fire.
     music: { fight: 'fight_gallows', elite: 'elite_gallows', boss: 'boss_gallows' },
-    // ACTS[2]'s tuning, transcribed. The Gallows ARE Act III.
-    curve: { A: 9.6, G: 1.15 }, dmgBase: 1.5, fx: 1, bossHpMult: 45, eliteHpMult: 32,
+    // ACTS[2]'s tuning, transcribed, through the 2026-08-06 parity pass. The
+    // Gallows ARE Act III.
+    curve: { A: 17.28, G: 1.15 }, dmgBase: 1.5, fx: 1, bossHpMult: 81.0, eliteHpMult: 57.6,
     bossIcon: 'boss_icon_magistrate',
     bossName: 'THE MAGISTRATE',
     bossBlurb: 'Double Jeopardy: each hand type may be played once for the whole fight. Play a Pair and you have played your only Pair.',
@@ -633,10 +686,10 @@ export const ALT_ACTS = [
     // is the act that stands in an elite room longest.
     music: { fight: 'fight_gallows', elite: 'elite_gallows', boss: 'boss_gallows' },
     // ACTS[3]'s tuning, transcribed. The Ashen Crucible IS Act IV, so it rides
-    // the same compressed finale curve, the same +35% nerf-pass anchors and the
-    // same per-BODY elite anchor (its elite rooms field two elites each, exactly
-    // as the Crucible's do).
-    curve: { A: 22.95, G: 1.155 }, dmgBase: 1.9, fx: 2, bossHpMult: 47.25, eliteHpMult: 62,
+    // the same compressed finale curve, the same +35% nerf-pass anchors carried
+    // through the 2026-08-06 parity pass, and the same per-BODY elite anchor
+    // (its elite rooms field two elites each, exactly as the Crucible's do).
+    curve: { A: 41.31, G: 1.155 }, dmgBase: 1.9, fx: 2, bossHpMult: 85.05, eliteHpMult: 111.6,
     // THE MEDALLION wears the CROWN, not the gavel. The Magistrate's disc is
     // already the face of the Burning Gallows, and an Act IV whose medallion is
     // pixel-identical to Act III's would read as a bug rather than as a callback.
@@ -958,10 +1011,16 @@ export function bossEntry(act, id) {
  * to both flat set-piece multipliers, so the shape of every curve is untouched
  * and the whole change is one number to turn.
  *
- * !!! ACT I WAS PREVIOUSLY DECLARED FROZEN !!! JC asked for "general hp pools
- * +5%" without naming an exception, so this applies to Act I too — the Wolf Cub
- * goes 159 -> 167 at the summit of its curve, which is imperceptible. If the
- * freeze was meant to hold, gate this on `act.num > 1` and nothing else changes.
+ * ACT I RIDES IT TOO. JC asked for "general hp pools +5%" without naming an
+ * exception, and at the time that needed defending because Act I was declared
+ * frozen. It no longer is: the 2026-08-06 parity pass re-tuned Act I outright
+ * (see the header block), so this lever is simply global, with no act carved
+ * out of it and nothing left to argue.
+ *
+ * IT IS ALSO NOT THE PARITY LEVER. The hands overhaul was answered by moving
+ * each act's own handles, not by turning this constant up, precisely so that
+ * per-act factors could differ (Act I x1.52-1.69, Acts II-IV x1.78-1.80). This
+ * stays 1.05.
  */
 export const ENEMY_HP_SCALE = 1.05;
 
@@ -1012,7 +1071,8 @@ export function rollEncounter(act, node, rng = Math.random, bossPickId = null, a
   //
   // Set-pieces are FLAT: a boss uses act.bossHpMult, and an elite uses
   // act.eliteHpMult where the act declares one (Act I omits it on purpose and
-  // keeps its elites on the row curve — that act is frozen). `hpMinor` is the
+  // keeps its elites on the row curve — that is the tutorial's shape, and the
+  // 2026-08-06 parity pass raised its altitude without changing it). `hpMinor` is the
   // row-curve factor handed to an elite's non-elite escort, so a tag-along
   // wraith stays a wraith instead of being inflated to mini-boss size.
   const rowFactor = act.curve.A * Math.pow(act.curve.G, node.row) * ENEMY_HP_SCALE;

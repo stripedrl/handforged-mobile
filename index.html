@@ -29,6 +29,35 @@
   @media (orientation: portrait) { #rotate { display: flex; } }
 </style>
 <script>window.__HF_MOBILE = true;</script>
+<script>
+/* THE MOBILE AUDIO RATE (see tools/build_mobile.py, THE MOBILE AUDIO DIET).
+
+   Every audio file in this package is mono at 24000 Hz, but decodeAudioData
+   RESAMPLES to the AudioContext's rate, so a 48kHz context would decode these
+   thin files straight back into fat buffers and the whole exercise would show
+   up as a smaller download and not one byte less memory. Phaser builds its
+   context with a bare `new AudioContext()` and offers no rate config, so the
+   constructor is what we reach: same object, same prototype, one option added.
+
+   Every failure mode falls back to the browser's own context and a game that
+   merely uses more memory: a device that refuses the rate throws out of the
+   inner `new` and is caught; a browser that ignores the option (Safari before
+   14.5) simply decodes at its hardware rate as it always did. Read the truth
+   back at runtime with `__hfAudioMem().contextRate`. */
+(function () {
+  var Native = window.AudioContext || window.webkitAudioContext;
+  if (!Native) return;
+  function Patched(opts) {
+    var o = {};
+    for (var k in opts) { if (Object.prototype.hasOwnProperty.call(opts, k)) o[k] = opts[k]; }
+    o.sampleRate = 24000;
+    try { return new Native(o); } catch (e) { return new Native(opts); }
+  }
+  Patched.prototype = Native.prototype;
+  window.AudioContext = Patched;
+  if (window.webkitAudioContext) window.webkitAudioContext = Patched;
+})();
+</script>
 <script src="vendor/phaser.min.js"></script>
 </head>
 <body>

@@ -439,6 +439,16 @@ export const ACHIEVEMENTS = [
     on: 'hand', test: (c) => c.handType === 'fiveOfAKind',
   },
   {
+    // FLUSH HOUSE (2026-08-06) is the reachable secret: one WILD card makes a
+    // full house a flush, so this is the trophy a player can stumble into
+    // rather than build a whole deck toward. Same shape as its two neighbours.
+    id: 'flushHouse', name: 'Flush House',
+    desc: 'Play Flush House.',
+    hint: 'Play a full house that is also a flush.',
+    group: 'THE DECK',
+    on: 'hand', test: (c) => c.handType === 'flushHouse',
+  },
+  {
     id: 'flushFive', name: 'Flush Five',
     desc: 'Play Flush Five.',
     hint: 'Play the best hand there is.',

@@ -81,14 +81,17 @@
 
 import { HOARD_CHIP_STEP, CHARACTERS } from '../config.js';
 import { cardValue } from './deck.js';
-import { evaluateHand, bestHandOf, scoringIds, HAND_DEFS, WILD_MODS } from './poker.js';
+import { evaluateHand, bestHandOf, scoringIds, handStats, WILD_MODS } from './poker.js';
 
 /**
  * @typedef {import('./deck.js').Card} Card
  * @typedef {'highRoller'|'zealot'|'bulwark'|'venomancer'} Character
  */
 
-const HIGH_ROLLER_CARD_MULT = { 1: 4, 2: 3, 3: 2 }; // 4-5 cards => x1 (default)
+// Exported since 2026-08-06 so the passive chip's tests can DERIVE the ×N they
+// assert instead of keeping a second copy of the table (core/passives.js reads
+// the factor off the scoring result rather than off this, on purpose).
+export const HIGH_ROLLER_CARD_MULT = { 1: 4, 2: 3, 3: 2 }; // 4-5 cards => x1 (default)
 
 /**
  * ZEAL — THE DAMAGE BATTERY (JC, 2026-08-01 overhaul).
@@ -572,8 +575,14 @@ export function scoreHand({ cards, character, state }) {
 
   // How hard one point of Diamond value hits. Base 1 for everyone, ×2 for the
   // Bull's passive, + any relic that adds gemDamageFactor on top.
-  const gemFactor = (GEM_DAMAGE_BASE + (mods.gemDamageFactor ?? 0))
-    * (character === 'bulwark' ? BULWARK_GEM_DAMAGE_MULT : 1);
+  //
+  // The Bull's half is SPLIT OUT (2026-08-06) rather than folded straight into
+  // the product, because the passive chip in the HUD may only take a bow when
+  // the passive really moved the hand — and "how much of this Diamond damage was
+  // HIS" is a question only this line can answer honestly. Reported below as
+  // passiveGemFactor; core/passives.js turns it into a share of damageBySuit.
+  const passiveGemFactor = character === 'bulwark' ? BULWARK_GEM_DAMAGE_MULT : 1;
+  const gemFactor = (GEM_DAMAGE_BASE + (mods.gemDamageFactor ?? 0)) * passiveGemFactor;
 
   // --- Pass 0: every card's VALUE, before anything is multiplied by it. The
   // Ouroboros needs to know which card ended up biggest, and it can only know
@@ -864,21 +873,48 @@ export function scoreHand({ cards, character, state }) {
     });
   });
 
+  // --- THE HAND'S OWN BASE VALUE (JC, 2026-08-06 — THE HANDS OVERHAUL) -----
+  //
+  // WHAT THE HAND IS WORTH BEFORE A CARD HAS TICKED. Every hand type now brings
+  // a base value as well as a mult (poker.js HAND_DEFS), rising with the Smith's
+  // levels at its own valueStep, and it lands HERE: on the score side, once per
+  // hand activation, before the mult walk and before anything multiplies.
+  //
+  // WHICH POOL, and why it matters. baseSum is the pool the hand-wide outScale
+  // multiplies, so a hand that HAPPENS TWICE brings its base value twice —
+  // which is the only reading of "the hand happens again" that is not a lie.
+  // (baseFlat is the wheel's pool: it has already counted its own repeats and
+  // is nothing to do with the hand's identity.)
+  //
+  // DAMAGE SIDE ONLY. The base joins the score side and multiplies out into the
+  // blow. It is not a card and it has no suit, so it contributes nothing to the
+  // heal pool (Hearts), the shield pool (Diamonds), the club splash's per-card
+  // share or the chip bonus — every one of those stays a pure card-value
+  // channel, exactly as it was.
+  //
+  // UNCONDITIONAL, ON EVERY HAND (JC's explicit call). A gem flush now deals
+  // base × mult damage AND still plates you; a hand that somehow makes no card
+  // damage at all still swings for what the hand itself is worth. Which is why
+  // it is added ABOVE the two flat-value relics below rather than beneath them:
+  // there is always a score side for them to ride now, and their old "did the
+  // cards make anything?" gate has nothing left to refuse.
+  const level = (mods.handLevels ?? {})[hand.type] ?? 0;
+  const stats = handStats(hand.type, level);
+  const handBase = stats.base;
+  baseSum += handBase;
+
   // THE STRAIGHTEDGE'S BANK — flat, PRE-MULT VALUE granted to a whole hand
   // TYPE rather than to any one card. It lands on baseSum (the score side)
   // before the mult touches it, so a levelled straight really does carry it
-  // through the whole equation. Only paid when the hand made a score to add it
-  // to; a pure-heal hand has no score side for it to ride.
+  // through the whole equation.
   const handValueBonus = ((mods.handValue ?? {})[hand.type] ?? 0);
-  if (handValueBonus > 0 && baseSum + baseFlat > 0) baseSum += handValueBonus;
+  if (handValueBonus > 0) baseSum += handValueBonus;
 
   // FLAT VALUE (2026-08-02) — the value-side twin of flatMult. Whatever you
   // played, these relics add their number to the SCORE side before the mult
-  // touches it (the Pocket Anvil's +7, the Golden Spud's +50). Same rule as the
-  // Straightedge's bank: it needs a score side to ride, so a hand that made no
-  // score at all gets nothing to add it to.
+  // touches it (the Pocket Anvil's +15, the Golden Spud's +100).
   const flatValueBonus = mods.flatValue ?? 0;
-  if (flatValueBonus > 0 && baseSum + baseFlat > 0) baseSum += flatValueBonus;
+  if (flatValueBonus > 0) baseSum += flatValueBonus;
 
   // FLAT SHIELD (2026-08-02) — the Tungsten Cube. Added to any hand that
   // already grants Shield, and added HERE, inside scoreHand, which is what puts
@@ -889,11 +925,12 @@ export function scoreHand({ cards, character, state }) {
   if (flatShieldBonus > 0 && shieldPool + shieldFlat > 0) shieldPool += flatShieldBonus;
 
   // --- effMult: base mult + Smith levels + artifact hand bonuses + passives ---
-  const level = (mods.handLevels ?? {})[hand.type] ?? 0;
   // Where the MULT side of the combat equation starts counting: the printed
   // hand mult plus whatever the Smith has leveled it to. Everything after this
   // (artifacts, passives, jokers) arrives as a visible pulse. Display only.
-  const baseMult = hand.mult + level * HAND_DEFS[hand.type].levelStep;
+  // (`level` and `stats` were resolved above, where the base VALUE landed —
+  // one read of handStats answers for both halves of the opening equation.)
+  const baseMult = stats.mult;
 
   /**
    * THE ORDERED RELIC WALK (JC, 2026-08-02: "Artifact order should matter...
@@ -988,8 +1025,17 @@ export function scoreHand({ cards, character, state }) {
   effMult *= residualFactor;
 
   // 5: the hero passive, then (below) the Zealot's Zeal discharge.
+  //
+  // BANKED, NOT MERELY APPLIED (2026-08-06). The HUD's passive chip swells in
+  // the cascade exactly like a relic does, and it may only swell on a hand the
+  // passive ACTUALLY moved — a five-card Dextra hand must show nothing. So the
+  // factor is reported instead of being re-derived downstream off the card
+  // count, which would mean a second copy of HIGH_ROLLER_CARD_MULT living in
+  // the UI and drifting the first time this table is retuned.
+  let passiveMultFactor = 1;
   if (character === 'highRoller') {
-    effMult *= HIGH_ROLLER_CARD_MULT[n] ?? 1;
+    passiveMultFactor = HIGH_ROLLER_CARD_MULT[n] ?? 1;
+    effMult *= passiveMultFactor;
   }
 
   // --- the hand-wide output scale ---------------------------------------
@@ -1167,6 +1213,12 @@ export function scoreHand({ cards, character, state }) {
   // fallbacks are still live for the hero-exclusive rewrites: the Infinite
   // Heart's mult-heal reads HEAL, and a hand that somehow makes only shield
   // reads SHIELD.
+  //
+  // (2026-08-06: the HAND'S OWN BASE VALUE is on baseSum unconditionally now,
+  // so in practice every hand answers 'damage' and the mult side is always lit.
+  // The two fallbacks are kept rather than deleted because they are the shape a
+  // future "this suit stops dealing damage" relic needs to exist in, and they
+  // cost one comparison to keep honest.)
   const scoreCurrency = baseSum + baseFlat > 0 ? 'damage'
     : shieldPool > 0 ? 'shield'
       : healPool > 0 ? 'heal' : 'damage';
@@ -1217,6 +1269,16 @@ export function scoreHand({ cards, character, state }) {
     // CLUBS: total damage this hand splashes onto every OTHER living enemy.
     // 0 for a hand with no clubs in it — the readout stays off when it is off.
     aoeSplash,
+    // --- THE HERO PASSIVE'S OWN SHARE (2026-08-06) -----------------------
+    // Two scalars, one per hero whose passive is arithmetic rather than an
+    // event: Dextra's few-card ×N on the MULT side, the Bull's Diamond ×2 on
+    // the SCORE side. 1 means "this hand's hero has no such passive, or it did
+    // not fire" — which is the whole gate the HUD chip reads (core/passives.js).
+    // Zelus's discharge is already reported as zealConsumed/zealFactor and
+    // Drusky's as chipMultAdd; Ophelia's is not arithmetic at all (her seepage
+    // happens per damage event, in the scene) and so has no field here.
+    passiveMultFactor,
+    passiveGemFactor,
     zealConsumed,      // Zeal spent by this hand (the battery discharged)
     zealFactor,        // ...and what it multiplied the mult by (1 = it did not fire)
     zealGained: Math.round(zealGained),
@@ -1250,6 +1312,10 @@ export function scoreHand({ cards, character, state }) {
     handLevel: level,
     mult: hand.mult,
     baseMult,      // display: mult before artifacts/passives (hand mult + levels)
+    // THE HAND'S OWN BASE VALUE (2026-08-06), levels included: the number the
+    // equation OPENS on, before the first card ticks onto the score side. Sits
+    // inside baseSum, so it takes outScale with everything else.
+    handBase,
     // THE CHAIN, in the order it actually resolved: one row per relic that
     // moved the mult, left to right, with the running total after each. This is
     // what the cascade animates and what a verification run reads back.

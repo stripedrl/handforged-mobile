@@ -80,7 +80,7 @@ export const ARTIFACT_RARITY = {
   mythical:  { label: 'MYTHICAL',  color: 0xe03040, shopWeight: 0,  eliteWeight: 0.6 },
 };
 
-const RARITY_ORDER = ['common', 'rare', 'veryRare', 'legendary', 'heroExclusive', 'mythical'];
+export const RARITY_ORDER = ['common', 'rare', 'veryRare', 'legendary', 'heroExclusive', 'mythical'];
 
 /**
  * ACT-SCALED RARITY (JC, 2026-08-02: "Act 1 has 60% less chance across the
@@ -230,12 +230,13 @@ export function rollOfRarity(rarity, ownedIds = [], rng = Math.random, heroId = 
  */
 
 /** The matched-rank family, secrets included (see scoring.js OF_A_KIND_TYPES). */
-const OF_A_KIND_HANDS = ['pair', 'twoPair', 'trips', 'fullHouse', 'quads', 'fiveOfAKind', 'flushFive'];
+const OF_A_KIND_HANDS = ['pair', 'twoPair', 'trips', 'fullHouse', 'quads', 'fiveOfAKind', 'flushHouse', 'flushFive'];
 
 /**
  * THE FLUSH FAMILY — any hand whose TYPE NAME contains "flush", case-folded:
- * flush · straightFlush · flushFive. Derived rather than listed so a future
- * secret flush hand joins The Rising Tide's count the day it is added.
+ * flush · straightFlush · flushHouse · flushFive. Derived rather than listed so
+ * a future secret flush hand joins The Rising Tide's count the day it is added
+ * — which is exactly what FLUSH HOUSE did on 2026-08-06, for free.
  */
 export const isFlushHand = (type) => String(type ?? '').toLowerCase().includes('flush');
 
@@ -351,23 +352,31 @@ export function countScoringSuit(res, suit) {
 /**
  * THE SUIT-GRINDER FAMILY (Grindstone · Beating Heart · Uncut Diamond · Wild
  * Growth). One shape, four suits: every scoring card of the suit permanently
- * adds +1 to what THAT SUIT is worth, banked on the instance so a re-forged
- * copy keeps the growth it was struck from.
+ * adds +GRINDER_VALUE_PER_CARD to what THAT SUIT is worth, banked on the
+ * instance so a re-forged copy keeps the growth it was struck from.
  */
+export const GRINDER_VALUE_PER_CARD = 2;
 function suitGrinder({ id, name, suit, icon, tint, glyph, price = 125, rarity = 'rare' }) {
   return {
     id, name, rarity, price, icon, tint,
-    desc: `Every ${glyph} card that scores grinds the edge sharper: ${glyph} cards gain +1 value, permanently.`,
+    desc: `Every ${glyph} card that scores grinds the edge sharper: ${glyph} cards gain +${GRINDER_VALUE_PER_CARD} value, permanently.`,
     mods(a) { return { suitValue: { [suit]: a.state.ground ?? 0 } }; },
     hooks: {
       afterHand(scene, a, ctx) {
+        // Rate 1 -> 2 by JC's ruling (2026-08-06, hands-overhaul follow-up):
+        // the grinders ride the same restore-the-punch formula as the flats.
+        // Measured dilution at the Act III checkpoint was x2.0-2.44, so the
+        // doubled bank lands them back where they sat before the base-value
+        // change. (Matchmaker / Duck / Potato followed in a second ruling.)
         const n = countScoringSuit(ctx.res, suit);
-        if (n > 0) bank(a, 'ground', n * handActivations(ctx));
+        if (n > 0) bank(a, 'ground', n * GRINDER_VALUE_PER_CARD * handActivations(ctx));
       },
     },
     liveDesc(a) {
+      // The bank holds VALUE, not cards; the divisor recovers the card count
+      // (same read-the-rate-backwards rule as Straightedge).
       const g = a.state.ground ?? 0;
-      return `Currently: +${g} ${glyph} value  (${g} ${glyph} scored)`;
+      return `Currently: +${g} ${glyph} value  (${g / GRINDER_VALUE_PER_CARD} ${glyph} scored)`;
     },
   };
 }
@@ -393,10 +402,55 @@ function suitGrinder({ id, name, suit, icon, tint, glyph, price = 125, rarity = 
  * mult curve rather than something riding it, which is legendary work on a Rare
  * price tag. As flat VALUE it lands before the mult, so the same 25 carcasses
  * are worth whatever your build multiplies them by. Solid rare, not a scaler.
+ *
+ * Rate 1 -> 3 by JC's ruling (2026-08-06, second scaler follow-up, his exact
+ * number): the duck rides the hands-overhaul value formula like the grinders,
+ * and at ×3 it lands a notch ABOVE parity — a run that hunts is meant to feel
+ * it.
  */
 export const ANIMAL_KIND = 'beast';
-export const DUCK_VALUE_PER_ANIMAL = 1;
+export const DUCK_VALUE_PER_ANIMAL = 3;
 export function animalsSlain(r) { return killsOfKind(ANIMAL_KIND, r ?? run); }
+
+/**
+ * THE FLAT VALUE CHANNELS (THE HANDS OVERHAUL, 2026-08-06).
+ *
+ * Every poker hand now carries its OWN base value onto the score side (see
+ * HAND_DEFS in poker.js, added to baseSum in scoring.js). That is a straight
+ * dilution of every relic that adds a FLAT number to the same side: the audit
+ * measured the score side growing x1.37-1.44 in Act I and x2.0-2.44 in Act III,
+ * so a relic that used to be a fifth of your damage became a tenth of it.
+ * JC: "artifacts that add value should be buffed so they still matter."
+ *
+ * These are the numbers that were raised to restore the share they were tuned
+ * for. Every one of them is read by BOTH the relic's mods and its copy, so a
+ * retune can never leave a stale number printed on the card.
+ *
+ * THE SCALERS were initially held out (a banked scaler still dominated the
+ * score side: a suit grinder at bank 25 fell from 49% to 28% where Ember
+ * Heart fell from 8.8% to 3.8%). JC then ruled in two follow-ups
+ * (2026-08-06) that they ride the formula after all: GRINDER_VALUE_PER_CARD
+ * 1 -> 2 and MATCHMAKER_VALUE_PER_PAIR 1 -> 2 (matching the Act III dilution
+ * of x2.0-2.44), plain Potato +1 -> +2 (POTATO_VALUE), and Duck of Doom
+ * 1 -> 3 per animal — JC's exact number, deliberately above parity.
+ */
+export const WHETSTONE_SWORD_VALUE = 12;
+export const RABBITS_FOOT_CLOVER_VALUE = 15;
+export const EMBERHEART_HEART_VALUE = 8;
+export const POCKET_ANVIL_VALUE = 15;
+export const STRAIGHTEDGE_VALUE_PER_STRAIGHT = 20;
+export const STAR_CHART_VALUE = 20;
+/** SCALER rates. Named so the copy cannot desync. */
+export const MATCHMAKER_VALUE_PER_PAIR = 2;
+/**
+ * THE TWO DELIBERATE DUDS. Blunt Dagger (play ONE card) and Crown of the High
+ * Roller (the FIRST hand of a fight must be a lone Ace) both demand a hand you
+ * would never otherwise play, and neither number is anywhere near paying for
+ * that. These are NUDGES, not fixes: they were nudged so the dilution did not
+ * make them actively worse, and they are still bad on purpose.
+ */
+export const BLUNT_DAGGER_VALUE = 20;
+export const ACE_CROWN_VALUE = 15;
 
 /**
  * HOW MANY PAIRS A HAND CONTAINED — scoring ranks that turned up two or more
@@ -539,7 +593,12 @@ export function hatchEgg(r, entry, def) {
  * key is overridden separately (see artifactArtKey).
  */
 export const POTATO_FIGHTS = 3;
-export const GOLDEN_SPUD_VALUE = 50;
+// +1 -> +2 in JC's second scaler ruling (2026-08-06): even the potato rides
+// the hands-overhaul value formula. It is still a potato.
+export const POTATO_VALUE = 2;
+// 50 -> 100 (THE HANDS OVERHAUL, 2026-08-06): a flat value channel, diluted by
+// every hand's own base value. See THE FLAT VALUE CHANNELS above.
+export const GOLDEN_SPUD_VALUE = 100;
 export const GOLDEN_SPUD = {
   name: 'The Golden Spud',
   desc: `+${GOLDEN_SPUD_VALUE} value. Turns out it was worth keeping.`,
@@ -624,10 +683,14 @@ export function artifactLiveLine(art, run) {
 export const ARTIFACT_POOL = [
   // ============================ COMMON ============================
   {
+    // BUFFED 7 -> 12 (THE HANDS OVERHAUL, 2026-08-06). Every hand now brings its
+    // own base value to the score side, which diluted every FLAT value relic
+    // (x1.37-1.44 in Act I, x2.0-2.44 in Act III). The flat channels are raised
+    // to keep the share they were tuned for.
     id: 'whetstone', name: 'Whetstone Charm', rarity: 'common', price: 55,
     icon: 'icon_sword_small', tint: 0x8898b8,
-    desc: 'Sword cards are worth +7 value.',
-    mods: { suitValue: { swords: 7 } },
+    desc: `Sword cards are worth +${WHETSTONE_SWORD_VALUE} value.`,
+    mods: { suitValue: { swords: WHETSTONE_SWORD_VALUE } },
   },
   {
     id: 'prayerBeads', name: 'Prayer Beads', rarity: 'common', price: 55,
@@ -647,8 +710,8 @@ export const ARTIFACT_POOL = [
   {
     id: 'rabbitsFoot', name: "Rabbit's Foot", rarity: 'common', price: 55,
     icon: 'icon_lucky', tint: 0x3fa64b,
-    desc: 'Club cards are worth +7 value.',
-    mods: { suitValue: { clovers: 7 } },
+    desc: `Club cards are worth +${RABBITS_FOOT_CLOVER_VALUE} value.`,
+    mods: { suitValue: { clovers: RABBITS_FOOT_CLOVER_VALUE } },
   },
   {
     id: 'chalice', name: 'Vampiric Chalice', rarity: 'common', price: 60,
@@ -755,10 +818,13 @@ export const ARTIFACT_POOL = [
     liveDesc(a) { return `Currently: +${a.state.given ?? 0} Max HP from the satchel`; },
   },
   {
+    // A DELIBERATE DUD, nudged 15 -> 20 and no further. Playing ONE card throws
+    // away the whole hand to buy a flat number; no version of this number pays
+    // for that, so it is not meant to. See BLUNT_DAGGER_VALUE.
     id: 'bluntDagger', name: 'Blunt Dagger', rarity: 'common', price: 50,
     icon: 'icon_sword_small', tint: 0x706860,
-    desc: 'Play a single card and it is worth +15 value. Small knife, committed grip.',
-    props: { oneCardValue: 15 },
+    desc: `Play a single card and it is worth +${BLUNT_DAGGER_VALUE} value. Small knife, committed grip.`,
+    props: { oneCardValue: BLUNT_DAGGER_VALUE },
   },
   {
     id: 'luckyPenny', name: 'Lucky Penny', rarity: 'common', price: 50,
@@ -797,17 +863,25 @@ export const ARTIFACT_POOL = [
     // is the point: it banks on hands you were going to play anyway.
     id: 'matchmaker', name: 'Matchmaker', rarity: 'common', price: 60,
     icon: 'icon_heart_small', tint: 0xe07aa0,
-    desc: 'Every pair in a hand you play adds +1 VALUE to this artifact, forever. Two Pair counts twice.',
+    desc: `Every pair in a hand you play adds +${MATCHMAKER_VALUE_PER_PAIR} VALUE to this artifact, forever. Two Pair counts twice.`,
     mods(a) { return { flatValue: a.state.value ?? 0 }; },
     hooks: {
       afterHand(scene, a, ctx) {
-        const pairs = countScoringPairs(ctx.res) * handActivations(ctx);
+        // Rides THE HANDS OVERHAUL's formula since JC's 2026-08-06 ruling on the
+        // banking family (MATCHMAKER_VALUE_PER_PAIR 1 -> 2), same as the suit
+        // grinders above.
+        const pairs = countScoringPairs(ctx.res) * MATCHMAKER_VALUE_PER_PAIR * handActivations(ctx);
         if (pairs > 0) bank(a, 'value', pairs);
       },
     },
     liveDesc(a) {
+      // READ THE RATE BACKWARDS to get the COUNT, exactly as the suit grinders
+      // do. This printed `v` for both numbers, which was only ever right while
+      // the rate was 1 — at 2 it told you 'Currently: +4 value (4 pairs
+      // matched)' after two pairs. The bank is the truth; the count is derived.
       const v = a.state.value ?? 0;
-      return `Currently: +${v} value  (${v} pair${v === 1 ? '' : 's'} matched)`;
+      const pairs = Math.round(v / MATCHMAKER_VALUE_PER_PAIR);
+      return `Currently: +${v} value  (${pairs} pair${pairs === 1 ? '' : 's'} matched)`;
     },
   },
   {
@@ -819,8 +893,8 @@ export const ARTIFACT_POOL = [
   {
     id: 'pocketAnvil', name: 'Pocket Anvil', rarity: 'common', price: 55,
     icon: 'icon_anvil', tint: 0x8898b8,
-    desc: '+7 value. It fits in a pocket. It should not.',
-    mods: { flatValue: 7 },
+    desc: `+${POCKET_ANVIL_VALUE} value. It fits in a pocket. It should not.`,
+    mods: { flatValue: POCKET_ANVIL_VALUE },
   },
   {
     id: 'scrappersLicense', name: "Scrapper's License", rarity: 'common', price: 60,
@@ -954,16 +1028,13 @@ export const ARTIFACT_POOL = [
     id: 'echoBell', name: 'Echo Bell', rarity: 'rare', price: 125,
     icon: 'icon_music_note', tint: 0xd8b830,
     desc: 'Of-a-kind hands gain +2 mult. Every one you play rings the bell louder: +0.2 more, forever.',
-    // "Of a kind" includes the two SECRET hands — five matched ranks is the
-    // loudest of-a-kind there is.
+    // "Of a kind" includes the SECRET hands — five matched ranks is the
+    // loudest of-a-kind there is, and a FLUSH HOUSE is a full house wearing a
+    // suit. Read straight off OF_A_KIND_HANDS so the bell's mult table and the
+    // hook that rings it can never disagree about what counts.
     mods(a) {
       const b = 2 + (a.state.rung ?? 0);
-      return {
-        handMult: {
-          pair: b, twoPair: b, trips: b, fullHouse: b, quads: b,
-          fiveOfAKind: b, flushFive: b,
-        },
-      };
+      return { handMult: Object.fromEntries(OF_A_KIND_HANDS.map(t => [t, b])) };
     },
     hooks: {
       afterHand(scene, a, ctx) {
@@ -1093,7 +1164,7 @@ export const ARTIFACT_POOL = [
      */
     id: 'straightedge', name: 'Straightedge', rarity: 'rare', price: 125,
     icon: 'icon_sword_small', tint: 0xc8c8d8,
-    desc: 'Every straight you play banks +10 VALUE onto this artifact, forever. Straights are worth all of it.',
+    desc: `Every straight you play banks +${STRAIGHTEDGE_VALUE_PER_STRAIGHT} VALUE onto this artifact, forever. Straights are worth all of it.`,
     mods(a) {
       const v = a.state.filed ?? 0;
       return { handValue: { straight: v, straightFlush: v } };
@@ -1101,13 +1172,17 @@ export const ARTIFACT_POOL = [
     hooks: {
       afterHand(scene, a, ctx) {
         if (ctx.res.handType === 'straight' || ctx.res.handType === 'straightFlush') {
-          bank(a, 'filed', 10 * handActivations(ctx));
+          bank(a, 'filed', STRAIGHTEDGE_VALUE_PER_STRAIGHT * handActivations(ctx));
         }
       },
     },
     liveDesc(a) {
       const v = a.state.filed ?? 0;
-      return `Currently: +${v} value on straights  (${v / 10} straight${v === 10 ? '' : 's'} played)`;
+      // The divisor MUST read the rate. It is the bank run backwards to recover
+      // the straight COUNT, so a hard-typed 10 here silently mis-counts every
+      // straight you ever played the moment the rate moves.
+      const n = v / STRAIGHTEDGE_VALUE_PER_STRAIGHT;
+      return `Currently: +${v} value on straights  (${n} straight${n === 1 ? '' : 's'} played)`;
     },
   },
   {
@@ -1119,7 +1194,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'bountyBoard', name: 'Bounty Board', rarity: 'rare', price: 120,
     icon: 'icon_sword_small', tint: 0xb8862c,
-    desc: 'Elites drop +60 chips and their artifact is one rarity higher.',
+    desc: 'Elites drop +60 chips and one offering on their shelf is a rarity higher.',
     props: { eliteChips: 60, eliteRarityBoost: 1 },
   },
   {
@@ -1148,9 +1223,9 @@ export const ARTIFACT_POOL = [
   {
     id: 'emberheart', name: 'Ember Heart', rarity: 'rare', price: 95,
     icon: 'icon_fire', tint: 0xe06828,
-    desc: 'Nothing freezes an ember: immune to Freeze from EVERY source, bosses included. Heart cards are also worth +5 value.',
+    desc: `Nothing freezes an ember: immune to Freeze from EVERY source, bosses included. Heart cards are also worth +${EMBERHEART_HEART_VALUE} value.`,
     props: { immuneFreeze: 1, immuneFreezeAll: 1 },
-    mods: { suitValue: { hearts: 5 } },
+    mods: { suitValue: { hearts: EMBERHEART_HEART_VALUE } },
   },
   {
     id: 'clarityBell', name: 'Bell of Clarity', rarity: 'rare', price: 95,
@@ -1355,8 +1430,8 @@ export const ARTIFACT_POOL = [
     // becomeGoldenSpud: three fights in, everything about it changes in place.
     id: 'potato', name: 'Potato', rarity: 'rare', price: 95,
     icon: 'icon_lucky', tint: 0xb08040,
-    desc: '+1 value. It is a potato.',
-    mods: { flatValue: 1 },
+    desc: `+${POTATO_VALUE} value. It is a potato.`,
+    mods: { flatValue: POTATO_VALUE },
     hooks: {
       fightEnd(scene, a) {
         bank(a, 'fights');
@@ -1376,7 +1451,8 @@ export const ARTIFACT_POOL = [
     // already knowing what you did in Act I.
     id: 'duckOfDoom', name: 'Duck of Doom', rarity: 'rare', price: 125,
     icon: 'icon_drop', tint: 0xffd23e,
-    desc: '+1 value for every ANIMAL you have killed this run. It was already counting before you found it.',
+    // A SCALER (off the kill ledger), so LEFT ALONE by THE HANDS OVERHAUL.
+    desc: `+${DUCK_VALUE_PER_ANIMAL} value for every ANIMAL you have killed this run. It was already counting before you found it.`,
     mods(a, run) { return { flatValue: animalsSlain(run) * DUCK_VALUE_PER_ANIMAL }; },
     liveDesc(a, run) {
       const n = animalsSlain(run);
@@ -1434,9 +1510,9 @@ export const ARTIFACT_POOL = [
   {
     id: 'starChart', name: 'Star Chart', rarity: 'veryRare', price: 195,
     icon: 'icon_star', tint: 0xffd23e,
-    desc: 'Adds four STAR cards to your deck: wild suit, scoring as YOUR suit ({SUIT}), and worth +10 value each.',
+    desc: `Adds four STAR cards to your deck: wild suit, scoring as YOUR suit ({SUIT}), and worth +${STAR_CHART_VALUE} value each.`,
     uncopyable: true,
-    mods: { modValue: { star: 10 } },
+    mods: { modValue: { star: STAR_CHART_VALUE } },
     onAcquire(run, inst) {
       const ids = [];
       for (const rank of [7, 9, 11, 13]) {
@@ -1631,7 +1707,11 @@ export const ARTIFACT_POOL = [
   {
     id: 'crownHighRoller', name: 'Crown of the High Roller', rarity: 'legendary', price: 310,
     icon: 'icon_star', tint: 0xffc542,
-    desc: 'If the FIRST hand of a fight is a lone ACE, that Ace is worth +10 value and a copy of it is crowned into your deck, forever.',
+    // The other DELIBERATE DUD, nudged 10 -> 15. The value is not the reason to
+    // hold the Crown (the forged Ace is), and demanding a lone Ace as your
+    // OPENING hand is a real cost. See ACE_CROWN_VALUE, which CombatScene reads
+    // when it grants the bonus.
+    desc: `If the FIRST hand of a fight is a lone ACE, that Ace is worth +${ACE_CROWN_VALUE} value and a copy of it is crowned into your deck, forever.`,
     props: { aceCrown: 1 },
     hooks: {
       // The scene owns the once-per-fight latch (_crownDone) so a mirrored
@@ -2128,11 +2208,16 @@ export function rollShopStock(ownedIds, count = 5, rng = Math.random, heroId = n
 
 /**
  * Elite drop: rarity roll (Hero Exclusive ~2%, Mythical ~0.6%), optionally
- * shifted up `rarityBoost` steps (Bounty Board — the boost still stops at
- * Legendary, so it can never manufacture an exclusive or a myth).
+ * shifted up `rarityBoost` steps — capped at Legendary, so a boost can never
+ * manufacture an exclusive or a myth.
  *
- * The roll is act-scaled (see actRarityFactor); the BOOST is not, because it is
- * a promise the Bounty Board makes out loud.
+ * NOTE (JC, 2026-08-06): the Bounty Board no longer rides this per-roll boost.
+ * The game's shelf calls this with 0 and promotes ONE offering afterwards
+ * (elites.js promoteOneOffering) — boosting all three read as OP, and the
+ * per-roll path never touched Forged shelves at all. The parameter stays: it
+ * is a correct primitive and the tests exercise it directly.
+ *
+ * The roll is act-scaled (see actRarityFactor); the BOOST is not.
  */
 export function rollEliteDrop(ownedIds, rarityBoost = 0, rng = Math.random, heroId = null, actIndex = null) {
   const ok = a => !ownedIds.includes(a.id) && eligibleFor(a, heroId);

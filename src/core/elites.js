@@ -20,7 +20,7 @@
  * free of Phaser, stays unit-testable in plain Node.
  */
 
-import { ARTIFACT_POOL, ARTIFACT_RARITY, eligibleFor, rarityWeight, rollEliteDrop } from './artifacts.js';
+import { ARTIFACT_POOL, ARTIFACT_RARITY, RARITY_ORDER, eligibleFor, rarityWeight, rollEliteDrop } from './artifacts.js';
 import { POTION_POOL, POTION_RARITY_ORDER } from './potions.js';
 
 /** How many things stand on the shelf. */
@@ -130,9 +130,9 @@ export function rollEliteSpoils({
   const artifact = () => {
     const def = forged
       ? rollForgedArtifact(takenArt, rng, heroId, actIndex)
-      // The Bounty Board's rarityBoost still applies to an ordinary elite, and
-      // is still not act-scaled: it is a promise the relic makes out loud.
-      : rollEliteDrop(takenArt, rarityBoost, rng, heroId, actIndex);
+      // Rolled UNBOOSTED since 2026-08-06: the Bounty Board is applied once,
+      // to one offering, after the shelf is built (promoteOneOffering below).
+      : rollEliteDrop(takenArt, 0, rng, heroId, actIndex);
     if (!def) return null;
     takenArt.push(def.id);
     return { kind: 'artifact', def };
@@ -158,5 +158,43 @@ export function rollEliteSpoils({
     const art = artifact();
     if (art) out[Math.floor(rng() * out.length)] = art;
   }
+  promoteOneOffering(out, rarityBoost, takenArt, rng, heroId);
   return out;
+}
+
+/**
+ * THE BOUNTY BOARD'S PROMOTION (JC, 2026-08-06). The board used to raise EVERY
+ * artifact roll on an ordinary shelf a tier — and, by omission, none at all on
+ * a Forged one: rollForgedArtifact was never handed the boost, which is the
+ * bug JC caught (a Forged elite paid three flat rares straight past the
+ * board). Both halves were wrong, in opposite directions.
+ *
+ * The rule now: ONE offering on the shelf is promoted `steps` tiers, ordinary
+ * and Forged alike. A promotion is a REPLACEMENT at the higher tier — a
+ * different, unowned relic — not a re-label. The cap is still Legendary (a
+ * boost can never manufacture a Hero Exclusive or a Mythical), offerings
+ * already at or above the cap are not candidates, and if the higher tier has
+ * nothing left the promotion walks back down toward the original and, at
+ * worst, changes nothing. Applied after the artifact guarantee, to a random
+ * artifact pedestal, so the shelf never leaks which one the board touched
+ * beyond the rarity it prints.
+ */
+function promoteOneOffering(out, steps, takenArt, rng, heroId) {
+  if (!(steps > 0)) return;
+  const CAP = RARITY_ORDER.indexOf('legendary');
+  const candidates = out
+    .map((e, i) => ({ e, i }))
+    .filter(({ e }) => e.kind === 'artifact' && RARITY_ORDER.indexOf(e.def.rarity) < CAP);
+  if (!candidates.length) return;
+  const { e, i } = candidates[Math.floor(rng() * candidates.length)];
+  const ok = a => !takenArt.includes(a.id) && eligibleFor(a, heroId);
+  const from = RARITY_ORDER.indexOf(e.def.rarity);
+  for (let t = Math.min(from + steps, CAP); t > from; t--) {
+    const pool = ARTIFACT_POOL.filter(a => a.rarity === RARITY_ORDER[t] && ok(a));
+    if (!pool.length) continue;
+    const def = pool[Math.floor(rng() * pool.length)];
+    takenArt.push(def.id);
+    out[i] = { kind: 'artifact', def, promoted: true };
+    return;
+  }
 }

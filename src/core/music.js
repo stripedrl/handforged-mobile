@@ -7,6 +7,8 @@
  * NOTHING HERE IS PRELOADED. Every track is fetched the first time its pool is
  * asked for (see playMusic), and BootScene loads no audio at all, so the 430MB
  * of music on disk costs nothing at boot — only at download.
+ *
+ * ...AND NOTHING HERE IS KEPT. See THE BUFFER SWEEP, below.
  */
 
 import { settings } from './settings.js';
@@ -127,9 +129,13 @@ export function skipTrack(scene) {
 export function musicDebug() {
   return {
     current: current?.kind ?? null,
+    key: current?.key ?? null,
     playing: !!current?.sound?.isPlaying,
     pending: pending?.kind ?? null,
     tracked: live.size,
+    // How many decoded music buffers the sweep has left resident. One, once
+    // playback settles; two only for the length of a crossfade.
+    resident: audioMem().music.count,
   };
 }
 
@@ -174,7 +180,162 @@ function reapExcept(keep, graceMs = 750) {
       live.delete(snd);
     }, graceMs);
   }
+  // The buffers the reaped sounds were playing FROM outlive the sounds. Sweep
+  // them a beat after the reap lands, on the same native clock and for the same
+  // reason: a scene restart must not be able to cancel a cleanup.
+  setTimeout(evictMusicCache, graceMs + 40);
 }
+
+// ---------------------------------------------------------------------------
+// THE BUFFER SWEEP (2026-08-06) — the fix for iOS Safari's 1.25GB wall
+// ---------------------------------------------------------------------------
+// `snd.destroy()` frees a Sound OBJECT. It does not free the AudioBuffer the
+// sound was reading, because that buffer belongs to `cache.audio`, and Phaser's
+// caches are forever by design — a loaded key stays loaded until the game dies.
+//
+// For textures that is the right call. For music it is fatal arithmetic: decoded
+// PCM is sampleRate x channels x seconds x 4 bytes, so ONE 16.6MB mp3 (48kHz
+// stereo, 8m53s) is 195MB resident, and a fight pool ROTATES on song end. A
+// normal act therefore used to accumulate +300-590MB of decoded audio that
+// nothing would ever play again and nothing would ever release, on top of a
+// budget a phone measures in hundreds of megabytes total.
+//
+// So: AT MOST ONE MUSIC TRACK IS RESIDENT once playback settles. Two exist
+// transiently — for the length of a crossfade — and the outgoing one is dropped
+// when its fade lands.
+//
+// The sweep is a SWEEP and not a ledger on purpose. Every path that retires a
+// track (crossfade in beginPlayback, the hard stop in stopMusic, a skip, a
+// rotation, a scene restart that killed the tweens mid-fade) already funnels
+// through reapExcept, and each one asks the same question a different way. A
+// bookkeeping entry per path is a bookkeeping entry per path to forget. Instead
+// this walks the cache and keeps exactly three things:
+//
+//   1. the committed track (`current`), playing or waiting on the audio unlock,
+//   2. the in-flight request (`pending`), which is mid-load or about to start —
+//      evicting it would strand playMusic's already-taken `exists()` decision,
+//   3. anything still audible, whatever the bookkeeping believes. The reaper's
+//      timers and this sweep are independent clocks; a fade that has not landed
+//      yet keeps its buffer for one more pass.
+//
+// Everything else goes. Re-requesting an evicted track is not a special case:
+// playMusic asks `cache.audio.exists(key)`, gets false, and takes the ordinary
+// lazy-load path it takes for a track that was never loaded at all.
+
+const MUSIC_KEY = /^mus_/;
+
+/** The global cache/sound manager, via any scene we have ever been handed. */
+function audioCache() {
+  try {
+    return lastScene?.cache?.audio
+      ?? (typeof window !== 'undefined' ? window.__game?.cache?.audio : null)
+      ?? null;
+  } catch { return null; }
+}
+function soundManager() {
+  try {
+    return lastScene?.sound
+      ?? (typeof window !== 'undefined' ? window.__game?.sound : null)
+      ?? null;
+  } catch { return null; }
+}
+
+/**
+ * Decoded size of one cache entry, in bytes.
+ *
+ * Web Audio hands us an AudioBuffer: `length` frames x channels x 4 (Float32).
+ * NOTE this is the DECODED rate, not the file's — decodeAudioData resamples
+ * everything to the AudioContext's sample rate, which is why re-encoding a file
+ * to 22kHz shrinks the download but not the residency unless the context rate
+ * moves with it (see tools/build_mobile.py). The HTML5-Audio fallback caches an
+ * <audio> element instead, which streams and costs nothing measurable here.
+ */
+function bufferBytes(buf) {
+  return (buf && typeof buf.length === 'number' && buf.numberOfChannels)
+    ? buf.length * buf.numberOfChannels * 4
+    : 0;
+}
+
+/** Drop every decoded music buffer that is not current, pending or audible. */
+function evictMusicCache() {
+  const cache = audioCache();
+  if (!cache) return 0;
+  const sm = soundManager();
+
+  const keep = new Set();
+  if (current?.key) keep.add(current.key);
+  if (pending?.key) keep.add(pending.key);
+  for (const snd of live) {
+    try { if (snd.isPlaying || snd.isPaused) keep.add(snd.key); } catch { /* freed */ }
+  }
+
+  let freed = 0;
+  // Snapshot: getKeys() reads the live cache map, which the loop then mutates.
+  for (const key of Array.from(cache.getKeys())) {
+    if (!MUSIC_KEY.test(key) || keep.has(key)) continue;
+    freed += bufferBytes(cache.get(key));
+    // ORDER MATTERS. Every Sound built from this key holds its OWN reference to
+    // the AudioBuffer, so the cache entry is only the LAST reference once the
+    // sounds are gone. Drop the sounds, then the entry.
+    try { sm?.removeByKey(key); } catch { /* no manager yet */ }
+    try { cache.remove(key); } catch { /* raced with a scene teardown */ }
+  }
+  return freed;
+}
+
+/**
+ * `__hfAudioMem()` — what is actually decoded and resident, right now.
+ *
+ * The number this whole exercise is about, readable from the console and from a
+ * driver (tools/verify_audio_mem.py). Pass `true` for the full per-key list;
+ * the default keeps the console dump to the ten biggest.
+ */
+export function audioMem(all = false) {
+  const cache = audioCache();
+  const sm = soundManager();
+  const out = {
+    bytes: 0, count: 0,
+    music: { count: 0, bytes: 0, keys: [] },
+    sfx: { count: 0, bytes: 0 },
+    other: { count: 0, bytes: 0 },
+    current: current?.key ?? null,
+    pending: pending?.key ?? null,
+    contextRate: null,
+    top: [],
+  };
+  try { out.contextRate = sm?.context?.sampleRate ?? null; } catch { /* html5 audio */ }
+  if (!cache) return out;
+
+  const rows = [];
+  for (const key of Array.from(cache.getKeys())) {
+    const buf = cache.get(key);
+    const bytes = bufferBytes(buf);
+    const row = {
+      key, bytes,
+      seconds: buf?.duration ? +buf.duration.toFixed(2) : 0,
+      rate: buf?.sampleRate ?? 0,
+      channels: buf?.numberOfChannels ?? 0,
+    };
+    rows.push(row);
+    const g = MUSIC_KEY.test(key) ? out.music : key.startsWith('sfx_') ? out.sfx : out.other;
+    g.count++; g.bytes += bytes;
+    if (g === out.music) out.music.keys.push(row);
+    out.count++; out.bytes += bytes;
+  }
+  rows.sort((a, b) => b.bytes - a.bytes);
+  out.top = all ? rows : rows.slice(0, 10);
+  out.mb = +(out.bytes / 1048576).toFixed(1);
+  out.musicMB = +(out.music.bytes / 1048576).toFixed(1);
+  out.sfxMB = +(out.sfx.bytes / 1048576).toFixed(1);
+  return out;
+}
+
+// Autonomous-playtest hook. Registered at module scope rather than from a scene
+// because the question "what is resident?" outlives every individual scene, and
+// because the answer must be available on the title screen, before any scene
+// that owns a __hf* hook has run. (Same guarded idiom as core/settings.js — the
+// unit tests import this module under node, where there is no window.)
+try { window.__hfAudioMem = audioMem; } catch { /* node */ }
 
 /**
  * SHUFFLE BAGS (2026-08-03, PATCH 0803-B §4.1).
@@ -286,6 +447,14 @@ export function playMusic(scene, kind) {
 function beginPlayback(scene, kind, key, token) {
   const sm = scene.sound;
 
+  // Sweep BEFORE adding a third sound, not only on the timer behind the reap.
+  // Toggling in and out of the merchant faster than the 780ms reap could leave
+  // a straggler resident behind the outgoing track and the incoming one — three
+  // buffers where the cap is two. Nothing audible and nothing pending is ever
+  // dropped here (the outgoing track is still playing, `key` is still `pending`),
+  // so this only ever collects what the last transition already finished with.
+  evictMusicCache();
+
   if (current?.sound?.isPlaying) {
     // Best-effort crossfade; the reaper below guarantees the stop even if
     // this scene (and its tweens) dies mid-fade.
@@ -300,7 +469,9 @@ function beginPlayback(scene, kind, key, token) {
   const snd = sm.add(key, { loop: !kind.startsWith('fight') && !POOLS[kind]?.once, volume: 0 });
   live.add(snd);
   snd.once('destroy', () => live.delete(snd));
-  current = { sound: snd, kind };
+  // `key` rides along so the buffer sweep can tell the ONE track it must not
+  // evict from the pile it must. See evictMusicCache().
+  current = { sound: snd, kind, key };
   reapExcept(snd, FADE_OUT + 80);
 
   const start = () => {

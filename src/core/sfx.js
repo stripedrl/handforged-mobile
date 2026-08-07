@@ -103,6 +103,40 @@ export function sfxCapped(scene, key, { volume = 1, rate = 1 } = {}, capMs = 700
   return snd;
 }
 
+/**
+ * LOOPING SFX RE-READ THE SLIDER (JC, 2026-08-06).
+ *
+ * A one-shot takes `settings.master * settings.sfx` at the moment it is played
+ * and is gone before anyone can change it. A LOOP is different: the low-health
+ * heartbeat (CombatScene.updateHeartbeat) is started once, at whatever the
+ * volume was then, and then runs for the rest of the fight — so turning SFX
+ * down in the settings menu while you are at 12 HP turned everything down
+ * EXCEPT the sound you were trying to silence. There is no Phaser-side "sfx
+ * bus" to ride: `scene.sound.volume` is the master and music shares it.
+ *
+ * So a live loop registers a re-apply callback here and the volume rows call
+ * refreshSfxVolume() alongside refreshMusicVolume(). Callbacks, not sound
+ * objects, because the owner knows its own base level and whether a fade is in
+ * flight that has to be killed first.
+ */
+const SFX_LOOPS = new Set();
+
+/** The bus level a looping sfx should be sitting at right now. */
+export function sfxBusVolume() { return settings.master * settings.sfx; }
+
+/** Register a live loop. Returns the unregister function — call it on shutdown. */
+export function registerSfxLoop(apply) {
+  SFX_LOOPS.add(apply);
+  return () => SFX_LOOPS.delete(apply);
+}
+
+/** Re-apply the bus level to every registered loop. Called when a slider moves. */
+export function refreshSfxVolume() {
+  for (const apply of [...SFX_LOOPS]) {
+    try { apply(sfxBusVolume()); } catch { SFX_LOOPS.delete(apply); }
+  }
+}
+
 /** Diagnostic used by the settings menu's SFX TEST row. */
 export function sfxDiagnostic(scene) {
   const cached = SFX_FILES.filter(f => scene.cache.audio.exists('sfx_' + f.replace(/\.[^.]+$/, ''))).length;

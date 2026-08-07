@@ -57,6 +57,13 @@ export function potionSellValue(pot) {
 export const SHOP_MYTHIC_POTION_CHANCE = 0.01;
 
 /**
+ * LIQUID ICE, the only potion on the FLAT VALUE channel — buffed 10 -> 20 by
+ * THE HANDS OVERHAUL (2026-08-06) alongside the flat value relics. Both the
+ * effect and the label read this, so the bottle cannot lie about itself.
+ */
+export const LIQUID_ICE_VALUE = 20;
+
+/**
  * Effect descriptor cheat-sheet (interpreted by the scenes):
  *  { type:'shield', value }           — gain shield now (combat)
  *  { type:'draw', value }             — draw N extra cards into this hand
@@ -213,10 +220,13 @@ export const POTION_POOL = [
     effect: { type: 'transform' },
   },
   {
+    // 10 -> 20 (THE HANDS OVERHAUL, 2026-08-06). Same dilution that hit every
+    // flat VALUE relic: hands now bring their own base value to the score side,
+    // so a flat bottle bought a much smaller share than it was priced for.
     id: 'liquidIce', name: 'Liquid Ice', rarity: 'rare', price: 55,
     tint: 0x9fe8ff, use: 'combat',
-    desc: 'Drink: your next played hand is worth +10 value. Hydrates.',
-    effect: { type: 'handValue', value: 10 },
+    desc: `Drink: your next played hand is worth +${LIQUID_ICE_VALUE} value. Hydrates.`,
+    effect: { type: 'handValue', value: LIQUID_ICE_VALUE },
   },
   {
     id: 'potionOfPoof', name: 'Potion of Poof', rarity: 'rare', price: 60,

@@ -355,8 +355,20 @@ export const ENEMY_DEFS = {
   },
 
   // ============ ACT II — THE FROZEN WAYSIDE (freeze/brittle world) ============
+  //
+  // SCALES REBASED x1.5 ON 2026-08-06. Fourteen creatures across this act and
+  // the Abyss shipped on a 1350x1275 canvas — an exact 1.5x of the standard
+  // 900x850 enemy frame — with their `scale` dialled DOWN by two thirds to
+  // compensate, so the game held 6.57 MB of decoded texture to draw a body it
+  // then shrank. tools/normalize_enemy_frames.py put the art on the standard
+  // frame and every affected `scale` here was multiplied by 1.5, which makes
+  // the drawn size arithmetically identical (1350 x 0.30 == 900 x 0.45 == 405
+  // px), not merely close. tools/verify_enemy_frames.py measures the before and
+  // after in a live fight and gates at 1%. In this act: northernFighter,
+  // iceElemental, yeti, woolyMammoth, alphaMammoth, frostGuardian,
+  // winterPhoenix. Do NOT "tidy" these back down without re-cutting the art.
   northernFighter: {
-    id: 'northernFighter', death: 'humanoid', name: 'Northern Fighter', sprite: 'en_northern_fighter', scale: 0.24,
+    id: 'northernFighter', death: 'humanoid', name: 'Northern Fighter', sprite: 'en_northern_fighter', scale: 0.36,
     maxHp: 85, chips: 22,
     intents: [
       { label: 'Attack', effects: [A(7)] },
@@ -365,7 +377,7 @@ export const ENEMY_DEFS = {
     ],
   },
   iceElemental: {
-    id: 'iceElemental', death: 'creature', name: 'Ice Elemental', sprite: 'en_ice_elemental', scale: 0.26,
+    id: 'iceElemental', death: 'creature', name: 'Ice Elemental', sprite: 'en_ice_elemental', scale: 0.39,
     maxHp: 100, chips: 25,
     // Opens the fight already plated (15% of its own health as FROST SHIELD).
     startShield: 15,
@@ -376,7 +388,7 @@ export const ENEMY_DEFS = {
     ],
   },
   yeti: {
-    id: 'yeti', death: 'beast', name: 'Yeti', sprite: 'en_yeti', scale: 0.30,
+    id: 'yeti', death: 'beast', name: 'Yeti', sprite: 'en_yeti', scale: 0.45,
     maxHp: 175, chips: 40,
     intents: [
       { label: 'Attack', effects: [A(13)] },
@@ -386,7 +398,7 @@ export const ENEMY_DEFS = {
     ],
   },
   woolyMammoth: {
-    id: 'woolyMammoth', death: 'beast', name: 'Wooly Mammoth', sprite: 'en_wooly_mammoth', scale: 0.32,
+    id: 'woolyMammoth', death: 'beast', name: 'Wooly Mammoth', sprite: 'en_wooly_mammoth', scale: 0.48,
     maxHp: 260, chips: 45,
     intents: [
       { label: 'Attack', effects: [A(12)] },
@@ -396,7 +408,7 @@ export const ENEMY_DEFS = {
     ],
   },
   alphaMammoth: {
-    id: 'alphaMammoth', death: 'large', name: 'Alpha Wooly Mammoth', sprite: 'en_alpha_mammoth', scale: 0.38, elite: true,
+    id: 'alphaMammoth', death: 'large', name: 'Alpha Wooly Mammoth', sprite: 'en_alpha_mammoth', scale: 0.57, elite: true,
     maxHp: 380, chips: 70,
     intents: [
       { label: 'Attack', effects: [A(16)] },
@@ -413,7 +425,7 @@ export const ENEMY_DEFS = {
    * cadence, which is derived (aegisImmuneOn) rather than stored.
    */
   frostGuardian: {
-    id: 'frostGuardian', death: 'large', name: 'Frost Guardian', sprite: 'en_frost_guardian', scale: 0.36, elite: true,
+    id: 'frostGuardian', death: 'large', name: 'Frost Guardian', sprite: 'en_frost_guardian', scale: 0.54, elite: true,
     maxHp: 300, chips: 70,
     special: 'glacialAegis',
     intents: [
@@ -533,7 +545,7 @@ export const ENEMY_DEFS = {
     ],
   },
   winterPhoenix: {
-    id: 'winterPhoenix', death: 'large', name: 'THE WINTER PHOENIX', sprite: 'boss_winter_phoenix', scale: 0.5, boss: true, flipX: true,
+    id: 'winterPhoenix', death: 'large', name: 'THE WINTER PHOENIX', sprite: 'boss_winter_phoenix', scale: 0.75, boss: true, flipX: true,
     maxHp: 640, chips: 200,
     intents: [
       { label: 'Attack', effects: [A(14)] },
@@ -604,8 +616,11 @@ export const ENEMY_DEFS = {
   },
 
   // ============ ACT III — THE ABYSS (poison/fear world) ============
+  // SCALES REBASED x1.5 ON 2026-08-06 — see the note over ACT II. The seven
+  // here: lonelyWraith, abyssalWarrior, deepSerpent, undeadGuardian,
+  // ancientGuardian, wellOfSouls, theKeeper.
   lonelyWraith: {
-    id: 'lonelyWraith', death: 'humanoid', name: 'Lonely Wraith', sprite: 'en_lonely_wraith', scale: 0.26,
+    id: 'lonelyWraith', death: 'humanoid', name: 'Lonely Wraith', sprite: 'en_lonely_wraith', scale: 0.39,
     maxHp: 130, chips: 35,
     intents: [
       { label: 'Attack', effects: [A(8), FX('fear', 1)] },
@@ -615,7 +630,7 @@ export const ENEMY_DEFS = {
     ],
   },
   abyssalWarrior: {
-    id: 'abyssalWarrior', death: 'humanoid', name: 'Abyssal Warrior', sprite: 'en_abyssal_warrior', scale: 0.30,
+    id: 'abyssalWarrior', death: 'humanoid', name: 'Abyssal Warrior', sprite: 'en_abyssal_warrior', scale: 0.45,
     maxHp: 180, chips: 40,
     intents: [
       { label: 'Attack', effects: [A(14)] },
@@ -625,7 +640,7 @@ export const ENEMY_DEFS = {
     ],
   },
   deepSerpent: {
-    id: 'deepSerpent', death: 'creature', name: 'Deep Serpent', sprite: 'en_deep_serpent', scale: 0.30,
+    id: 'deepSerpent', death: 'creature', name: 'Deep Serpent', sprite: 'en_deep_serpent', scale: 0.45,
     maxHp: 160, chips: 40,
     intents: [
       { label: 'Attack', effects: [A(9), FX('poison', 4)] },
@@ -635,7 +650,7 @@ export const ENEMY_DEFS = {
     ],
   },
   undeadGuardian: {
-    id: 'undeadGuardian', death: 'humanoid', name: 'Undead Guardian', sprite: 'en_undead_guardian', scale: 0.30,
+    id: 'undeadGuardian', death: 'humanoid', name: 'Undead Guardian', sprite: 'en_undead_guardian', scale: 0.45,
     maxHp: 280, chips: 45,
     intents: [
       { label: 'Attack', effects: [A(12)] },
@@ -645,7 +660,7 @@ export const ENEMY_DEFS = {
     ],
   },
   ancientGuardian: {
-    id: 'ancientGuardian', death: 'large', name: 'Ancient Guardian', sprite: 'en_ancient_guardian', scale: 0.38, elite: true,
+    id: 'ancientGuardian', death: 'large', name: 'Ancient Guardian', sprite: 'en_ancient_guardian', scale: 0.57, elite: true,
     maxHp: 420, chips: 80,
     intents: [
       { label: 'Attack', effects: [A(17)] },
@@ -656,7 +671,7 @@ export const ENEMY_DEFS = {
     ],
   },
   wellOfSouls: {
-    id: 'wellOfSouls', death: 'creature', name: 'The Well of Souls', sprite: 'en_well_of_souls', scale: 0.34, elite: true,
+    id: 'wellOfSouls', death: 'creature', name: 'The Well of Souls', sprite: 'en_well_of_souls', scale: 0.51, elite: true,
     maxHp: 320, chips: 80,
     intents: [
       { label: 'Attack', effects: [A(11), FX('poison', 3)] },
@@ -756,7 +771,7 @@ export const ENEMY_DEFS = {
     ],
   },
   theKeeper: {
-    id: 'theKeeper', death: 'keeper', name: 'THE KEEPER', sprite: 'boss_keeper', scale: 0.48, boss: true,
+    id: 'theKeeper', death: 'keeper', name: 'THE KEEPER', sprite: 'boss_keeper', scale: 0.72, boss: true,
     maxHp: 800, chips: 250,
     intents: [
       { label: 'Attack', effects: [A(16)] },
@@ -823,6 +838,15 @@ export const ENEMY_DEFS = {
   depthKnight: {
     id: 'depthKnight', death: 'large', name: 'THE DEPTH KNIGHT', sprite: 'boss_depth_knight_atk',
     scale: 0.70, boss: true,
+    /**
+     * `spriteAlt` — the SECOND texture this body wears, declared here so the
+     * asset loader can see it (core/lazyload.js walks it with `sprite`,
+     * `spriteVariants` and `spriteForHero`). CombatScene.groundSprite still
+     * names 'boss_depth_knight_def' at the call site, because the swap is
+     * choreography and not data; this field exists purely so the shell is
+     * already in the cache the turn he raises it, rather than popping in.
+     */
+    spriteAlt: ['boss_depth_knight_def'],
     /**
      * 0.70x the act-III boss anchor (theKeeper 800) = 21,000 in the fight.
      * He is IMMUNE on every DEF turn, so you only get HALF the damage windows

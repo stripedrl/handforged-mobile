@@ -65,6 +65,23 @@ export function oracleFaceKey(scene, def) {
   return scene.textures.exists(key) ? key : null;
 }
 
+/**
+ * THE SAME KEY, ASKED BY ID AND WITHOUT A SCENE — what the LOADER needs.
+ *
+ * The chip wears one of THE ORACLE's twenty painted cards for the whole run, and
+ * those twenty are deferred art (core/lazyload.js): the shelf is fetched on
+ * arrival at the first map and released the moment a future is taken. Exactly
+ * one of them has to survive that release and be re-fetched by any scene entered
+ * cold, and this is how MapScene and CombatScene name it.
+ *
+ * @param {?string} oracleId run.oracle
+ * @returns {?string} the texture key, whether or not it is loaded
+ */
+export function oracleCardKey(oracleId) {
+  const def = oracleId ? ORACLE_BY_ID[oracleId] : null;
+  return def ? `packcard_oracle_${optionArtSlug(def)}` : null;
+}
+
 /** Whatever tip is open, gone. Safe on a scene that never opened one. */
 export function hideOracleTip(scene) {
   if (scene?.oracleTip) {

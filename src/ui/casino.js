@@ -20,6 +20,7 @@
  */
 
 import { GAME_W, GAME_H, DEPTH, PARCH, CARD } from '../config.js';
+import { ensure, CASINO_BG } from '../core/lazyload.js';
 import { woodPanel } from './panels.js';
 import { sfx } from '../core/sfx.js';
 import { legible, popMessage } from './juice.js';
@@ -275,14 +276,30 @@ export function casinoOverlay(scene, run, gameId, done, { force = null } = {}) {
   // then a dark veil over it so the felt, the cards and the numbers still read.
   // Falls back to the flat dimmer if the painting is missing, which is why the
   // veil is a separate object rather than baked into the image.
-  if (scene.textures.exists('casino_interior')) {
-    const bg = scene.add.image(GAME_W / 2, GAME_H / 2, 'casino_interior');
+  //
+  // IT POPS IN RATHER THAN BEING WAITED FOR (2026-08-06, deferred loading). The
+  // painting left the boot set with every other room backdrop, and this overlay
+  // is the ONE place a gate would cost something real: `window.__hfCasino` is
+  // written synchronously two lines up and tools/verify_casino.py reads it the
+  // moment the overlay is asked for. So the wagon opens on the dimmer it always
+  // fell back to, the fetch runs behind it, and the room fades in underneath the
+  // veil when it lands — which is exactly the fallback path that already
+  // existed, plus an ending.
+  const veil = scene.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0x0a0810, 0.55).setInteractive();
+  const dim = dimmer(scene, 0.9);
+  root.add(dim);
+  root.add(veil);
+  const dressWagon = (fade) => {
+    if (!scene.textures.exists(CASINO_BG) || !root.active) return;
+    const bg = scene.add.image(GAME_W / 2, GAME_H / 2, CASINO_BG).setAlpha(fade ? 0 : 1);
     bg.setScale(Math.max(GAME_W / bg.width, GAME_H / bg.height));
-    root.add(bg);
-    root.add(scene.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0x0a0810, 0.55).setInteractive());
-  } else {
-    root.add(dimmer(scene, 0.9));
-  }
+    root.addAt(bg, 0);
+    if (!fade) return dim.setFillStyle(0x0a0810, 0);
+    scene.tweens.add({ targets: bg, alpha: 1, duration: 220 });
+    scene.tweens.add({ targets: dim, fillAlpha: 0, duration: 220 });
+  };
+  if (scene.textures.exists(CASINO_BG)) dressWagon(false);
+  else ensure(scene, [CASINO_BG]).then(() => dressWagon(true));
   const purse = purseTag(scene, root, run);
 
   // The chrome that outlives every screen: the wagon's name and the game's.

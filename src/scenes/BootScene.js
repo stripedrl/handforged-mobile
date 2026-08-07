@@ -1,370 +1,51 @@
-import { GAME_W, GAME_H, COLORS, CARD, CHARACTERS, PARTICLE_VARIANTS, applyMobileCamera } from '../config.js';
+import { GAME_W, GAME_H, COLORS, CARD, applyMobileCamera } from '../config.js';
 import { wrapImageLoader } from '../core/imgload.js';
 import { WEB_FONTS } from './PrebootScene.js';
 import { bootMark } from '../core/boottime.js';
 import { queueSfx } from '../core/sfx.js';
-import { ARTIFACT_POOL } from '../core/artifacts.js';
-
-/** Art keys owned by a TRANSFORMED relic rather than by a pool entry. */
-const TRANSFORM_ART = ['goldenSpud'];
-import { packCardArtList } from '../core/packs.js';
-import { POTION_POOL } from '../core/potions.js';
-import { ACHIEVEMENTS } from '../core/achievements.js';
-import { SKINS, skinTexture } from '../core/skins.js';
-import { EVENTS, CRIMSON_FORGE } from '../core/events.js';
-import { DUCKS } from '../core/casino.js';
+/**
+ * THE BOOT SET, and what is no longer in it.
+ *
+ * This scene used to name all 648 images by hand, and loading every one of them
+ * cost 1,086 MB of decoded RGBA and 37.5 seconds — enough to get the tab killed
+ * outright on iOS before the Title screen existed. Both halves of that list now
+ * live in core/lazyload.js: BOOT_IMAGES is what is still fetched here, MANIFEST
+ * is everything that waits for the moment it is actually wanted.
+ *
+ * The split, in one line each: the UI chrome, the card frames and pips, every
+ * hero model, the relic and potion icons, the fx and the particles are BOOT —
+ * they are on screen in every room and there is no transition to hide them
+ * behind. The six worlds' backdrops, boards, banners and bestiaries, the fifty
+ * skins, the seventy-two pack cards, the fifteen event paintings and the painted
+ * cardfaces are DEFERRED — a run walks one world at a time, wears one skin,
+ * opens one pack and plays one hero.
+ *
+ * See core/lazyload.js for the measurements the split was made from.
+ */
+import { BOOT_IMAGES } from '../core/lazyload.js';
 
 export class BootScene extends Phaser.Scene {
   constructor() { super('Boot'); }
 
   preload() {
     bootMark('bootPreload');
-    // THE IMG_EXT OVERRIDE — the whole of the dist's image-format story, and
-    // the one thing every `${A}/....png` below depends on. It moved to
-    // core/imgload.js when PrebootScene became a second scene that loads files;
-    // the essay explaining it lives there.
+    // THE IMG_EXT OVERRIDE — the whole of the dist image-format story. Every
+    // path in BOOT_IMAGES was written as a `.png` at its declaration and is
+    // rewritten there (core/lazyload.js applies IMG_EXT once, the same way
+    // core/imgload.js does for a loader); this wrapper stays because it is
+    // unconditional, idempotent on an already-rewritten url, and the thing
+    // that guarantees a hand-added load here can never ship a .png 404.
     wrapImageLoader(this);
 
-    // The loading screen is built BEFORE the 590 loads are queued, so its own
+    // The loading screen is built BEFORE the loads are queued, so its own
     // 'progress' listener is attached before the first byte lands.
     this.buildLoadingScreen();
 
-    const A = 'assets';
-    // Cards
-    this.load.image('card_border', `${A}/cards/CardFrame_01_BorderGray.png`);
-    this.load.image('card_border_purple', `${A}/cards/CardFrame_01_BorderPurple.png`);
-    this.load.image('card_deco_l', `${A}/cards/CardFrame_01_BorderGray_DecoLeft.png`);
-    this.load.image('card_deco_r', `${A}/cards/CardFrame_01_BorderGray_DecoRight.png`);
-    this.load.image('card_inner_top', `${A}/cards/CardFrame_01_InnerDecoTop.png`);
-    this.load.image('card_bg', `${A}/cards/CardFrame_01_Bg.png`);
-    // Pips (white silhouettes -> tinted per suit)
-    this.load.image('pip_sword', `${A}/pips/function_icon_sword_1.png`);
-    this.load.image('pip_heart', `${A}/pips/function_icon_heart.png`);
-    this.load.image('pip_gem', `${A}/pips/function_icon_diamond.png`);
-    // (the club pip is a generated silhouette — see 'pip_club' in create())
-    // Backgrounds
-    this.load.image('bg_forest', `${A}/bg/forest.png`);
-    this.load.image('bg_panel_grad', `${A}/bg/panel_gradient.png`);
-    // Characters & enemies
-    this.load.image('char_archer', `${A}/chars/Character_Sample_02.png`);
-    this.load.image('hero_duelist', `${A}/chars/hero_duelist.png`);
-    this.load.image('hero_cleric', `${A}/chars/hero_cleric.png`);
-    this.load.image('hero_diamond_knight', `${A}/chars/hero_diamond_knight.png`);
-    this.load.image('hero_trickster', `${A}/chars/hero_trickster.png`);
-    this.load.image('char_platform', `${A}/chars/Character_Platform.png`);
-    this.load.image('char_backglow', `${A}/chars/Character_BackGlow.png`);
-    // Locked-hero silhouettes for the RECORDS shelf (tinted to black in-scene).
-    this.load.image('silhouette_1', `${A}/chars/Character_Sample_04.png`);
-    this.load.image('silhouette_2', `${A}/chars/Character_Sample_05.png`);
-    this.load.image('silhouette_3', `${A}/chars/Character_Sample_06.png`);
-    this.load.image('enemy_wolf', `${A}/chars/Character_Sample_09.png`);
-    this.load.image('enemy_twohead', `${A}/chars/Character_Sample_10.png`);
-    this.load.image('enemy_dragon', `${A}/chars/Character_Sample_08.png`);
-    // Chapter 1 roster (Caleb art)
-    this.load.image('enemy_wolf_cub', `${A}/chars/enemy_wolf_cub.png`);
-    this.load.image('enemy_wild_boar', `${A}/chars/enemy_wild_boar.png`);
-    this.load.image('enemy_green_slime', `${A}/chars/enemy_green_slime.png`);
-    this.load.image('enemy_alpha_wolf', `${A}/chars/enemy_alpha_wolf.png`);
-    this.load.image('enemy_alpha_boar', `${A}/chars/enemy_alpha_boar.png`);
-    this.load.image('enemy_tree_blight', `${A}/chars/enemy_tree_blight.png`);
-    this.load.image('boss_wolfowl', `${A}/chars/boss_wolfowl.png`);
-    // Forest reinforcements (Caleb, 2026-07-29 late)
-    this.load.image('enemy_woodling_imp', `${A}/chars/enemy_woodling_imp.png`);
-    this.load.image('enemy_shroom_fiend', `${A}/chars/enemy_shroom_fiend.png`);
-    this.load.image('enemy_knight_hawk', `${A}/chars/enemy_knight_hawk.png`);
-    this.load.image('enemy_bear_mauler', `${A}/chars/enemy_bear_mauler.png`);
-    this.load.image('bg_forest_verdant', `${A}/bg/forest_verdant.png`);
-    this.load.image('bg_menu_tavern', `${A}/bg/menu_tavern.png`);
-    // Act II — The Frozen Wayside (Caleb)
-    this.load.image('bg_frozen', `${A}/bg/frozen_wayside.png`);
-    this.load.image('en_northern_fighter', `${A}/chars/en_northern_fighter.png`);
-    this.load.image('en_ice_elemental', `${A}/chars/en_ice_elemental.png`);
-    this.load.image('en_yeti', `${A}/chars/en_yeti.png`);
-    this.load.image('en_wooly_mammoth', `${A}/chars/en_wooly_mammoth.png`);
-    this.load.image('en_alpha_mammoth', `${A}/chars/en_alpha_mammoth.png`);
-    this.load.image('en_frost_guardian', `${A}/chars/en_frost_guardian.png`);
-    this.load.image('boss_winter_phoenix', `${A}/chars/boss_winter_phoenix.png`);
-    // Frozen Wayside reinforcements (Caleb, 2026-07-29 v.late)
-    this.load.image('en_ice_owl', `${A}/chars/en_ice_owl.png`);
-    this.load.image('en_ice_mage', `${A}/chars/en_ice_mage.png`);
-    this.load.image('en_resurrected_eskimo', `${A}/chars/en_resurrected_eskimo.png`);
-    this.load.image('en_subzero_serpent', `${A}/chars/en_subzero_serpent.png`);
-    this.load.image('en_frost_titan', `${A}/chars/en_frost_titan.png`);
-    // Act III — The Abyss (Caleb)
-    this.load.image('bg_abyss', `${A}/bg/abyss.png`);
-    this.load.image('en_abyssal_warrior', `${A}/chars/en_abyssal_warrior.png`);
-    this.load.image('en_deep_serpent', `${A}/chars/en_deep_serpent.png`);
-    this.load.image('en_lonely_wraith', `${A}/chars/en_lonely_wraith.png`);
-    this.load.image('en_undead_guardian', `${A}/chars/en_undead_guardian.png`);
-    this.load.image('en_ancient_guardian', `${A}/chars/en_ancient_guardian.png`);
-    this.load.image('en_well_of_souls', `${A}/chars/en_well_of_souls.png`);
-    this.load.image('boss_keeper', `${A}/chars/boss_keeper.png`);
-    // Abyss reinforcements (Caleb, 2026-07-29 v.late)
-    this.load.image('en_corrupted_crow', `${A}/chars/en_corrupted_crow.png`);
-    this.load.image('en_ancient_slime', `${A}/chars/en_ancient_slime.png`);
-    this.load.image('en_ancient_necromancer', `${A}/chars/en_ancient_necromancer.png`);
-    this.load.image('en_twins_of_darkness', `${A}/chars/en_twins_of_darkness.png`);
-    this.load.image('en_acidic_monstrosity', `${A}/chars/en_acidic_monstrosity.png`);
-    // ALTERNATE ACT BOSSES (Caleb, 2026-07-31) — one of each act's three is
-    // rolled per run; all are preloaded because the roll happens after Boot.
-    this.load.image('boss_fairy_king', `${A}/chars/boss_fairy_king.png`);
-    this.load.image('boss_sabre_rabbit', `${A}/chars/boss_sabre_rabbit.png`);
-    this.load.image('boss_frost_summoner', `${A}/chars/boss_frost_summoner.png`);
-    this.load.image('boss_polar_guardian', `${A}/chars/boss_polar_guardian.png`);
-    this.load.image('boss_agatha', `${A}/chars/boss_agatha.png`);
-    this.load.image('boss_sinastra', `${A}/chars/boss_sinastra.png`);
-    this.load.image('boss_depth_knight_atk', `${A}/chars/boss_depth_knight_atk.png`);
-    this.load.image('boss_depth_knight_def', `${A}/chars/boss_depth_knight_def.png`);
-    // The Frostbitten Summoner's raised dead — three textures, one def.
-    for (const n of [1, 2, 3]) {
-      this.load.image(`en_bz_skeleton_${n}`, `${A}/chars/en_bz_skeleton_${n}.png`);
-    }
-    // UI
-    this.load.image('btn_yellow', `${A}/ui/Button_Rectangle_01_Convex_Yellow.png`);
-    this.load.image('btn_red', `${A}/ui/Button_Rectangle_01_Convex_Red.png`);
-    this.load.image('btn_blue', `${A}/ui/Button_Rectangle_01_Convex_Blue.png`);
-    this.load.image('btn_dark', `${A}/ui/Button_Rectangle_01_Convex_Dark.png`);
-    this.load.image('btn_gray', `${A}/ui/Button_Rectangle_01_Convex_Gray.png`);
-    this.load.image('btn_green', `${A}/ui/Button_Rectangle_01_Convex_Green.png`);
-    this.load.image('label_tapered', `${A}/ui/Label_Tapered_Basic_35.png`);
-    this.load.image('logo', `${A}/ui/logo.png`);
-    // The potion mat (Caleb): stitched parchment with three worn spots — the
-    // belt UI in both Combat and Map. Geometry lives in ui/potionIcon.js.
-    this.load.image('potion_mat', `${A}/ui/potion_mat.png`);
-    // Caleb's gold chips (2026-07-31): the flat face is the merchant's spinning
-    // coin, the two tilted variants are the act-clear payday rain. Alpha-cropped
-    // from 1024 masters down to 256 — they never draw larger than ~270px.
-    this.load.image('chip_flat', `${A}/ui/chip_flat.png`);
-    this.load.image('chip_tilt_1', `${A}/ui/chip_tilt_1.png`);
-    this.load.image('chip_tilt_2', `${A}/ui/chip_tilt_2.png`);
-    // Caleb's painted wax seals (2026-08-01): the crimson blob is struck "+2♥"
-    // (SEAL_HEAL), the violet one "+3" (STAMP_MULT) — the art states the payout,
-    // so CardSprite draws them untinted and with no legend on top. Alpha-cropped
-    // from 1024 masters to 128; they never draw larger than ~52px on a card.
-    this.load.image('seal_blood', `${A}/ui/seal_blood.png`);
-    this.load.image('seal_mult', `${A}/ui/seal_mult.png`);
-    // ...and the blue one is the ECHO SEAL (0803-B), cropped and scaled to match.
-    this.load.image('seal_echo', `${A}/ui/seal_echo.png`);
-    this.load.image('slider_bg', `${A}/ui/Slider_Border_Tapered_01_Bg.png`);
-    this.load.image('slider_border', `${A}/ui/Slider_Border_Tapered_01_Border.png`);
-    this.load.image('slider_fill_area', `${A}/ui/Slider_Border_Tapered_01_FillArea.png`);
-    // Icons
-    this.load.image('icon_shield', `${A}/icons/function_icon_shield.png`);
-    this.load.image('icon_coins', `${A}/icons/Resource_Icon_Coins.png`);
-    this.load.image('icon_setting', `${A}/icons/function_icon_setting_1.png`);
-    this.load.image('icon_music_note', `${A}/icons/function_icon_music.png`);
-    this.load.image('icon_sound', `${A}/icons/function_icon_sound.png`);
-    this.load.image('icon_volume', `${A}/icons/function_icon_volume.png`);
-    this.load.image('btn_circle_gray', `${A}/ui/Button_Circle_01_Gray.png`);
-    this.load.image('icon_fire', `${A}/icons/function_icon_fire.png`);
-    this.load.image('icon_skull', `${A}/icons/function_icon_skull.png`);
-    this.load.image('icon_magic', `${A}/icons/function_icon_magic.png`);
-    this.load.image('icon_trash', `${A}/icons/function_icon_trash.png`);
-    this.load.image('icon_refresh', `${A}/icons/function_icon_refresh.png`);
-    this.load.image('icon_sword_small', `${A}/icons/function_icon_sword_1.png`);
-    this.load.image('icon_star', `${A}/icons/function_icon_star.png`);
-    this.load.image('icon_heart_small', `${A}/icons/function_icon_heart.png`);
-    this.load.image('icon_help', `${A}/icons/function_icon_help.png`);
-    this.load.image('icon_dice', `${A}/icons/function_icon_dice.png`);
-    this.load.image('icon_lucky', `${A}/icons/function_icon_lucky.png`);
-    this.load.image('icon_gem', `${A}/icons/Resource_Icon_Gem.png`);
-    this.load.image('icon_key', `${A}/icons/Resource_Icon_Key.png`);
-    // Painted replacements for two former graphics-generated glyphs (2026-07-30):
-    // the CHARGE intent hourglass (GUI Pro FantasyRPG item icon, 256->128) and
-    // the rest-site campfire (Caleb's 1024 master, ->512). Both are full-colour,
-    // so every consumer must keep tinting them WHITE (INTENT_ICONS already does).
-    this.load.image('icon_hourglass', `${A}/icons/icon_hourglass.png`);
-    this.load.image('icon_campfire', `${A}/icons/icon_campfire.png`);
-    // Artifact art (Caleb, 2026-07-29): one icon per relic, keyed art_<id>.
-    for (const art of ARTIFACT_POOL) {
-      this.load.image('art_' + art.id, `${A}/icons/artifacts/${art.id}.png`);
-    }
-    // TRANSFORMED relics wear an art key that belongs to no pool entry: the
-    // Potato keeps id 'potato' when it becomes the Golden Spud (see
-    // becomeGoldenSpud) and sets `artKey` instead, so its texture has to be
-    // asked for by name. A missing file 404s and falls back, same as any relic.
-    for (const key of TRANSFORM_ART) {
-      this.load.image('art_' + key, `${A}/icons/artifacts/${key}.png`);
-    }
-    // Map node icons (Caleb).
-    this.load.image('map_battle', `${A}/icons/map_battle.png`);
-    this.load.image('map_campfire', `${A}/icons/map_campfire.png`);
-    this.load.image('map_elite', `${A}/icons/map_elite.png`);
-    this.load.image('map_merchant', `${A}/icons/map_merchant.png`);
-    this.load.image('map_event', `${A}/icons/map_event.png`);
-    // Booster pack covers (Caleb).
-    // ('bounty' is the act-boss payoff wrap, and 'oracle' the start-of-run one:
-    // both are awarded rather than drafted, though THE ORACLE'S HUNTER can seat
-    // the bounty wrap at the ordinary table for a run.)
-    for (const k of ['witch', 'smith', 'artisan', 'dealer', 'forge', 'bounty', 'curator', 'oracle']) {
-      this.load.image('pack_' + k, `${A}/ui/pack_${k}.png`);
-    }
-    // OPTION CARDS (JC, 2026-07-31): the Witch, the Dealer, the Forge, the
-    // Smith and the Bounty Hunter deal their options as painted cards, keyed
-    // packcard_<kind>_<name-slug>. The
-    // TITLE is baked into the art, so the renderer draws no text on the face and
-    // hangs the rules on a hover tooltip instead. A missing file 404s and that
-    // ONE option falls back to the old icon panel (per-option, in rewards.js).
-    for (const [kind, slug] of packCardArtList()) {
-      this.load.image(`packcard_${kind}_${slug}`, `${A}/ui/packcards/${kind}_${slug}.png`);
-    }
-    // Potion icons (Caleb, REQUESTS_POTION_ART) — drawn-bottle fallback until
-    // each lands, so 404s here are expected and harmless (same as counterfeit).
-    for (const p of POTION_POOL) {
-      this.load.image('pot_' + p.id, `${A}/icons/potions/${p.id}.png`);
-    }
-    // Achievement tiles (Caleb, REQUESTS_ACHIEVEMENT_ART) — the shelf draws a
-    // gold medal placeholder until each lands, so these 404s are expected and
-    // harmless, exactly like the potion icons above.
-    for (const a of ACHIEVEMENTS) {
-      this.load.image('ach_' + a.id, `${A}/icons/achievements/${a.id}.png`);
-    }
-    // Themed mystery-event backdrops (Caleb, REQUESTS_EVENT_BACKGROUNDS) —
-    // wood panel fallback until each lands; 404s expected and harmless.
-    for (const ev of [...EVENTS, CRIMSON_FORGE]) {
-      this.load.image('evbg_' + ev.id, `${A}/bg/events/${ev.id}.png`);
-    }
-    // THE TRAVELING CASINO's four racing ducks (Caleb's variants, keyed off
-    // their grey backgrounds and normalised to 256px). Keyed by the DUCKS table
-    // so a fifth duck needs no edit here; a missing file 404s and the lane
-    // races a tinted glyph instead, exactly like a missing relic icon.
-    for (const d of DUCKS) this.load.image(d.key, `${A}/casino/${d.key}.png`);
-    // Inside the wagon, painted, for when a game is actually on the table. The
-    // event's own exterior painting is loaded with the other evbg_* art.
-    this.load.image('casino_interior', `${A}/bg/casino_interior.png`);
-    // The merchant's table.
-    this.load.image('bg_merchant', `${A}/bg/merchant.png`);
-    // Custom map boards per biome (Caleb, 2026-07-29).
-    this.load.image('map_board_forest', `${A}/bg/map_board_forest.png`);
-    this.load.image('map_board_frozen', `${A}/bg/map_board_frozen.png`);
-    this.load.image('map_board_abyss', `${A}/bg/map_board_abyss.png`);
-    // Hero card backgrounds (Caleb, 2026-07-29 night) — keyed by character id.
-    // Driven off CHARACTERS rather than a hand-kept list (2026-08-03, Drusky):
-    // a new hero whose files are named to the convention now wires itself, and
-    // one whose files have not landed yet 404s harmlessly like the potions do.
-    const HERO_IDS = Object.keys(CHARACTERS);
-    for (const cid of HERO_IDS) {
-      this.load.image('cardbg_' + cid, `${A}/ui/cardbg_${cid}.png`);
-    }
-    // Painted playing-card FACES per hero (Caleb, 2026-07-30) — replaces the
-    // generated cream face + pack border for any hero that has art. Heroes
-    // without a file just 404 and fall back (the tools/*.py drivers filter it).
-    for (const cid of HERO_IDS) {
-      this.load.image('cardface_' + cid, `${A}/ui/cardface_${cid}.png`);
-    }
-    // Per-SUIT painted faces (Caleb, 2026-07-30) — used when the CARD COLORS
-    // setting is on, so each suit reads by colour at a glance. Same fallback
-    // story as above: a missing file 404s and the neutral face stands in.
-    for (const cid of HERO_IDS) {
-      for (const suit of ['swords', 'hearts', 'gems', 'clovers']) {
-        this.load.image(`cardface_${cid}_${suit}`, `${A}/ui/cardface_${cid}_${suit}.png`);
-      }
-    }
-    // Hero head icons (Caleb) — map token, HUD portraits.
-    for (const cid of HERO_IDS) {
-      this.load.image('hero_icon_' + cid, `${A}/icons/hero_icon_${cid}.png`);
-    }
-    // Boss map icons (Caleb, 2026-07-29 night).
-    this.load.image('boss_icon_wolfowl', `${A}/icons/boss_icon_wolfowl.png`);
-    this.load.image('boss_icon_phoenix', `${A}/icons/boss_icon_phoenix.png`);
-    this.load.image('boss_icon_keeper', `${A}/icons/boss_icon_keeper.png`);
-    // ...and the 2026-07-31 alternates (medallion art per rolled boss).
-    this.load.image('boss_icon_fairy_king', `${A}/icons/boss_icon_fairy_king.png`);
-    this.load.image('boss_icon_sabre_rabbit', `${A}/icons/boss_icon_sabre_rabbit.png`);
-    this.load.image('boss_icon_frost_summoner', `${A}/icons/boss_icon_frost_summoner.png`);
-    this.load.image('boss_icon_polar_guardian', `${A}/icons/boss_icon_polar_guardian.png`);
-    this.load.image('boss_icon_daughters', `${A}/icons/boss_icon_daughters.png`);
-    this.load.image('boss_icon_depth_knight', `${A}/icons/boss_icon_depth_knight.png`);
-    // World title banners (Caleb) for the map header.
-    this.load.image('banner_forest', `${A}/ui/banner_forest.png`);
-    this.load.image('banner_frozen', `${A}/ui/banner_frozen.png`);
-    this.load.image('banner_abyss', `${A}/ui/banner_abyss.png`);
+    // THE WHOLE BOOT SET, in one line. What is in it and why is the essay at
+    // the top of core/lazyload.js; what is NOT in it arrives through ensure()
+    // at the moment the game actually wants it.
+    for (const [key, path] of BOOT_IMAGES) this.load.image(key, path);
 
-    // =====================================================================
-    // THE THREE ALTERNATE WORLDS (2026-08-03)
-    // =====================================================================
-    // A run rolls its worlds at run START, which is long after Boot has
-    // finished, so BOTH halves of every act are preloaded. That is 48 more
-    // textures and it is the only honest option: a lazy load would mean the
-    // first fight of an alternate act draws blank rectangles.
-    //
-    // Furniture first: battle backdrop, map board and title banner per world,
-    // installed by tools/install_biome_worlds.py from the staged drop.
-    this.load.image('bg_nocturnal', `${A}/bg/nocturnal_forest.png`);
-    this.load.image('bg_ethereal', `${A}/bg/ethereal_plains.png`);
-    this.load.image('bg_gallows', `${A}/bg/burning_gallows.png`);
-    this.load.image('map_board_nocturnal', `${A}/bg/map_board_nocturnal.png`);
-    this.load.image('map_board_ethereal', `${A}/bg/map_board_ethereal.png`);
-    this.load.image('map_board_gallows', `${A}/bg/map_board_gallows.png`);
-    this.load.image('banner_nocturnal', `${A}/ui/banner_nocturnal.png`);
-    this.load.image('banner_ethereal', `${A}/ui/banner_ethereal.png`);
-    this.load.image('banner_gallows', `${A}/ui/banner_gallows.png`);
-    // The bestiary. Every key here is the `sprite` (or `spriteForHero` entry) of
-    // a def in core/enemies.js and every file was installed by
-    // tools/install_biome_art.py onto the shared 900x850 canvas, so they need no
-    // special handling at all -- see docs/BIOME_ASSET_MAP.txt.
-    for (const key of [
-      // -- Act I alternate: THE NOCTURNAL FOREST
-      'en_mothling', 'en_lantern_toad', 'en_nightjar', 'en_bramble_stalker',
-      'en_hollow_fawn', 'en_glowcap_shambler', 'en_dreamweaver_spider', 'en_pocket_moth',
-      'en_sleepless_stag', 'en_widow_canopy', 'en_strixursa', 'en_moonwell_horror',
-      'boss_night_mother', 'boss_hollow_king', 'boss_grimwatch',
-      // -- Act II alternate: THE ETHEREAL PLAINS
-      'en_veilkin', 'en_mote_swarm', 'en_echo_knight', 'en_driftbeast',
-      'en_glass_sylph', 'en_thoughtless_one', 'en_prism_stag', 'en_whisper_thief',
-      // en_choir_motes is en_mote_swarm recoloured and one size up -- the Choir
-      // has no painted art yet (flagged for JC). See install_biome_worlds.py.
-      'en_choir_motes', 'en_long_sleeper', 'en_weft_warden',
-      // THE MIRRORWALKER is one def with five textures, picked by hero at spawn.
-      'en_mirrorwalker_highroller', 'en_mirrorwalker_zealot', 'en_mirrorwalker_bulwark',
-      'en_mirrorwalker_venomancer', 'en_mirrorwalker_hoarder',
-      'boss_pale_architect', 'boss_seraph_still', 'boss_the_unmade',
-      // -- Act III alternate: THE BURNING GALLOWS
-      'en_ash_crow', 'en_gallows_hound', 'en_ember_wisp', 'en_the_condemned',
-      'en_pyre_zealot', 'en_cinder_golem', 'en_smoke_weaver', 'en_ash_archer',
-      'en_hangman', 'en_brazier_titan', 'en_gallows_tree', 'en_warden_coals',
-      'boss_magistrate', 'boss_pyreheart', 'boss_ropemaker',
-    ]) {
-      this.load.image(key, `${A}/chars/${key}.png`);
-    }
-    // ...and the nine new medallions, one per alternate boss.
-    for (const key of [
-      'boss_icon_night_mother', 'boss_icon_hollow_king', 'boss_icon_grimwatch',
-      'boss_icon_pale_architect', 'boss_icon_seraph_still', 'boss_icon_the_unmade',
-      'boss_icon_magistrate', 'boss_icon_pyreheart', 'boss_icon_ropemaker',
-    ]) {
-      this.load.image(key, `${A}/icons/${key}.png`);
-    }
-    // Ophelia, Doctor of Poison (replaces Moxie's model).
-    this.load.image('hero_ophelia', `${A}/chars/hero_ophelia.png`);
-    // Drusky, The Hoarder (2026-08-03). Delivered at Ophelia's 1912x1806 and
-    // normalised to the shared 900x850 canvas with a 766px figure on the same
-    // footline as the other four — see the measurements in the patch report.
-    this.load.image('hero_drusky', `${A}/chars/hero_drusky.png`);
-    // THE FIFTY SKINS (2026-08-03). Walked off the data so adding one is one
-    // object in core/skins.js and nothing here. Every file was normalised by
-    // tools/normalize_skin_art.py to the SAME 900x850 canvas as the shipped
-    // heroes, with its figure measured to its own hero's height and stood on
-    // that hero's ground line — so `setScale(0.3)` in the arena and
-    // `setScale(0.385)` on the select card draw a skin and its hero identically,
-    // and no call site needs to know which one it is holding.
-    for (const s of SKINS) this.load.image(skinTexture(s.id), `${A}/chars/skins/skin_${s.id}.png`);
-    // Action text art + FX
-    this.load.image('txt_combo', `${A}/text/AactionText_Combo.png`);
-    this.load.image('txt_critical', `${A}/text/AactionText_Critical.png`);
-    this.load.image('txt_warning', `${A}/text/AactionText_Warning.png`);
-    // Caleb's particle variants. Driven off PARTICLE_VARIANTS rather than a
-    // hard-coded 1..3, because the biome families that arrived on 2026-08-03
-    // are not all threes: the Gallows shipped one ash and two embers.
-    for (const [kind, count] of Object.entries(PARTICLE_VARIANTS)) {
-      for (let n = 1; n <= count; n++) {
-        this.load.image(`particle_${kind}_${n}`, `${A}/fx/particle_${kind}_${n}.png`);
-      }
-    }
-    this.load.image('fx_glow', `${A}/fx/fx_glow1.png`);
-    this.load.image('fx_star', `${A}/fx/fx_star1.png`);
-    this.load.image('fx_dust', `${A}/fx/fx_dust1.png`);
-    this.load.image('fx_glow_circle', `${A}/fx/glow_circle.png`);
     // SFX load with the main batch — guaranteed present before any scene runs.
     queueSfx(this);
 
@@ -376,9 +57,13 @@ export class BootScene extends Phaser.Scene {
   // =======================================================================
   // THE LOADING SCREEN
   // =======================================================================
-  // A cold boot loads 590+ textures and can run the better part of a minute,
-  // which makes this the longest uninterrupted look most players get at the
-  // game before they get the game. It used to be a 4px gold sliver parked at
+  // A cold boot used to load 648 textures and run the better part of a minute,
+  // which made this the longest uninterrupted look most players got at the game
+  // before they got the game. Deferred loading (core/lazyload.js) cut the boot
+  // set to ~330, so on a warm machine this screen may now be gone before its
+  // first flavour line has changed — which is the intended shape, and is why the
+  // flavour hold was always written to survive a screen that outlives it by a
+  // second. It used to be a 4px gold sliver parked at
   // the dead centre of a black canvas, and it read as BROKEN rather than as
   // busy — with nothing around it, a bar with no track has no anchor to be
   // centred against, so it looked off-centre no matter how exactly it was
@@ -452,7 +137,24 @@ export class BootScene extends Phaser.Scene {
       ctx.fillStyle = vig;
       ctx.fillRect(0, 0, w, h);
     });
-    this.add.image(cx, GAME_H / 2, BACKDROP).setDepth(0);
+    const backdropImg = this.add.image(cx, GAME_H / 2, BACKDROP).setDepth(0);
+    /**
+     * ...AND GIVE IT BACK. The backdrop is a full-canvas canvas-texture: 2340 x
+     * 1080 x 4 = 9.64 MB of decoded RGBA, the single largest texture the game
+     * ever holds, drawn ONCE for a screen that is over before the Title fades
+     * in. It used to sit in the texture manager for the whole session.
+     *
+     * The image object is destroyed first and by hand rather than left to the
+     * display list, because the DisplayList plugin listens to the same SHUTDOWN
+     * event this does and listener order is not a thing to bet a render on:
+     * removing a texture still owned by a live Image is how you get a frame
+     * drawn from a null frame. The three small bar textures (0.2 MB together)
+     * stay — they cost nothing and the bar is redrawn on every reload.
+     */
+    this.events.once('shutdown', () => {
+      backdropImg.destroy();
+      try { this.textures.remove(BACKDROP); } catch { /* already gone */ }
+    });
 
     // --- Soft white radial, tinted at each use: the bar's bed and its tip.
     const GLOW = canvasTex('boot_glow', 128, 128, (ctx) => {

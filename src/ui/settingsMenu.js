@@ -1,7 +1,7 @@
 import { GAME_W, GAME_H, DEPTH, PARCH, MOBILE } from '../config.js';
 import { settings, saveSettings, DEV_SLIDER_STEPS, settingsPanelHeight } from '../core/settings.js';
 import { refreshMusicVolume } from '../core/music.js';
-import { sfx } from '../core/sfx.js';
+import { sfx, refreshSfxVolume } from '../core/sfx.js';
 import { woodPanel } from './panels.js';
 import { run } from '../core/run.js';
 import { writeSave, clearSave } from '../core/save.js';
@@ -156,7 +156,10 @@ export function openSettings(scene) {
     };
     const bump = (d) => {
       settings[field] = Phaser.Math.Clamp(Math.round((settings[field] + d) * 10) / 10, 0, 1);
-      saveSettings(); redraw(); refreshMusicVolume();
+      // MUSIC re-reads its own gain; so, now, does every LOOPING sfx — the
+      // low-health heartbeat used to keep playing at the level it started at
+      // while the slider that was supposed to be quieting it went to zero.
+      saveSettings(); redraw(); refreshMusicVolume(); refreshSfxVolume();
       sfx(scene, 'button', { volume: 0.8 });
     };
     stepperBtn(scene, ov, segX0 - 52, cy, '-', () => bump(-0.1));

@@ -2,7 +2,7 @@ import { GAME_W, GAME_H, DEPTH, PARCH, BUILD, CHARACTERS, applyMobileCamera } fr
 import { installLongPress } from '../ui/touch.js';
 import { DIFFICULTIES } from '../core/difficulty.js';
 import { addTavernBackdrop } from '../ui/tavern.js';
-import { gleamSweep, driftingCards, heroLineup } from '../ui/titleFx.js';
+import { gleamSweep } from '../ui/titleFx.js';
 import { addSettingsButton, openSettings } from '../ui/settingsMenu.js';
 import { openTutorial } from '../ui/tutorial.js';
 import { openAchievements } from '../ui/achievements.js';
@@ -15,8 +15,12 @@ import { woodPanel } from '../ui/panels.js';
 import { legible, fmtNum, burst, shake } from '../ui/juice.js';
 // The mode of a tally, shared with the run recap so MOST PLAYED HAND means the
 // same thing on the lifetime shelf as it does on the report card.
-import { topEntry } from '../core/run.js';
+import { topEntry, run } from '../core/run.js';
 import { hasSave, readSave, clearSave, saveSummary, resumeRun } from '../core/save.js';
+import { equippedSkin } from '../core/skins.js';
+// DEFERRED ART (core/lazyload.js) — a CONTINUE is a cold page load dropping into
+// the middle of a run, so it is the one road into the game with nothing cached.
+import { ensure, runStartBundle, mapPrefetch } from '../core/lazyload.js';
 
 /**
  * THE SLAM FIRES ONCE PER APP SESSION, and this is where that is remembered.
@@ -37,12 +41,7 @@ export class TitleScene extends Phaser.Scene {
     applyMobileCamera(this);   // no-op on desktop
     installLongPress(this);    // hold = hover on touch; no-op on desktop
     playMusic(this, 'menu');
-    // The drifting cards go in UNDER the dim (that is what `beforeDim` is for):
-    // in front of it they are six cards on a menu, behind it they are smoke.
-    const tavern = addTavernBackdrop(this, 0.4, { beforeDim: (sc) => driftingCards(sc) });
-    // ...and the champions you have already forged stand in front of it, warming
-    // themselves. Grounded on the painting's own floor line, beside the hearth.
-    heroLineup(this, tavern.anchor);
+    addTavernBackdrop(this, 0.4);
 
     const LOGO_SCALE = 0.52;
     const logo = this.add.image(GAME_W / 2, 300, 'logo').setScale(LOGO_SCALE);
@@ -328,11 +327,28 @@ export class TitleScene extends Phaser.Scene {
   continueRun() {
     const where = resumeRun();
     if (!where) { clearSave(); return this.scene.restart(); }
+    /**
+     * A RESUME IS A COLD START INTO THE MIDDLE OF A RUN (2026-08-06, deferred
+     * loading). The run being woken may be standing in the Burning Gallows on
+     * lap two, and this page load has never fetched a single thing that world is
+     * made of. `resumeRun` has already hydrated `run`, so its act index and its
+     * world roll are both known here — which makes this the earliest possible
+     * moment to ask for the art, and the 200ms fade is free cover for it.
+     *
+     * Both destinations gate on their own bundles anyway (MapScene.create,
+     * CombatScene.create); this is what usually makes those gates instant. The
+     * hero's painted deck rides along because a resume into a fight draws a hand
+     * on the first frame.
+     */
+    const ready = ensure(this, [
+      ...runStartBundle(run, { skinId: equippedSkin(run.chrId) }),
+      ...(where.scene === 'Combat' ? mapPrefetch(run.actIndex, run) : []),
+    ]);
     this.cameras.main.fadeOut(200, 20, 16, 28);
-    this.cameras.main.once('camerafadeoutcomplete', () => {
+    this.cameras.main.once('camerafadeoutcomplete', () => ready.then(() => {
       if (where.scene === 'Combat') this.scene.start('Combat', { nodeId: where.nodeId });
       else this.scene.start('Map');
-    });
+    }));
   }
 
   /**

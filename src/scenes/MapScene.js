@@ -37,7 +37,10 @@ import {
 } from '../ui/rewards.js';
 import { ORACLE_OPTIONS, ORACLE_BY_ID, rollOracleOffer, takeOracle } from '../core/oracle.js';
 // THE ORACLE'S RECEIPT, pinned under the hero's face (JC, 2026-08-05).
-import { addOracleChip } from '../ui/oracleChip.js';
+import { addOracleChip, oracleCardKey } from '../ui/oracleChip.js';
+// ...and the hero's PASSIVE, stacked above it — the same chip the combat
+// sidebar wears, on the other screen that owns a hero (JC, 2026-08-06).
+import { addPassiveChip } from '../ui/passiveChip.js';
 import { casinoOverlay } from '../ui/casino.js';
 import { rollEliteSpoils, rollElitePotion, FORGED_FLOOR_LABEL } from '../core/elites.js';
 import { playMusic, musicDebug } from '../core/music.js';
@@ -52,8 +55,56 @@ import { getProp } from '../core/artifacts.js';
 import { stageForMap, fetchStage } from '../core/stages.js';
 import { kineticScroll } from '../ui/kinetic.js';
 import { installLongPress, tapBind } from '../ui/touch.js';
+// DEFERRED ART (core/lazyload.js). The board, the banner and the backdrop this
+// scene is made of are the biggest single bundle in the game and they belong to
+// ONE world, so they are fetched on arrival instead of at boot.
+import {
+  ensure, missingKeys, evict, actBundle, actFootprint, worldKeysExcept, mapPrefetch,
+  eventBg, packCards, MERCHANT_BG, boardKeyFor, BANNER_BY_AMBIENCE, heroCardfaces,
+} from '../core/lazyload.js';
+import { gateOn } from '../ui/loadingVeil.js';
 
 const ROW_GAP = 150;
+
+/**
+ * THE PHONE'S TOP CORNERS ARE NOT SQUARE (JC, 2026-08-06: "map HUD pinched
+ * inward for dynamic-island clearance while staying corner-bound").
+ *
+ * In landscape an iPhone puts the Dynamic Island / notch on one short edge and
+ * rounds BOTH top corners, and the map is the one screen whose HUD is built out
+ * of those corners: the hero capsule hard against the left edge, the artifact
+ * belt hard against the right, the gear in the very corner. So every one of
+ * them moves inward by one inset — they stay corner-bound, they just stop being
+ * flush. Zero on desktop, where the canvas is a rectangle.
+ *
+ * 92px is the inset, and it is not a guess: 59pt of landscape safe-area on a
+ * notched iPhone, times the 2340/852 the canvas is scaled at, is 162 device px
+ * — but that is the inset for a Dynamic Island sitting ON that edge, and only
+ * one edge ever has it. 92 clears the ROUNDED CORNER on both sides (radius
+ * ~150px, so the curve has eaten the frame by about 5px at x=112) with room for
+ * the island's fringe, without carving 324px out of a 2340 HUD.
+ *
+ * COMBAT DOES NOT GET THIS. Its top-right corner is the potion mat, already
+ * 200px in from the edge, and pushing it further would put it on the boss
+ * marquee.
+ */
+const HUD_SAFE = MOBILE ? 92 : 0;
+/** Left-column x, pinched. Every plate and glyph in the capsule reads through it. */
+const LX = (x) => x + HUD_SAFE;
+
+/**
+ * THE LEFT CAPSULE — hero, HP, chips, deck, mode, and the chip column under
+ * the portrait. Written down as one table on 2026-08-06, when it grew.
+ *
+ * The passive chip joined THE ORACLE's receipt in the portrait's lane and the
+ * lane needed 56px it did not have. Shrinking the portrait to make room would
+ * have cost the capsule the one thing it is for, so the capsule grew DOWNWARD
+ * instead — the hero block above is untouched to the pixel — and the two
+ * viewer buttons that sit under it follow its floor rather than a constant,
+ * which is the collision this const exists to make impossible.
+ */
+const CAPSULE = { x: LX(170), y: 146, w: 300, h: 252 };
+CAPSULE.floor = CAPSULE.y + CAPSULE.h / 2;      // 272
 /**
  * THE MERCHANT'S RESTOCK LADDER (JC, 2026-07-31): starts at an impulse-buy 25
  * and compounds ~x1.5 a pull, rounded to numbers a merchant would say out loud.
@@ -68,8 +119,45 @@ export const RESTOCK_LADDER = [25, 40, 55, 90, 130, 200, 300, 450, 675];
  * test reads the number rather than typing it a second time.
  */
 export const SHOP_RELIC_STOCK = 2;
-const BOARD_W = 1920;      // the board fills the full screen width (JC)
+/**
+ * THE BOARD FILLS THE SCREEN WIDTH — and on the phone the screen is 2340 wide,
+ * so it is the WIDE cut of the art that fills it (see boardKeyFor). W_USE is
+ * NOT touched by that: Caleb's wide boards keep the node band where it was and
+ * spend the extra 420px on decorative wings, so the layout math is untouched
+ * and the wings are where the pinched-in HUD (see HUD_SAFE) now sits.
+ */
+const BOARD_W = MOBILE ? GAME_W : 1920;
 const W_USE = 1500;        // band the nodes actually occupy (clear of frame art)
+
+/**
+ * HOW HARD THE INK HAS TO PUSH ON THIS WORLD'S BOARD (JC, 2026-08-06: the
+ * legibility pass, "special attention to the two darkest — the gold rings must
+ * still pop").
+ *
+ * Six painted boards is six different grounds under the same four marks: a
+ * dotted ink trail, a gold reachable ring, its additive under-glow, and a node
+ * icon. Tuned once against the Verdant Forest's cream parchment, those marks
+ * are exactly right on four of them and quietly disappear on two:
+ *
+ *   NOCTURNAL FOREST  a purple-on-purple canopy at ~99 mean luminance. The
+ *                     trail's 0x9a835e dots read as texture in the moss and the
+ *                     gold ring goes mustard against the mushrooms.
+ *   THE ABYSS         pale dirt inside near-black cliffs at ~131. The rings are
+ *                     fine; the trail is what vanishes into the floor.
+ *
+ * So the two of them get a MULTIPLIER on the ink rather than a redesign — the
+ * marks are the same marks, pushed. `dot` is the untaken trail's tint, which is
+ * the one place a straight alpha bump is not enough (0x9a835e is a brown that
+ * is simply too close to both grounds to separate at any opacity).
+ *
+ * A world with no entry gets the shipped numbers unchanged, which is the other
+ * four and every desktop board.
+ */
+const BOARD_INK = {
+  nightwood: { trail: 1.5, ring: 1.6, dot: 0xd8c49a },
+  abyss: { trail: 1.45, ring: 1.25, dot: 0xc7a982 },
+};
+const INK_DEFAULT = { trail: 1, ring: 1, dot: null };
 
 // Node icons are Caleb's painted set — big, disc-free, with cast shadows.
 const NODE_STYLE = {
@@ -133,14 +221,47 @@ export class MapScene extends Phaser.Scene {
   /** Which of this act's bosses THIS run drew (rolled once, in newActMap). */
   get boss() { return bossEntry(this.act, run.map?.bossPick); }
 
+  /**
+   * THE ACT'S ART, BEFORE THE BOARD IS PAINTED.
+   *
+   * Everything below this line used to be create(). It is gated now because the
+   * world's backdrop (18.5 MB), its map board (15.4 MB) and its banner are no
+   * longer in the boot set — a run walks ONE world at a time, and the five it is
+   * not walking were 80% of what killed the tab on iOS.
+   *
+   * THE GATE IS HERE AND NOT AT THE CALL SITES, deliberately. Every ordinary
+   * road into this scene has a transition to hide the fetch behind (the
+   * Select→Map fade, DESCEND, a fight coming home) and every one of them
+   * prefetches — but the roads that do NOT are the ones that keep the ~78
+   * drivers in tools/ alive: `__hf.skipAct()`, `__hf.setBiome()`,
+   * `__hf.newAct()`, a straight `scene.start('Map')` out of a CONTINUE. A gate
+   * on create() covers all of them at once and cannot be forgotten by the next
+   * hook. It resolves SYNCHRONOUSLY when the bundle is already resident, which
+   * every restart after the first one is.
+   */
   create() {
+    const need = [
+      ...actBundle(run.actIndex, run),
+      // THE ORACLE'S RECEIPT — one of her twenty painted cards, worn under the
+      // hero's face for the whole run. A CONTINUE has never fetched it.
+      oracleCardKey(run.oracle),
+    ].filter(Boolean);
+    gateOn(this, need, () => this.buildScene(), {
+      label: `Act ${this.act?.numeral ?? ''} · ${this.act?.name ?? ''}`.trim(),
+      ensure, missingKeys,
+    });
+  }
+
+  buildScene() {
     applyMobileCamera(this);   // no-op on desktop
     installLongPress(this);    // hold = hover on touch; no-op on desktop
     this.busy = false;   // scenes are reused across restarts — always re-arm input
-    // ...and so are these two: both died with the last create()'s display list,
+    // ...and so are these four: all died with the last create()'s display list,
     // and a kept handle would let a pointerout destroy an object that is gone.
     this.oracleChip = null;
     this.oracleTip = null;
+    this.passiveChip = null;
+    this.passiveTip = null;
     this.cameras.main.fadeIn(300, 20, 16, 28);
     playMusic(this, this.act.music.fight);
 
@@ -155,7 +276,9 @@ export class MapScene extends Phaser.Scene {
     // Above the whole overlay stack (events 50, tips +3, deck info +6, toasts
     // +8), so the gear is live in EVERY room — an event's dimmer used to bury
     // it. The settings panel itself opens at +30, over this.
-    addSettingsButton(this, undefined, undefined, DEPTH.overlay + 20);
+    // ...pinched in from the top-right corner on the phone, with the belt it
+    // sits above (see HUD_SAFE). Desktop passes the shipped default.
+    addSettingsButton(this, GAME_W - 44 - HUD_SAFE, 42, DEPTH.overlay + 20);
 
     // Autonomous-playtest hooks.
     window.__hfScene = 'map';
@@ -234,6 +357,25 @@ export class MapScene extends Phaser.Scene {
         return { boards: n, elites, forged, rate: elites ? forged / elites : 0, difficulty: run.difficulty };
       },
       setDifficulty: (i) => { run.difficulty = i; return run.difficulty; },
+      /**
+       * SWAP THE HERO MID-RUN. Verification only, and it exists because two of
+       * the five are LOCKED (Ophelia behind Act IV, Drusky behind 2,000 chips)
+       * — a driver auditing the passive chip on all of them would otherwise
+       * have to earn both trophies first, which is not a test of the chip.
+       *
+       * The ids come from the CHARACTERS roster, so a driver can enumerate the
+       * heroes rather than keep its own list, and the four per-suit cardfaces
+       * are fetched before the restart because they are deferred art and the
+       * hand would otherwise deal the previous hero's paintings.
+       */
+      setHero: (id) => {
+        if (!CHARACTERS[id]) return Promise.resolve({ ok: false, ids: Object.keys(CHARACTERS) });
+        run.chrId = id;
+        return ensure(this, heroCardfaces(id)).then(() => {
+          this.scene.restart();
+          return { ok: true, id, ids: Object.keys(CHARACTERS) };
+        });
+      },
       // THE MIXED SHELF, straight from the map: farming elites until a bottle
       // turns up is not a test. `mix` pins the kinds for a layout audit.
       eliteSpoils: (forged = false, mix = null) => {
@@ -273,6 +415,64 @@ export class MapScene extends Phaser.Scene {
         }
         return { ok: true, actIndex, biome: id };
       },
+      /**
+       * WHAT THE BOARD IS DOING TO THE INK, and a way to put a hero token on
+       * it. The legibility sweep has to photograph a board with all four marks
+       * live — trail, reachable ring, node icon and the hero standing on one —
+       * and at act start `currentId` is null, so nothing is standing anywhere.
+       */
+      boardInk: () => ({ ambience: this.act.ambience, ...this.boardInk }),
+      /**
+       * THE HOVER TIP, MEASURED. The parchment was being CROPPED — a 36px-tall
+       * nineslice with 34px corners is four overlapping corners and no middle —
+       * and the shapes that did it are the SHORT ones: a title with no body,
+       * which is every node you cannot reach yet. So the audit hands back the
+       * panel's box and its content's box and a driver asserts the frame
+       * actually contains what is printed on it, for the short case and the
+       * long one alike.
+       */
+      tipAudit: (title, body = null) => {
+        this.showTip(GAME_W / 2, 600, title, body);
+        const tip = this.mapTip;
+        if (!tip) return null;
+        // The tip holds TWO panel_wood nineslices — the cast shadow (offset
+        // +7/+10, alpha 0.35) and the parchment itself. Pick by opacity: a
+        // NineSlice is a mesh, so its tint fields are not the plain Image's and
+        // `tintTopLeft !== 0` quietly matched the shadow first.
+        const panel = tip.list.filter(o => o.texture?.key === 'panel_wood')
+          .find(o => o.alpha >= 0.9);
+        const texts = tip.list.filter(o => o.text != null);
+        const box = o => {
+          const m = o.getWorldTransformMatrix();
+          return {
+            left: m.tx - o.displayWidth * o.originX, right: m.tx + o.displayWidth * (1 - o.originX),
+            top: m.ty - o.displayHeight * o.originY, bottom: m.ty + o.displayHeight * (1 - o.originY),
+          };
+        };
+        const p = box(panel);
+        const ink = texts.map(box);
+        const out = {
+          panel: { ...p, w: Math.round(p.right - p.left), h: Math.round(p.bottom - p.top) },
+          ink: {
+            left: Math.min(...ink.map(t => t.left)), right: Math.max(...ink.map(t => t.right)),
+            top: Math.min(...ink.map(t => t.top)), bottom: Math.max(...ink.map(t => t.bottom)),
+          },
+          lines: texts.length,
+          onScreen: p.top >= 0 && p.bottom <= GAME_H && p.left >= 0 && p.right <= GAME_W,
+        };
+        this.hideTip();
+        return out;
+      },
+      standOnStart: () => {
+        const m = run.map;
+        if (!m.currentId) {
+          m.currentId = m.starts[0];
+          m.nodes[m.currentId].visited = true;
+          m.taken = [m.currentId];
+        }
+        this.scene.restart();
+        return m.currentId;
+      },
       bossRoster: () => bossRoster(this.act).map(b => b.id),
       setBoss: (id) => {
         const ids = bossRoster(this.act).map(b => b.id);
@@ -305,6 +505,14 @@ export class MapScene extends Phaser.Scene {
       // autonomous walkers could blind-click hard-coded coordinates; since the
       // event panel is sized to its own content (2026-07-31) they have to ask.
       // Returns world-space centres, in display order, for every live button.
+      //
+      // THE HUD'S OWN PLATES NAME THEMSELVES (2026-08-06). VIEW DECK, HANDS and
+      // the two dev buttons hang off the left capsule's FLOOR, and that floor
+      // moved 56px the day the passive chip needed a seat below the portrait —
+      // at which point five drivers with `page.mouse.click(112, 258)` typed
+      // into them broke at once. They carry a `label` now, so a driver can name
+      // the button it wants instead of remembering where it used to be.
+      // `label` is null for everything else, which is every overlay plate.
       buttons: () => {
         const out = [];
         const walk = (o) => {
@@ -312,7 +520,8 @@ export class MapScene extends Phaser.Scene {
           if (o.texture && /^btn_/.test(o.texture.key ?? '') && o.input?.enabled) {
             const m = o.getWorldTransformMatrix();
             out.push({
-              key: o.texture.key, x: Math.round(m.tx), y: Math.round(m.ty),
+              key: o.texture.key, label: o.getData?.('hfLabel') ?? null,
+              x: Math.round(m.tx), y: Math.round(m.ty),
               w: Math.round(o.displayWidth), h: Math.round(o.displayHeight),
             });
           }
@@ -395,6 +604,59 @@ export class MapScene extends Phaser.Scene {
     // ways). The raw-Image fetch in stages.js is lifecycle-proof and dedupes.
     fetchStage(this, stageForMap(this.act, run.map?.bossPick));
 
+    /**
+     * ...AND THE REST OF THE ACT, in the background and never waited on.
+     *
+     * The board is standing, the player is reading it, and nothing on screen
+     * needs any of this: the world's whole bestiary (so walking into a room is
+     * instant even though CombatScene's own gate is what GUARANTEES it), the
+     * eight pack covers (so the reward table opens with no beat at all), and
+     * THE ORACLE's twenty cards while she is still owed — she deals 420ms from
+     * now with no fight in front of her to hide a load behind.
+     *
+     * Fire-and-forget on purpose. If the player enters a room before this
+     * lands, the room's gate waits the difference and nothing is lost.
+     */
+    ensure(this, mapPrefetch(run.actIndex, run));
+
+    /**
+     * GIVE THE LAST ACT BACK. This is the line that keeps the ENDLESS flat.
+     *
+     * Every act index the run has ever rolled a world for is asked what it owns
+     * (backdrop, board, banner, medallions, bestiary, boss arena) and everything
+     * that does not belong to the act being STOOD IN is released. Without it,
+     * lap two of the endless holds two forests, lap three holds three, and the
+     * whole exercise buys a slower death rather than none.
+     *
+     * It runs AFTER the board is built, not before: `evict` refuses anything
+     * still in flight, and the display list that is about to draw the current
+     * act's art is already holding it.
+     */
+    this.evictOtherActs();
+    /**
+     * ...AND THE ORACLE'S TWENTY, ONCE SHE HAS BEEN READ.
+     *
+     * Her shelf is the biggest painted set in the game (20 cards, 30 MB) and the
+     * only one dealt on ARRIVAL, with no fight in front of it to hide a load
+     * behind — so mapPrefetch fetches it up front and checkOracle hands it back
+     * the instant a future is taken. This is the SWEEP behind that: `evict`
+     * refuses anything still in flight, and twenty images kicked off 420ms
+     * before the ceremony opens can easily still have two of them in the air
+     * when it closes. Those two would otherwise be resident for the whole run.
+     *
+     * `run.oracle` is the safe gate rather than `!pendingOracle`: the flag is
+     * cleared BEFORE her overlay opens (so a restart cannot deal her twice),
+     * but the reading itself is only written when a card is actually taken.
+     *
+     * ...AND ONE CARD IS KEPT. THE ORACLE'S RECEIPT (ui/oracleChip.js) pins the
+     * chosen card's own painting under the hero's face for the whole run —
+     * cropped to its portrait, on the map HUD and in every fight. Evicting the
+     * whole shelf therefore takes the chip's face with it, and the chip falls
+     * back to the wrapper. Caught by tools/verify_qol_0805.py, which reads the
+     * chip's texture key by name.
+     */
+    this.releaseOracleShelf();
+
     // AUTOSAVE CHOKEPOINT — THE MAP IS STANDING.
     // Every non-combat room resolves through refreshMap(), which restarts this
     // scene, and every fight comes home through returnToMap(). So one call here
@@ -411,6 +673,38 @@ export class MapScene extends Phaser.Scene {
     // owed, so a quit taken while her cards are on the table comes back owing it.
     if (this.checkOracle()) return;
     this.checkBounty();
+  }
+
+  /**
+   * Release every world this run is not standing in.
+   *
+   * KEEP is the footprint of the act being stood in — its backdrop, board,
+   * banner, medallions, whole bestiary and every arena its roster could roll.
+   * DROP is every other world-owned texture in the manifest, which is a
+   * subtraction rather than a walk over `run.actPicks` for the two reasons
+   * spelled out at worldKeysExcept(). A key in both (the Crucible borrows the
+   * Abyss's backdrop, the Ashen Crucible the Gallows') is kept, because keep is
+   * what is subtracted.
+   *
+   * @returns {number} textures released — tools/verify_deferred.py reads this
+   */
+  evictOtherActs() {
+    return evict(this, worldKeysExcept(actFootprint(run.actIndex, run)));
+  }
+
+  /**
+   * THE ORACLE's twenty, minus the one the run is still wearing.
+   *
+   * Called from her own `done` (immediate) and from every later map arrival (the
+   * sweep that catches images still in the air when she closed). Idempotent by
+   * construction: `evict` only reports keys it actually released.
+   *
+   * @returns {number} textures released
+   */
+  releaseOracleShelf() {
+    if (!run.oracle) return 0;
+    const worn = oracleCardKey(run.oracle);
+    return evict(this, packCards(['oracle']).filter(k => k !== worn));
   }
 
   // ---------------- THE ORACLE (start-of-run pack) ----------------
@@ -436,7 +730,18 @@ export class MapScene extends Phaser.Scene {
   checkOracle() {
     if (!run.pendingOracle) return false;
     run.pendingOracle = false;
-    this.time.delayedCall(420, () => oraclePackOverlay(this, run, () => this.refreshMap()));
+    this.time.delayedCall(420, () => oraclePackOverlay(this, run, () => {
+      /**
+       * HER NINETEEN OTHER CARDS, GIVEN BACK. THE ORACLE is the one shelf in the
+       * game dealt exactly ONCE per run, and hers is the biggest painted set of
+       * the six (20 cards, 30 MB) — prefetched on arrival by mapPrefetch because
+       * there is no fight in front of her to hide a load behind, and dead weight
+       * from the moment a future is taken. The card you actually took stays: the
+       * chip under the hero's face wears its portrait for the rest of the run.
+       */
+      this.releaseOracleShelf();
+      this.refreshMap();
+    }));
     return true;
   }
 
@@ -521,12 +826,18 @@ export class MapScene extends Phaser.Scene {
 
     // Caleb's painted biome board IS the map surface (frame, texture and all).
     // One board per WORLD, keyed off its ambience (which is 1:1 with the world).
-    const boardKey = {
-      forest: 'map_board_forest', snow: 'map_board_frozen', abyss: 'map_board_abyss',
-      nightwood: 'map_board_nocturnal', motes: 'map_board_ethereal', ash: 'map_board_gallows',
-    }[this.act.ambience] ?? 'map_board_abyss';
+    // The lookup moved to core/lazyload.js when the boards left the boot set:
+    // the loader has to fetch exactly what this line is about to draw, and two
+    // copies of that table is how a seventh world ships with a blank board.
+    // ...and on the PHONE it is the WIDE cut of the same board (2340x2100, the
+    // 1920 node-band identical down the middle, decorative wings either side),
+    // drawn full-bleed instead of floated in 210px of dead canvas. boardKeyFor
+    // is the loader's own answer, so the veil cannot lift on a key the map is
+    // not about to draw. See BOARD_W.
+    const boardKey = boardKeyFor(this.act.ambience) ?? 'map_board_abyss';
     const board = this.add.image(GAME_W / 2, this.contentH / 2, boardKey)
       .setDisplaySize(BOARD_W, this.contentH - 16);
+    this.boardImage = board;
     // A secret act SCORCHES the board it borrows. `secretTint` lets each one
     // scorch in its own colour: the Crucible's default pushes the Abyss hotter,
     // and the ASHEN CRUCIBLE overrides it to push the Gallows cold, because a
@@ -565,9 +876,13 @@ export class MapScene extends Phaser.Scene {
     this.input.on('pointerup', () => { dragging = null; kin.release(); });
   }
 
+  /** What this world's ground does to the four marks drawn on it. See BOARD_INK. */
+  get boardInk() { return BOARD_INK[this.act.ambience] ?? INK_DEFAULT; }
+
   /** Dotted ink trails between connected nodes; taken path glows gold. */
   drawPaths() {
     const map = run.map;
+    const ink = this.boardInk;
     const takenEdges = new Set();
     for (let i = 0; i < map.taken.length - 1; i++) takenEdges.add(`${map.taken[i]}>${map.taken[i + 1]}`);
     const fromCurrent = new Set((map.currentId ? map.nodes[map.currentId].next : map.starts)
@@ -590,10 +905,15 @@ export class MapScene extends Phaser.Scene {
           const omt = 1 - t;
           const qx = omt * omt * a.x + 2 * omt * t * mx + t * t * b.x;
           const qy = omt * omt * a.y + 2 * omt * t * my + t * t * b.y;
+          // The trail is pushed on the two dark boards (see BOARD_INK): the
+          // untaken dots take a paler ink, everything takes more opacity, and
+          // the dot itself grows by half the difference so a brighter mark is
+          // not also a smaller one.
+          const baseTint = isLeap ? 0xc09040 : taken ? 0xb8862c : live ? 0x8a6a3c : 0x9a835e;
           const dot = this.add.image(qx + Math.sin(s * 2.1) * 3, qy, 'map_dot')
-            .setTint(isLeap ? 0xc09040 : taken ? 0xb8862c : live ? 0x8a6a3c : 0x9a835e)
-            .setAlpha(taken ? 0.95 : live ? 0.9 : isLeap ? 0.7 : 0.55)
-            .setScale(taken || live ? 1.1 : isLeap ? 1.0 : 0.85);
+            .setTint(!taken && !live && !isLeap && ink.dot != null ? ink.dot : baseTint)
+            .setAlpha(Math.min(1, (taken ? 0.95 : live ? 0.9 : isLeap ? 0.7 : 0.55) * ink.trail))
+            .setScale((taken || live ? 1.1 : isLeap ? 1.0 : 0.85) * (1 + (ink.trail - 1) * 0.5));
           this.mapLayer.add(dot);
           if (live) {
             this.tweens.add({
@@ -655,6 +975,7 @@ export class MapScene extends Phaser.Scene {
   buildNodes() {
     const map = run.map;
     const open = reachable(map);
+    const ink = this.boardInk;
     this.nodeSprites = {};
 
     for (const node of Object.values(map.nodes)) {
@@ -703,14 +1024,21 @@ export class MapScene extends Phaser.Scene {
         icon.setTint(0x7a746c);
       } else if (isOpen) {
         // Next steps: breathing gold ring, soft glow, gentle bob.
+        // ADDITIVE under-glow is the mark that carries a dark board — it is
+        // free contrast on a low-luminance ground and nearly invisible on a
+        // bright one — so BOARD_INK.ring buys most of its help there and the
+        // ring's own breath stops fading as far down (0.45 -> 0.66 at 1.6x),
+        // because a gold circle at 45% opacity on purple is a brown circle.
         const glowUnder = this.add.image(0, 0, 'fx_glow_circle').setTint(style.ring)
-          .setScale(r / 36).setAlpha(0.38).setBlendMode(Phaser.BlendModes.ADD);
+          .setScale((r / 36) * (1 + (ink.ring - 1) * 0.35))
+          .setAlpha(Math.min(0.8, 0.38 * ink.ring)).setBlendMode(Phaser.BlendModes.ADD);
         g.addAt(glowUnder, 0);
         const ring = this.add.image(0, 0, 'node_ring').setTint(style.ring)
           .setDisplaySize(r * 2.5, r * 2.5);
         g.add(ring);
         this.tweens.add({
-          targets: ring, displayWidth: r * 2.85, displayHeight: r * 2.85, alpha: { from: 1, to: 0.45 },
+          targets: ring, displayWidth: r * 2.85, displayHeight: r * 2.85,
+          alpha: { from: 1, to: Math.min(0.75, 0.45 * ink.ring) },
           duration: 950, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
         });
         this.tweens.add({
@@ -945,10 +1273,8 @@ export class MapScene extends Phaser.Scene {
     const hud = this.add.container(0, 0).setDepth(DEPTH.overlay - 1);
 
     // Act plate: Caleb's ornate world banner with the title fitted to its field.
-    const bannerKey = {
-      forest: 'banner_forest', snow: 'banner_frozen', abyss: 'banner_abyss',
-      nightwood: 'banner_nocturnal', motes: 'banner_ethereal', ash: 'banner_gallows',
-    }[this.act.ambience] ?? 'banner_abyss';
+    // Same single table the board reads (core/lazyload.js), same reason.
+    const bannerKey = BANNER_BY_AMBIENCE[this.act.ambience] ?? 'banner_abyss';
     const banner = this.add.image(GAME_W / 2, 88, bannerKey);
     banner.setScale(660 / banner.width);
     // ...and the title plate takes the same scorch as the board, for the same
@@ -1009,44 +1335,55 @@ export class MapScene extends Phaser.Scene {
     if (plateTitle.width > maxW) plateTitle.setScale(maxW / plateTitle.width);
     hud.add(plateTitle);
 
-    // Left capsule: hero, HP, chips, deck count.
-    const parts = woodPanel(this, 170, 118, 300, 196);
+    // Left capsule: hero, HP, chips, deck count — and, in the portrait's own
+    // lane beneath it, the two chips. See CAPSULE for why it is 56px taller
+    // than it was; everything that extra height buys goes to the chip column.
+    const parts = woodPanel(this, CAPSULE.x, CAPSULE.y, CAPSULE.w, CAPSULE.h);
     hud.add([parts.shadow, parts.panel]);
-    const heroIconShadow = this.add.image(78, 100, 'hero_icon_' + chr().id).setTint(0x120a06).setAlpha(0.4);
+    // Every x inside the capsule goes through LX so the whole column pinches
+    // inward together on the phone (see HUD_SAFE) and is untouched on desktop.
+    const heroIconShadow = this.add.image(LX(78), 100, 'hero_icon_' + chr().id).setTint(0x120a06).setAlpha(0.4);
     heroIconShadow.setScale(92 / Math.max(heroIconShadow.width, heroIconShadow.height));
     hud.add(heroIconShadow);
-    const hero = this.add.image(74, 96, 'hero_icon_' + chr().id);
+    const hero = this.add.image(LX(74), 96, 'hero_icon_' + chr().id);
     hero.setScale(92 / Math.max(hero.width, hero.height));
     hud.add(hero);
-    hud.add(this.add.text(130, 52, chr().name, {
+    hud.add(this.add.text(LX(130), 52, chr().name, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '25px', color: PARCH.text,
     }).setOrigin(0, 0.5));
     const p = run.player;
-    hud.add(this.add.text(130, 90, `♥ ${p.hp}/${p.maxHp}`, {
+    hud.add(this.add.text(LX(130), 90, `♥ ${p.hp}/${p.maxHp}`, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: '#1d7a56',
     }).setOrigin(0, 0.5));
     // Kept on the scene: the BANKER'S VAULT's dividend lands while the map is
     // still standing, and a purse that pays you 100 chips in front of a counter
     // still reading the old number is a payout nobody believes.
-    this.hudChips = this.add.text(130, 126, `◉ ${run.chips} chips`, {
+    this.hudChips = this.add.text(LX(130), 126, `◉ ${run.chips} chips`, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: PARCH.accent,
     }).setOrigin(0, 0.5);
     hud.add(this.hudChips);
-    hud.add(this.add.text(130, 162, `Deck: ${run.runDeck.length} cards`, {
+    hud.add(this.add.text(LX(130), 162, `Deck: ${run.runDeck.length} cards`, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: PARCH.textDim,
     }).setOrigin(0, 0.5));
     // The mode you chose, quiet and always there. Small on purpose: it is a
     // reminder, not a banner.
     const mode = difficultyOf(run);
-    hud.add(this.add.text(130, 188, mode.name, {
+    hud.add(this.add.text(LX(130), 188, mode.name, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '18px', color: mode.ink,
     }).setOrigin(0, 0.5));
-    // THE ORACLE'S RECEIPT, under the hero's face — the one box inside the
-    // capsule that nothing in the hero block reaches: the portrait bottoms out
-    // at y 142, the text column starts at x 130, and the panel's nineslice
-    // floor is y 200. Same coordinates on both builds; the capsule has no
-    // mobile branch, and the wider canvas only adds empty air to its right.
-    this.oracleChip = addOracleChip(this, 74, 174, run.oracle, { size: 46 });
+    // THE CHIP COLUMN, under the hero's face — the one box inside the capsule
+    // that nothing in the hero block reaches: the portrait bottoms out at y
+    // 142 and the text column starts at x 130. Both chips are measured UP from
+    // the capsule's floor, so the column and the panel can never disagree.
+    // Same coordinates on both builds; the capsule has no mobile branch, and
+    // the wider canvas only adds empty air to its right.
+    //
+    // The PASSIVE is the upper chip and THE ORACLE the lower, exactly as they
+    // are stacked in the combat sidebar — one order to learn, on both screens
+    // that own a hero.
+    this.passiveChip = addPassiveChip(this, LX(74), CAPSULE.floor - 98, run.chrId, { size: 46 });
+    if (this.passiveChip) hud.add(this.passiveChip);
+    this.oracleChip = addOracleChip(this, LX(74), CAPSULE.floor - 42, run.oracle, { size: 46 });
     if (this.oracleChip) hud.add(this.oracleChip);
 
     // Artifact belt (right) with hover tooltips — below the settings gear.
@@ -1056,7 +1393,8 @@ export class MapScene extends Phaser.Scene {
     // NOOK relics — the Sixth Finger's glove — are not in the row at all; they
     // hang in their own pouch under the column.
     // MOBILE (v2): same right-edge column, a size up for thumbs.
-    const beltX = MOBILE ? GAME_W - 84 : GAME_W - 68;
+    // ...and the RIGHT column pinches by the same inset, for the same corner.
+    const beltX = (MOBILE ? GAME_W - 84 : GAME_W - 68) - HUD_SAFE;
     const beltY0 = 132;
     const BELT_PITCH = MOBILE ? 84 : 64;
     const belt = beltArtifacts();
@@ -1323,21 +1661,33 @@ export class MapScene extends Phaser.Scene {
       }
     });
 
-    // Deck + hand-chart viewers.
-    const deckBtn = this.add.image(112, 258, 'btn_dark').setDisplaySize(180, 54).setInteractive({ useHandCursor: true });
+    // Deck + hand-chart viewers, hung off the CAPSULE'S FLOOR rather than off a
+    // constant: the capsule grew 56px on 2026-08-06 to seat the chip column,
+    // and a pair of buttons that stayed at y 258 would have been buried under
+    // its own panel.
+    //
+    // ...which is also why every plate in this column NAMES ITSELF, with a
+    // 'hfLabel' the existing __hf.buttons() hook reads back. Five verification
+    // drivers had these coordinates typed into them and all five broke on a
+    // 56px move. A driver that asks for the button by name cannot break that
+    // way again.
+    const btnY = CAPSULE.floor + 42;
+    const deckBtn = this.add.image(LX(112), btnY + 3, 'btn_dark').setDisplaySize(180, 54).setInteractive({ useHandCursor: true });
     hud.add(deckBtn);
-    hud.add(this.add.text(112, 255, 'VIEW DECK', {
+    hud.add(this.add.text(LX(112), btnY, 'VIEW DECK', {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: '#cfc8e8',
     }).setOrigin(0.5));
+    deckBtn.setData('hfLabel', 'VIEW DECK');
     deckBtn.on('pointerdown', () => {
       sfx(this, 'button', { volume: 0.7 });
       deckInfoOverlay(this, run);
     });
-    const handsBtn = this.add.image(268, 258, 'btn_dark').setDisplaySize(120, 54).setInteractive({ useHandCursor: true });
+    const handsBtn = this.add.image(LX(268), btnY + 3, 'btn_dark').setDisplaySize(120, 54).setInteractive({ useHandCursor: true });
     hud.add(handsBtn);
-    hud.add(this.add.text(268, 255, 'HANDS', {
+    hud.add(this.add.text(LX(268), btnY, 'HANDS', {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: '#cfc8e8',
     }).setOrigin(0.5));
+    handsBtn.setData('hfLabel', 'HANDS');
     handsBtn.on('pointerdown', () => {
       sfx(this, 'button', { volume: 0.7 });
       handChartOverlay(this, run);
@@ -1351,32 +1701,37 @@ export class MapScene extends Phaser.Scene {
     hud.add(this.mapHint);
 
     if (settings.dev) {
-      const devBtn = this.add.image(112, 322, 'btn_green').setDisplaySize(180, 48).setInteractive({ useHandCursor: true });
+      // The dev column keeps its own spacing but hangs off the same anchor as
+      // the two viewer buttons, so the capsule's height is still one number.
+      const devY = btnY + 64;
+      const devBtn = this.add.image(LX(112), devY + 3, 'btn_green').setDisplaySize(180, 48).setInteractive({ useHandCursor: true });
       hud.add(devBtn);
-      hud.add(this.add.text(112, 319, '+500 CHIPS', {
+      hud.add(this.add.text(LX(112), devY, '+500 CHIPS', {
         fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: '#0c3d18',
       }).setOrigin(0.5));
       // A flat dev cheat, deliberately outside gainGold — the GOLD slider is
       // for testing the real economy, and this button is for skipping it.
+      devBtn.setData('hfLabel', '+500 CHIPS');
       devBtn.on('pointerdown', () => { run.chips += 500; sfx(this, 'chips_stack', { volume: 0.8 }); this.scene.restart(); });
 
       // DEV: jump straight to the next act's map (or note there's nowhere deeper).
-      const skipBtn = this.add.image(112, 380, 'btn_green').setDisplaySize(180, 48).setInteractive({ useHandCursor: true });
+      const skipBtn = this.add.image(LX(112), devY + 61, 'btn_green').setDisplaySize(180, 48).setInteractive({ useHandCursor: true });
       hud.add(skipBtn);
-      hud.add(this.add.text(112, 377, 'SKIP ACT ▶', {
+      hud.add(this.add.text(LX(112), devY + 58, 'SKIP ACT ▶', {
         fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: '#0c3d18',
       }).setOrigin(0.5));
+      skipBtn.setData('hfLabel', 'SKIP ACT');
       skipBtn.on('pointerdown', () => {
         // The ENDLESS has no final act, so the guard only applies to a finite run.
         if (!run.endless && run.actIndex >= run.totalActs - 1) {
-          popMessage(this, 112, 330, 'FINAL ACT', { color: '#ffd23e', size: 24 });
+          popMessage(this, 112, devY + 8, 'FINAL ACT', { color: '#ffd23e', size: 24 });
           return;
         }
         sfx(this, 'button', { volume: 0.8 });
         advanceAct();
         this.scene.restart();
       });
-      hud.add(legible(this.add.text(112, 424, 'dev: click ANY node to teleport', {
+      hud.add(legible(this.add.text(112, devY + 102, 'dev: click ANY node to teleport', {
         fontFamily: '"Baloo 2"', resolution: 2, fontSize: '15px', color: '#8fe098', fontStyle: 'bold',
       })).setOrigin(0.5));
     }
@@ -1384,24 +1739,50 @@ export class MapScene extends Phaser.Scene {
 
   // ---------------- Tooltip ----------------
 
+  /**
+   * THE PARCHMENT WAS BEING CROPPED (JC, 2026-08-06), and the reason was
+   * arithmetic rather than art.
+   *
+   * The panel is a NINESLICE with 34px corners, so it needs 68px in each axis
+   * before its middle strip exists at all — below that the four corners overlap
+   * and the frame reads as a torn-off scrap. The old height was
+   * `30 + (body ? body.height + 26 : 6)`, which is 36px for a title-only tip:
+   * every hover on a node you cannot reach yet ("Fight", "Merchant", with no
+   * "Click to travel" line under it) drew a 36px-tall parchment, and so did
+   * every short label on the belt. The width had the same hole for anything
+   * under 22 characters.
+   *
+   * So both axes now carry a floor, the title's height is MEASURED instead of
+   * assumed to be 30, and the padding is symmetric — the title used to be
+   * pinned 6px from the panel's top edge and the body 26px from its bottom,
+   * which is why a two-line body always looked bottom-heavy.
+   */
   showTip(x, y, title, body, originX = 0.5, rainbow = false) {
     this.hideTip();
+    const PAD = 16, GAP = 8, MIN_W = 150, MIN_H = 76;
     const tip = this.add.container(0, 0).setDepth(DEPTH.overlay + 3);
     const t = this.add.text(0, 0, title, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '22px', color: PARCH.text,
+      wordWrap: { width: 420 }, align: 'center',
     }).setOrigin(0.5, 0);
     if (rainbow) rainbowText(this, t);
-    const b = body ? this.add.text(0, 30, body, {
+    const b = body ? this.add.text(0, t.height + GAP, body, {
       fontFamily: '"Baloo 2"', resolution: 2, fontSize: '19px', color: PARCH.textDim, fontStyle: 'bold',
       wordWrap: { width: 340 }, align: 'center', lineSpacing: 3,
     }).setOrigin(0.5, 0) : null;
-    const h = 30 + (b ? b.height + 26 : 6);
-    const w = Math.max(t.width, b ? b.width : 0) + 46;
-    const parts = woodPanel(this, 0, h / 2 - 6, w, h, { shadow: true });
+    const contentH = t.height + (b ? GAP + b.height : 0);
+    const h = Math.max(MIN_H, contentH + PAD * 2);
+    const w = Math.max(MIN_W, Math.max(t.width, b ? b.width : 0) + PAD * 3);
+    // The panel is centred on the CONTENT, so whatever slack the two floors
+    // introduce is shared evenly above and below it rather than hung off one
+    // edge — a 36px-tall tip is now a 76px tip with its title in the middle.
+    const parts = woodPanel(this, 0, contentH / 2, w, h, { shadow: true });
     tip.add([parts.shadow, parts.panel, t]);
     if (b) tip.add(b);
+    const top = contentH / 2 - h / 2;          // the panel's top edge, tip-local
     const tx = Phaser.Math.Clamp(x, w / 2 + 8 + (originX === 1 ? w / 2 : 0), GAME_W - w / 2 - 8);
-    tip.setPosition(originX === 1 ? x - w / 2 : tx, Phaser.Math.Clamp(y - h - 8, 8, GAME_H - h - 8));
+    tip.setPosition(originX === 1 ? x - w / 2 : tx,
+      Phaser.Math.Clamp(y - contentH / 2 - h / 2 - 8, 8 - top, GAME_H - 8 - top - h));
     this.mapTip = tip;
   }
 
@@ -1623,7 +2004,22 @@ export class MapScene extends Phaser.Scene {
     // is the whole ask for the casino, and the forge's second condition is
     // fired below, when the fire actually gives something up.
     fireAchievements(this, 'visit', { eventId: ev.id, run });
+    /**
+     * THE PAINTING, FETCHED ON ENTRY. Fifteen backdrops at 5 MB each; you meet
+     * one room at a time and most runs never see half of them.
+     *
+     * The ROLL happens above the gate on purpose — `rollEvent` writes to
+     * `run.seenEvents` and the gate has to know WHICH painting to ask for, so
+     * rolling inside it would either roll twice or ask for the wrong file. The
+     * rest of the room is unchanged and still reads `textures.exists(evbg_…)`:
+     * several of these have never been painted, and the wood panel fallback is
+     * the feature, not a failure.
+     */
+    gateOn(this, eventBg(ev.id), () => this.buildEvent(ev),
+      { label: ev.name, ensure, missingKeys });
+  }
 
+  buildEvent(ev) {
     // ---- Layer 1: the painting (under the HUD at DEPTH.overlay - 1) --------
     const art = this.add.container(0, 0).setDepth(DEPTH.overlay - 2);
     const dim = this.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0x0a0810, 0).setInteractive();
@@ -2006,6 +2402,12 @@ export class MapScene extends Phaser.Scene {
 
   /** A spinning-coin wipe into the merchant's tent. */
   coinTransition(onMid) {
+    // THE 480ms LEAD. This wipe exists to cover the moment the tent is built,
+    // and it now covers the moment the tent is FETCHED as well: the merchant's
+    // table is an 18.5 MB painting for a room you meet once or twice an act, so
+    // it left the boot set. Kicking it here rather than in runShop() means the
+    // gate down there is almost always already satisfied.
+    ensure(this, [MERCHANT_BG]);
     const t = this.add.container(0, 0).setDepth(DEPTH.overlay + 8);
     const dim = this.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0x14101c, 0).setInteractive();
     t.add(dim);
@@ -2047,6 +2449,13 @@ export class MapScene extends Phaser.Scene {
   /** THE MERCHANT — artifacts laid out on the mat, prices hanging over each. */
   runShop() {
     this.hideTip();
+    // His table is deferred art (see coinTransition, which gives it a 480ms
+    // head start). `__hf.openShop()` and the bounty's BOOKED MERCHANT both come
+    // in without that lead, which is exactly why the gate is here too.
+    gateOn(this, [MERCHANT_BG], () => this.buildShop(), { ensure, missingKeys, label: 'The Merchant' });
+  }
+
+  buildShop() {
     // WINDOW SHOPPING (achievement): this is the only line in the game that
     // knows you walked up to his table, and it also sweeps the state trophies
     // that a shopping trip is most likely to have just earned (a full belt, a

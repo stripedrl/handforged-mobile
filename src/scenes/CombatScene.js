@@ -68,7 +68,7 @@ import {
 } from '../core/acts.js';
 import { difficultyOf, showsHandMath } from '../core/difficulty.js';
 import { progress, recordActClear, recordWin, discoverHand, notePlayedHand, foldRunIntoRecords } from '../core/progress.js';
-import { heroTextureFor } from '../core/skins.js';
+import { heroTextureFor, equippedSkin } from '../core/skins.js';
 import {
   run, chr, collectMods, collectModList, addHandRepeat, advanceAct, beginEndless, noteEndlessClear,
   effectiveArtifacts, effectiveArtifactSlots,
@@ -87,6 +87,12 @@ import {
 // (THE RECYCLER) and what a ghost pays for its x1.5 (SPIRITUAL).
 import { stowPlayedCard, etherealVanishChance } from '../core/oracle.js';
 import { stageFor, fetchStage } from '../core/stages.js';
+// DEFERRED ART (core/lazyload.js): the world's backdrop and this room's bodies
+// are fetched for the room, not for the boot.
+import {
+  ensure, missingKeys, actBundle, encounterBundle, heroCardfaces, skinBundle, packCovers,
+} from '../core/lazyload.js';
+import { gateOn } from '../ui/loadingVeil.js';
 import { uninstallRunRng } from '../core/rng.js';
 import { autosave, clearSave } from '../core/save.js';
 import { drawRecap, recapRows, unlockRows, recapHeight, RECAP } from '../ui/runRecap.js';
@@ -94,6 +100,10 @@ import { ARTIFACT_RARITY, ARTIFACT_POOL, acquireArtifact, getProp, WHEEL_OF_DIVI
 // NIGHT 0802: the egg's queued hatch, the potato's secret, the slot machine.
 import {
   rollHatchDef, hatchEgg, becomeGoldenSpud, GOLDEN_SPUD_VALUE, SLOT_BUTTON_CHIPS,
+  // The Crown's crowned-Ace bonus lives in artifacts.js beside its own copy, so
+  // the relic's description and the grant below can never quote different
+  // numbers at each other across two files (2026-08-06).
+  ACE_CROWN_VALUE,
 } from '../core/artifacts.js';
 import { rollPackOffer } from '../core/packs.js';
 // THE MIXED ELITE SHELF (PATCH 0803 §2) — relics and bottles from one pool.
@@ -105,9 +115,9 @@ import { addPotionIcon, POTION_MAT, potionSpots, MAT_SHADOW } from '../ui/potion
 import { CardSprite } from '../ui/CardSprite.js';
 import { popNumber, popMessage, shake, burst, hitFlash, actionText, flashVignette, DEBUFF_COLORS, fmtNum, totalPayoffFX, payoffTier, fmtTotal, rainbowText, legible, INK_DARK, embers } from '../ui/juice.js';
 import { playMusic, stopMusic, musicFor } from '../core/music.js';
-import { sfx, sfxCapped, suspense } from '../core/sfx.js';
+import { sfx, sfxCapped, suspense, registerSfxLoop, refreshSfxVolume, sfxBusVolume } from '../core/sfx.js';
 import { settings } from '../core/settings.js';
-import { gestureKind, sweepHits, fanSlots, SWEEP_TICK_MS } from '../core/dragSelect.js';
+import { gestureKind, sweepHits, fanSlots, handButtonLanes, SWEEP_TICK_MS } from '../core/dragSelect.js';
 // PATCH 0803 §3 — one pitch ladder, one repeat schedule, one accelerator.
 import {
   pitchAt, PITCH_MIN_GAP_MS, repeatSchedule, scoringTimeScale, REPEAT_FULL_BEATS,
@@ -116,7 +126,11 @@ import { addSettingsButton } from '../ui/settingsMenu.js';
 import { kineticScroll } from '../ui/kinetic.js';
 import { installLongPress, tapBind } from '../ui/touch.js';
 // THE ORACLE'S RECEIPT, pinned beside the hero (JC, 2026-08-05).
-import { addOracleChip } from '../ui/oracleChip.js';
+import { addOracleChip, oracleCardKey } from '../ui/oracleChip.js';
+// ...and THE HERO'S PASSIVE stacked above it, which replaced the kit blurb
+// (JC, 2026-08-06). core/passives.js owns "did it fire, and by how much".
+import { addPassiveChip, pulsePassive, resetPassivePulse } from '../ui/passiveChip.js';
+import { passiveAttribution } from '../core/passives.js';
 
 /** How many relics an elite kill puts on the shelf (JC, 2026-07-31). */
 const ELITE_DROP_CHOICES = 3;
@@ -142,20 +156,179 @@ const BIG_MSG_FADE = 520;
 const BLURB_STAGGER = BLURB_HOLD + BIG_MSG_FADE + 140;
 
 /**
- * THE GLOVE NOOK. The artifact mat's inner field ends at x=329 and its six cells
- * fill it wall to wall, so the pouch is bumped onto the mat's RIGHT edge and
- * hangs just past the sidebar (which ends at 346) onto the arena's dark band.
+ * THE ARTIFACT MAT'S FOOTPRINT, DERIVED ONCE (2026-08-06).
+ *
+ * The mat GREW when the kit blurb left the sidebar. That blurb was the only
+ * thing standing between the status rows and the leather, and it was a
+ * paragraph of prose occupying 80px of a HUD otherwise made of objects — so the
+ * passive chip took over its job (ui/passiveChip.js) and the relics took its
+ * room: +88px of leather on the 340 sidebar, +68 on the 420 one, and every
+ * icon, socket and ordinal a size class up inside it.
+ *
+ * It is ONE table now because it used to be five. The footprint was written out
+ * longhand in the texture generator, again in the image's placement, again in
+ * the plaque's y, again in cellOf, and once more in the drag code's rowMidY —
+ * with the mobile build re-deriving each by scaling the desktop numbers, which
+ * is why the 420 mat was drawn very slightly stretched. Everything below now
+ * reads these, and the texture is CUT at the size it will be DRAWN at on this
+ * build, so neither canvas scales the leather at all.
+ *
+ *   pad / lip   canvas edge to the leather's edge; `lip` is the extra room at
+ *               the top that the brass plaque straddles.
+ *   bottom      where the leather's foot sits. The mat is bottom-anchored, and
+ *               it always was: growth happens upward, into the freed band.
+ *   cy          the row pair's centre, and the nook pouch's, and the drag
+ *               code's row boundary.
+ */
+const MAT = (() => {
+  const pad = MOBILE ? 22 : 11;
+  const lip = 22;
+  // MOBILE, 2026-08-06 (JC: "artifact pad ... extended downward"). The phone's
+  // mat stopped 64px short of the bottom edge for a home-indicator margin that
+  // nothing else on the canvas respects — the SORT plate beside it already
+  // bottoms out at 1059 — so the leather takes 30 of those pixels back and
+  // spends them, plus 24 more of its own, on a taller field: 268 -> 292, foot
+  // at 1046. Everything inside is centred on `cy`, so the sockets, ordinals,
+  // grooves and USE tags follow without a second edit.
+  const bodyH = MOBILE ? 292 : 284;
+  const bottom = GAME_H - (MOBILE ? 34 : 20);
+  return {
+    pad, lip, bodyH, bottom,
+    bodyW: SIDEBAR_W - pad * 2,
+    canvasW: SIDEBAR_W,
+    canvasH: lip + bodyH + lip,
+    y: bottom - bodyH - lip,        // canvas top; the canvas is drawn at x 0
+    bodyTop: bottom - bodyH,
+    cx: SIDEBAR_W / 2,
+    cy: bottom - bodyH / 2,
+  };
+})();
+
+/**
+ * THE GLOVE NOOK. The artifact mat's inner field is full wall to wall by its
+ * six cells, so the pouch is bumped onto the mat's RIGHT edge and hangs just
+ * past the sidebar onto the arena's dark band, level with the mat's own middle.
  * It clears the PLAY HAND button (x from 432) with room to spare.
  */
-const NOOK = { x: SIDEBAR_W + 28, y: GAME_H - 118 };
+const NOOK = { x: SIDEBAR_W + 28, y: MAT.cy };
 
 /**
  * The brass label plaque straddling the mat's top edge, in hud_mat texture space
  * (the texture is drawn at x=0, so these are screen x too). Shared between the
  * texture that CUTS the plaque and the label that sits ON it, because the label
- * is now a sentence rather than one word and the two must not disagree.
+ * is a sentence rather than one word and the two must not disagree.
  */
-const MAT_PLAQUE = { x: 61, w: 218 };
+const MAT_PLAQUE = { w: MOBILE ? 256 : 218, x: SIDEBAR_W / 2 - (MOBILE ? 256 : 218) / 2, y: 5, h: 26 };
+
+/**
+ * How loud the low-health heartbeat sits on the SFX bus. A named constant
+ * because two places need the same answer now: the fade that starts the loop,
+ * and applyHeartbeatVolume, which re-seats it live when the slider moves.
+ */
+const HEARTBEAT_VOLUME = 0.55;
+
+/**
+ * THE BUTTON LANES EITHER SIDE OF THE HAND (2026-08-06).
+ *
+ * Two rows of plates, two lanes: PLAY HAND over HANDS+DECK on the left of the
+ * fan, DISCARD over SORT on its right. Desktop's five plates keep the exact
+ * coordinates they have always had — `home` IS the desktop layout, written down
+ * — and the phone lays them out from core/dragSelect.handButtonLanes instead,
+ * because on the phone the sidebar is 420 wide (HANDS used to be drawn ON the
+ * artifact mat at x 390) and the fan is allowed to be 1180 wide, which reaches
+ * both lanes at a twelve-card hand.
+ *
+ *   needLeft   HANDS + gap + DECK, the wider of the left lane's two rows.
+ *   needRight  DISCARD, which is also SORT.
+ */
+const BTN_LANE = {
+  rowY: [944, 1026],
+  gap: 18,
+  playW: 240, discardW: 240, sortW: 240, handsW: 152, deckW: 152,
+  gutter: MOBILE ? 18 : 12,
+  // How much air the outermost card keeps to itself. The card is 164 wide on
+  // the phone and its corner filigree is the part a plate must not touch.
+  clear: MOBILE ? 26 : 18,
+  minScale: 0.62,
+  // Desktop's shipped homes, by name. Never read on mobile.
+  home: {
+    play: 552, discard: -194, sort: -194, hands: 466, deck: 636,
+  },
+};
+BTN_LANE.needLeft = BTN_LANE.handsW + BTN_LANE.gap + BTN_LANE.deckW;   // 322
+BTN_LANE.needRight = BTN_LANE.discardW;                                 // 240
+
+/**
+ * THE INFO STACK OVER A CREATURE'S HEAD, AS NUMBERS (JC, 2026-08-06).
+ *
+ * "Enemy HP bars, names, intent icons and numbers enlarged for phone
+ * legibility" — and, on desktop, "intent icons + numbers up a notch" (his test
+ * case: the Sabre-Toothed Rabbit fight, where a 41px glyph and a 31px numeral
+ * read as decoration rather than as the thing you are about to take).
+ *
+ * Written as ONE table because the stack is a stack: growing the name without
+ * growing `hpRow` puts the letters through the bar, and growing the intent
+ * without growing `lift` walks the icons down onto the creature's face. The
+ * three rows and the headroom above them move together or not at all.
+ *
+ *   lift     how far ABOVE the sprite's top edge the stack starts. Bigger rows
+ *            need more of it, or the bottom of the intent row lands on a head.
+ *   hpRow /  the two rows' offsets from the stack's top.
+ *   intentRow
+ *
+ * The verification driver asserts the SIZES OUT OF THIS TABLE rather than out
+ * of a literal it keeps its own copy of, so a future retune cannot pass a test
+ * that is measuring last week's layout.
+ */
+const ENEMY_HUD = {
+  nameSize: MOBILE ? 30 : 23,
+  bossNameSize: MOBILE ? 44 : 34,
+  lift: MOBILE ? 101 : 70,
+  hpRow: MOBILE ? 46 : 36,
+  intentRow: MOBILE ? 108 : 84,
+  barH: MOBILE ? 34 : 24,
+  barFillH: MOBILE ? 26 : 18,
+  barMin: MOBILE ? 300 : 220,
+  barMax: MOBILE ? 400 : 300,
+  hpTextSize: MOBILE ? 21 : 15,
+  chipIcon: MOBILE ? 30 : 22,
+  chipTextSize: MOBILE ? 25 : 19,
+  statusIcon: MOBILE ? 32 : 24,
+  statusStep: MOBILE ? 84 : 64,
+  // Air kept between one body's health bar and the next body's. See fitBarWidth.
+  barLaneAir: 24,
+  sigSize: MOBILE ? 27 : 21,
+  sigRow: MOBILE ? 56 : 44,
+};
+
+/** The telegraph itself. Desktop is JC's "up a notch"; the phone is a size class on. */
+const INTENT_ART = {
+  icon: MOBILE ? 58 : 46,
+  numSize: MOBILE ? 44 : 36,
+  // Per-effect advance along the row: one with a printed number, one without.
+  wValue: MOBILE ? 128 : 104,
+  wPlain: MOBILE ? 74 : 60,
+  hitW: MOBILE ? 380 : 320,
+  hitH: MOBILE ? 88 : 70,
+  stampSize: MOBILE ? 34 : 29,
+};
+
+/** The boss marquee across the top of the arena. */
+const BOSS_BAR = {
+  // 1120 and not more: centred on ARENA_CX (1380) the strip runs 820..1940,
+  // which is the widest that still clears the potion mat's left edge (1965).
+  stripW: MOBILE ? 1120 : 900,
+  gap: 40,
+  nameY: MOBILE ? 52 : 44, nameYDuo: MOBILE ? 44 : 38,
+  barY: MOBILE ? 128 : 100, barYDuo: MOBILE ? 116 : 92,
+  barH: MOBILE ? 56 : 42, barHDuo: MOBILE ? 46 : 34,
+  nameSize: MOBILE ? 52 : 38, nameSizeDuo: MOBILE ? 38 : 28,
+  hpTextSize: MOBILE ? 30 : 21, hpTextSizeDuo: MOBILE ? 24 : 17,
+  chipDrop: MOBILE ? 26 : 18,
+  // The intent row rides over the boss's head, but never above the marquee's
+  // own chips — this is the floor it is clamped to.
+  intentFloor: MOBILE ? 208 : 150,
+};
 
 // --- Score equation readout (replaces the old tapered hand banner) ---
 // The band between the enemy nameplates (which bottom out around y=450) and
@@ -170,9 +343,9 @@ const EQ_GAP = 32;                 // half-gap: numbers grow OUTWARD from the ×
 const fmtMult = (m) => (Math.abs(m - Math.round(m)) < 0.005
   ? `${Math.round(m)}` : `${Math.round(m * 100) / 100}`);
 
-/** "Flush or better" for Meteor Sigil — the two SECRET hands count too. */
+/** "Flush or better" for Meteor Sigil — the three SECRET hands count too. */
 const FLUSH_PLUS = new Set([
-  'flush', 'fullHouse', 'quads', 'straightFlush', 'fiveOfAKind', 'flushFive',
+  'flush', 'fullHouse', 'quads', 'straightFlush', 'fiveOfAKind', 'flushHouse', 'flushFive',
 ]);
 
 /**
@@ -721,7 +894,7 @@ export class CombatScene extends Phaser.Scene {
       for (const a of this.propHolders('oneCardValue')) grant(a, cards[0], a.props.oneCardValue);
       // Crown of the High Roller: the opening lone Ace is crowned.
       if (this.handsThisFight === 0 && cards[0].rank === 14) {
-        for (const a of this.propHolders('aceCrown')) grant(a, cards[0], 10);
+        for (const a of this.propHolders('aceCrown')) grant(a, cards[0], ACE_CROWN_VALUE);
       }
     }
 
@@ -763,19 +936,82 @@ export class CombatScene extends Phaser.Scene {
 
   // ---------------- Scene setup ----------------
 
+  /**
+   * THE BODIES IN THIS ROOM, BEFORE THE ARENA IS BUILT.
+   *
+   * The bestiary left the boot set: 78 creature textures at 264 MB, of which a
+   * fight puts THREE on the sand. MapScene prefetches the whole act in the
+   * background the moment its board stands, so the ordinary road into a fight
+   * finds everything already resident and this gate resolves synchronously —
+   * but "ordinary" is doing a lot of work in a project with ~78 verification
+   * drivers, and the roads that skip the map are precisely the ones that would
+   * otherwise draw green rectangles:
+   *
+   *     scene.start('Combat', { nodeId })     a driver, straight in
+   *     __hf.forceEncounter([...])            an audition line-up from any act
+   *     a CONTINUE that resumes mid-fight     no map was ever built
+   *
+   * So the gate is on create(), where every one of them has to come through.
+   * `init()` has already rolled the encounter and written the checkpoint, so
+   * `this.encounter.defs` is the exact, final list of bodies — including a
+   * boss's openers and anything it will raise later, which encounterBundle
+   * walks for us.
+   *
+   * The hero's own art rides along: the painted cardfaces this deck is drawn
+   * with and the skin the player is wearing. Both fall back gracefully on
+   * their own (CardSprite and heroTextureFor have always guarded), so they are
+   * here for the look and not for the crash.
+   */
   create() {
+    const need = [
+      ...actBundle(run.actIndex, run),
+      ...encounterBundle(this.encounter?.defs ?? [], run),
+      ...heroCardfaces(run.chrId),
+      ...skinBundle(equippedSkin(run.chrId)),
+      // THE ORACLE'S RECEIPT wears one of her twenty painted cards under the
+      // hero's face for the whole run. Nineteen of them were released the moment
+      // a future was taken; this is the one that was not, and a CONTINUE that
+      // resumes straight into a fight has never fetched it at all.
+      oracleCardKey(run.oracle),
+    ].filter(Boolean);
+    gateOn(this, need, () => this.buildScene(), { label: 'The fight', ensure, missingKeys });
+  }
+
+  buildScene() {
     applyMobileCamera(this);   // no-op on desktop
     installLongPress(this);    // hold = hover on touch; no-op on desktop
     window.__hfScene = 'combat';
+    /**
+     * THE PACK TABLE, FETCHED WHILE THE FIGHT HAPPENS. Every road out of this
+     * room ends at a painted wrapper — the reward shelf, the elite's spoils, the
+     * act-clear bounty — and eight covers is 15.8 MB. MapScene prefetches them
+     * on arrival, so this is the backstop for the road that skipped the map: a
+     * CONTINUE that resumed straight into a fight has never fetched one.
+     *
+     * Fire-and-forget, and it has a whole fight to land in.
+     */
+    ensure(this, packCovers());
     // Scene is a singleton reused across fights — reset low-HP border state.
     this.lowHpMode = null;
     this.lowHpVignette = null;
+    // THE HEARTBEAT RIDES THE LIVE SFX BUS. Registered here (not where the loop
+    // starts) so there is exactly one subscription per fight, unregistered on
+    // shutdown so a scene that is gone cannot be asked to re-seat a sound.
+    this._sfxLoopOff?.();
+    this._sfxLoopOff = registerSfxLoop(() => this.applyHeartbeatVolume());
+    this.events.once('shutdown', () => { this._sfxLoopOff?.(); this._sfxLoopOff = null; });
     this.pstatTip = null;      // hover tip from the previous fight died with the display list
     // ...and the Oracle chip and ITS tip, for exactly the same reason: both
     // died with the last fight's display list and a kept handle would let a
     // pointerout from this fight destroy an object that no longer exists.
     this.oracleChip = null;
     this.oracleTip = null;
+    // ...and the PASSIVE chip stacked above her, which is the same object with
+    // the same lifetime — plus the running total of whatever it floated on the
+    // last fight's final hand.
+    this.passiveChip = null;
+    this.passiveTip = null;
+    this._passivePulse = null;
     // ...and the end screen's handles. A SINGLETON scene that kept them would
     // hand a verification run a PLAY AGAIN button from a run that is over.
     this._endUI = null;
@@ -1209,6 +1445,129 @@ export class CombatScene extends Phaser.Scene {
         this.replaceCardSprite(cs);
         return { id: cs.card.id, rank: cs.card.rank, suit: cs.card.suit, mod: cs.card.mod ?? null };
       },
+      /**
+       * THE ARTIFACT MAT'S LAYOUT, as numbers (2026-08-06).
+       *
+       * The mat grew into the band the kit blurb vacated and every icon,
+       * socket, ordinal and USE tag grew with it, which is exactly the kind of
+       * change that looks right in one screenshot and collides in the next
+       * (six relics, the 4-wide re-column, THE GLOVE in its pouch). So the
+       * footprint is readable rather than photographable: a driver can assert
+       * that no two cells touch, that every cell is on the leather, that
+       * nothing has climbed onto the brass, and that the leather itself still
+       * clears the status rows above it.
+       */
+      /**
+       * THE FAN AND THE FIVE PLATES AROUND IT, as numbers (2026-08-06).
+       *
+       * The phone's fan is allowed to be 1180 wide and the plates either side
+       * of it move and shrink to stay out of its way, which is exactly the kind
+       * of layout that is obviously fine in the screenshot somebody took at
+       * eight cards. So a driver can stage 5, 8 and 12 and assert the boxes do
+       * not intersect, rather than looking at three pictures.
+       */
+      /**
+       * DEAL EXACTLY N CARDS. The fan/plate collision only shows up at hand
+       * sizes the game reaches through relics (the Overstuffed Satchel, the
+       * Tailored Sleeve, Bottled Frenzy on top of both) or through a boss
+       * shrinking it — and farming those to photograph a layout is not a test.
+       * Rides `tempHandSize`, which is the real channel Frenzy uses.
+       */
+      stageHand: (n) => {
+        this.tempHandSize = n - this.player.handSize;
+        this.redrawHand();
+        return this.handCards.length;
+      },
+      handAudit: () => {
+        const box = o => (o ? {
+          x: o.x, y: o.y, w: o.displayWidth, h: o.displayHeight,
+          left: o.x - o.displayWidth / 2, right: o.x + o.displayWidth / 2,
+          top: o.y - o.displayHeight / 2, bottom: o.y + o.displayHeight / 2,
+          label: o.getData?.('hfLabel') ?? null,
+        } : null);
+        const cards = (this.handCards ?? []).map(cs => ({
+          x: cs.baseX, y: cs.baseY,
+          left: cs.baseX - CARD.w / 2, right: cs.baseX + CARD.w / 2,
+          top: cs.baseY - CARD.h / 2, bottom: cs.baseY + CARD.h / 2,
+        }));
+        return {
+          card: { w: CARD.w, h: CARD.h, fanY: CARD.fanY, spread: CARD.fanSpread,
+            maxWidth: CARD.fanMaxWidth, arcMax: CARD.fanArcMax },
+          n: cards.length, layout: this._handLayout ?? null, lanes: this._btnLanes ?? null,
+          cards,
+          buttons: [this.playBtn, this.handsBtn, this.deckBtn, this.discardBtn, this.sortBtn]
+            .map(box).filter(Boolean),
+          sidebarW: SIDEBAR_W, gameW: GAME_W, gameH: GAME_H,
+        };
+      },
+      /**
+       * WHAT THE ENEMY STACK IS MADE OF. The sizes come from ENEMY_HUD /
+       * INTENT_ART / BOSS_BAR rather than from the objects, so a driver
+       * asserts the TABLE the layout is built from instead of keeping its own
+       * copy of last week's literals.
+       */
+      hudSizes: () => ({ enemy: { ...ENEMY_HUD }, intent: { ...INTENT_ART }, boss: { ...BOSS_BAR } }),
+      /** Live enemy plates, for the "does it clear the head" audit. */
+      enemyStacks: () => (this.enemies ?? []).filter(e => e.alive).map(e => ({
+        name: e.def?.name, boss: !!e.def?.boss, bossBar: !!e.bossBar,
+        nameY: e.uiName?.y, nameSize: e.uiName?.style?.fontSize,
+        hpY: e.hpBack?.y, hpH: e.hpBack?.displayHeight, hpW: e.hpBack?.displayWidth,
+        hpTextSize: e.hpText?.style?.fontSize,
+        intentY: e.intentY,
+        intentIcons: (e.intentIcons?.list ?? []).filter(o => o.type === 'Image')
+          .map(o => Math.round(o.displayWidth)),
+        intentNums: (e.intentIcons?.list ?? []).filter(o => o.text != null)
+          .map(o => o.style?.fontSize),
+        spriteTop: Math.round((e.groundY ?? 0) - (e.sprite?.displayHeight ?? 0)),
+      })),
+      /**
+       * THE LOW-HEALTH LOOP'S LIVE LEVEL.
+       *
+       * `volume` is read off the Web Audio gain node, and a gain scheduled with
+       * setValueAtTime does not show up there until the next render quantum —
+       * so a driver that asks in the same tick it moved the slider reads the
+       * PREVIOUS value and concludes, wrongly, that nothing happened. `target`
+       * is what it is on its way to; sleep a beat, then assert they agree.
+       */
+      heartbeat: () => (this.heartbeat
+        ? {
+          playing: this.heartbeat.isPlaying, volume: this.heartbeat.volume,
+          base: HEARTBEAT_VOLUME, target: HEARTBEAT_VOLUME * sfxBusVolume(),
+        }
+        : null),
+      /** Force the loop up without waiting for a fight to go badly. */
+      forceHeartbeat: (hpFrac = 0.15) => {
+        this.player.hp = Math.max(1, Math.round(this.player.maxHp * hpFrac));
+        this.updateHeartbeat();
+        this.applyHeartbeatVolume();     // skip the 600ms fade for the audit
+        return HEARTBEAT_VOLUME * sfxBusVolume();
+      },
+      /** Move the SFX slider the way the settings menu does, from a driver. */
+      setSfxVolume: (v) => {
+        settings.sfx = v;
+        refreshSfxVolume();
+        return HEARTBEAT_VOLUME * sfxBusVolume();
+      },
+      matAudit: () => ({
+        sidebarW: SIDEBAR_W,
+        mat: {
+          x: 0, y: MAT.y, w: MAT.canvasW, h: MAT.canvasH,
+          bodyX: MAT.pad, bodyY: MAT.bodyTop, bodyW: MAT.bodyW, bodyH: MAT.bodyH,
+          bodyBottom: MAT.bottom, cx: MAT.cx, cy: MAT.cy,
+        },
+        plaque: { x: MAT_PLAQUE.x, y: MAT.y + MAT_PLAQUE.y, w: MAT_PLAQUE.w, h: MAT_PLAQUE.h },
+        // The lowest ink ABOVE the mat: the last of the five status rows.
+        statusBottom: this.handsText ? this.handsText.y + this.handsText.height / 2 : 0,
+        cells: (this.artifactIcons ?? []).map((ic, i) => (ic?.active ? {
+          i, x: ic.x, y: ic.y, w: ic.displayWidth, h: ic.displayHeight,
+          nook: ic.x > SIDEBAR_W,
+        } : null)).filter(Boolean),
+        nook: { x: NOOK.x, y: NOOK.y, worn: nookArtifacts().length },
+        chips: {
+          passive: this.passiveChip ? { x: this.passiveChip.x, y: this.passiveChip.y, size: this.passiveChip.chipSize } : null,
+          oracle: this.oracleChip ? { x: this.oracleChip.x, y: this.oracleChip.y, size: this.oracleChip.chipSize } : null,
+        },
+      }),
       /** What the CURRENT selection evaluates to, straight from the evaluator. */
       previewHand: () => {
         const cards = this.selected.map(c => c.card);
@@ -1366,7 +1725,33 @@ export class CombatScene extends Phaser.Scene {
         score: this.eqScoreVal, mult: this.eqMultVal, multApplies: this.eqMultApplies,
         scoreIsDamage: this.eqScoreIsDamage, slamAt: this.eqSlamAt ?? 0,
         multAlpha: this.eqMult?.alpha ?? 0,
+        // What the equation OPENED on, before a card ticked (2026-08-06).
+        open: this._eqOpen ?? null,
       }),
+      /**
+       * THE PASSIVE CHIP, as plain data (2026-08-06).
+       *
+       * `mounted`/`chr`/`at` prove the chip exists and where; `fired` is the
+       * attribution core/passives.js computed for the LAST hand, and `pulses`
+       * is what the cascade actually did about it — the ledger rows that
+       * carried a passive. A hand the passive sat out reports fired: null and
+       * pulses: [], which is the assertion that matters most: no contribution,
+       * no bow.
+       */
+      passiveState: () => {
+        const fired = passiveAttribution(run.chrId, this._lastRes ?? null);
+        return {
+          mounted: !!this.passiveChip?.active,
+          chr: run.chrId,
+          at: this.passiveChip ? { x: this.passiveChip.x, y: this.passiveChip.y, size: this.passiveChip.chipSize } : null,
+          tipOpen: !!this.passiveTip,
+          fired,
+          label: this._passivePulse?.labelObj?.text ?? null,
+          uses: this._passivePulse?.uses ?? 0,
+          pulses: (this._pulseLog ?? []).filter(r => r.passive)
+            .map(r => ({ i: r.i, id: r.passive, amount: r.passiveAmount, mult: r.mult, add: r.add })),
+        };
+      },
       /**
        * PATCH 0803 §3 — the FEEL pass, as plain scalars. `cascadeMs` is the wall
        * clock from the PLAY HAND press to the equation slamming shut, which is
@@ -1426,6 +1811,11 @@ export class CombatScene extends Phaser.Scene {
           benchedEthereal: this._benchedEthereal ?? 0,
           poisonConversion: this.poisonConversion(),
           effMult: r.effMult, baseMult: r.baseMult, baseSum: r.baseSum, multApplies: r.multApplies,
+          // THE HANDS OVERHAUL (2026-08-06): the hand's OWN base value, levels
+          // included, and the level it was read at. Together with baseMult they
+          // are the opening equation the banner paints — exposed so a driver can
+          // assert `base × mult` against HAND_DEFS instead of reading the canvas.
+          handBase: r.handBase ?? 0, handLevel: r.handLevel ?? 0,
           outScale: r.outScale, handRepeat: r.handRepeat, valueFactor: r.valueFactor,
           // --- PATCH 0803-B, the five scoring changes, as plain scalars ------
           handRepeatAdd: r.handRepeatAdd ?? 0,   // "+N replays", additive
@@ -1433,6 +1823,11 @@ export class CombatScene extends Phaser.Scene {
           benchRepeat: r.benchRepeat ?? 1,
           chipsRead: r.chipsRead ?? 0,           // the hoard the mult read
           chipMultAdd: r.chipMultAdd ?? 0,       // ...as flat mult (Drusky)
+          // THE HERO PASSIVE'S OWN SHARE (2026-08-06): Dextra's few-card × on
+          // the mult side, the Bull's Diamond × on the score side. 1 means the
+          // passive did not fire, which is what the chip's silence is proving.
+          passiveMultFactor: r.passiveMultFactor ?? 1,
+          passiveGemFactor: r.passiveGemFactor ?? 1,
           chipMultFactor: r.chipMultFactor ?? 1, // ...or as a × (the Solid Gold Sack)
           // THE THREE LAYERS per scoring card, so a driver can prove an ECHO
           // card resolved onto the STAMP layer whichever spelling it carried.
@@ -1769,11 +2164,12 @@ export class CombatScene extends Phaser.Scene {
     }
 
     // --- artifact mat: recessed leather panel, stitched, riveted, with the
-    //     ARTIFACTS plaque straddling its top edge. Canvas is 340x240; the mat
-    //     itself is the same 318x196 footprint the old wood box had. ---
+    //     ARTIFACTS plaque straddling its top edge. Cut at the exact size this
+    //     build will draw it (see MAT), so neither sidebar scales the leather
+    //     and the stitching stays square on both. ---
     if (!this.textures.exists('hud_mat')) {
       const m = this.make.graphics({ x: 0, y: 0 }, false);
-      const MX = 11, MY = 22, MW = 318, MH = 196, R = 16;
+      const MX = MAT.pad, MY = MAT.lip, MW = MAT.bodyW, MH = MAT.bodyH, R = 16;
       const cx = MX + MW / 2, cy = MY + MH / 2;
 
       m.fillStyle(0xf6e8c8, 0.45);                    // bounce rim: punched into paper
@@ -1825,17 +2221,17 @@ export class CombatScene extends Phaser.Scene {
       // the label outgrew it the night the row started stating its own rule, so
       // the brass now spans PW and the label is clamped to fit it (below) —
       // whatever the label ends up saying, it sits ON the plaque.
-      const PW = 218, PX = MAT_PLAQUE.x;
+      const PW = MAT_PLAQUE.w, PX = MAT_PLAQUE.x, PY = MAT_PLAQUE.y, PH = MAT_PLAQUE.h;
       m.fillStyle(0x241505, 0.32);
-      m.fillRoundedRect(PX - 1, 7, PW + 2, 27, 9);
+      m.fillRoundedRect(PX - 1, PY + 2, PW + 2, PH + 1, 9);
       m.fillStyle(0x4a3018, 1);
-      m.fillRoundedRect(PX, 5, PW, 26, 9);
+      m.fillRoundedRect(PX, PY, PW, PH, 9);
       m.fillStyle(0x5f4324, 1);
-      m.fillRoundedRect(PX + 2, 7, PW - 4, 10, { tl: 7, tr: 7, bl: 0, br: 0 });
+      m.fillRoundedRect(PX + 2, PY + 2, PW - 4, 10, { tl: 7, tr: 7, bl: 0, br: 0 });
       m.lineStyle(1, 0x2a1808, 0.8);
-      m.strokeRoundedRect(PX, 5, PW, 26, 9);
+      m.strokeRoundedRect(PX, PY, PW, PH, 9);
 
-      m.generateTexture('hud_mat', 340, 240);
+      m.generateTexture('hud_mat', MAT.canvasW, MAT.canvasH);
       m.destroy();
     }
 
@@ -2020,50 +2416,35 @@ export class CombatScene extends Phaser.Scene {
     // ARTIFACTS: a stitched leather mat sunk into the parchment, big
     // free-floating icons in 2 rows of 3 — Balatro-style, they pulse as they
     // act during scoring. The mat art (incl. its plaque) is one generated
-    // texture; its 318x196 footprint is centred on (SIDEBAR_W/2, GAME_H-118).
-    // MOBILE: the mat grows with the 420 sidebar (bottom edge anchored).
-    const matImg = this.add.image(0, GAME_H - 238, 'hud_mat').setOrigin(0, 0);
-    if (MOBILE) {
-      const mw = SIDEBAR_W - 22, mh = mw * (196 / 318);
-      matImg.setDisplaySize(mw, mh).setPosition(11, GAME_H - 42 - mh);
-    }
+    // texture, cut and drawn 1:1 at this build's own footprint (see MAT), which
+    // is bottom-anchored and grew upward into the band the kit blurb used to
+    // occupy.
+    const matImg = this.add.image(0, MAT.y, 'hud_mat').setOrigin(0, 0);
     g.add(matImg);
     // The plaque states THE RULE, because the rule is invisible otherwise:
     // cards score, then the row resolves left to right, and the row is a
     // decision you make by dragging. (Full sentence in every relic's tooltip.)
     // Stroked like its two siblings on the same brass ('THE GLOVE', 'POTIONS'),
     // which already carried it. Pale cream on brass without one is the bug.
-    // MOBILE: the mat scaled up and its plaque band rose with it — the label
-    // follows the art instead of colliding with the taller icons below.
-    const plaqueY = MOBILE ? GAME_H - 42 - (SIDEBAR_W - 22) * (196 / 318) + 24 : GAME_H - 220;
+    const plaqueY = MAT.y + MAT_PLAQUE.y + MAT_PLAQUE.h / 2;
     const plaqueLabel = legible(this.add.text(SIDEBAR_W / 2, plaqueY, 'ARTIFACTS  ▸  LEFT TO RIGHT', {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '16px', color: '#e8d3a4',
     }), { shadow: false }).setOrigin(0.5);
     // Whatever the label says, it stays ON the brass: it used to spill off both
     // ends of a plaque cut for one word and read as a mis-set caption.
-    const plaqueW = MOBILE ? MAT_PLAQUE.w * ((SIDEBAR_W - 22) / 318) : MAT_PLAQUE.w;
-    if (plaqueLabel.width > plaqueW - 18) {
-      plaqueLabel.setScale((plaqueW - 18) / plaqueLabel.width);
+    if (plaqueLabel.width > MAT_PLAQUE.w - 18) {
+      plaqueLabel.setScale((MAT_PLAQUE.w - 18) / plaqueLabel.width);
     }
     g.add(plaqueLabel);
     this.artifactPanelG = this.add.container(0, 0).setDepth(DEPTH.panel + 2);
     this._artifactSig = null;
     this.renderArtifactPanel();
 
-    // MOBILE: the mat above grew upward — it is BOTTOM-anchored at GAME_H-42
-    // and scaled to the wider sidebar, so it climbs 49px higher than the
-    // desktop mat does and the band left for the kit blurb shrank to 48px.
-    // DRUSKY's four-clause kit wraps to three lines and was landing ON the
-    // brass. So on mobile the blurb takes back the dead 29px under the status
-    // rows AND is squeezed to whatever room is really there (fitKitBlurb) —
-    // the stageText / fitBossName contract, which no future kit string can
-    // break. Desktop keeps its own offset, its own size and its own wrap.
-    const kitLabel = this.add.text(SIDEBAR_W / 2, y + (MOBILE ? -18 : 14), this.chr.kit, {
-      fontFamily: '"Baloo 2"', resolution: 2, fontSize: MOBILE ? '19px' : '20px', color: PARCH.text, fontStyle: 'bold',
-      wordWrap: { width: SIDEBAR_W - 48 }, align: 'center',
-    }).setOrigin(0.5, 0);
-    g.add(kitLabel);
-    if (MOBILE) this.fitKitBlurb(kitLabel, matImg);
+    // (The kit blurb used to live HERE, between the last status row and the
+    // mat's brass — a paragraph of prose that was read once and then spent the
+    // rest of the run holding 80px of sidebar hostage while saying nothing
+    // about the hand being scored. It is the passive chip's job now, and the
+    // room is the mat's.)
 
     // Live hand math. It used to sit BELOW the fan's ceiling and get buried by
     // the very cards it was describing, so anchor it off the measured ceiling
@@ -2088,54 +2469,37 @@ export class CombatScene extends Phaser.Scene {
     }
 
     // ------------------------------------------------------------------
-    // THE ORACLE'S RECEIPT (JC, 2026-08-05: "put it under us").
+    // THE CHIP COLUMN: the passive, then THE ORACLE'S RECEIPT beneath it
+    // (JC, 2026-08-05: "put it under us" — and 2026-08-06, the passive above).
     //
     // WHERE, AND WHY IT IS THE ONLY WHERE. Everything below the portrait is
     // content-variable across the FULL width of the panel: the debuff row
     // spreads to fill it (pstatEntries derives its gap from SIDEBAR_W and
     // reaches x SIDEBAR_W-28 at fifteen entries), the five status rows squeeze
-    // to fit it (stageText, refreshAll), the kit blurb wraps to SIDEBAR_W-48
-    // and runs to FOUR lines on Drusky, and the artifact mat is wall to wall.
-    // The two gaps that survive all of that are 11px (HP bar to shield) and
-    // 41px (last status row to the kit) — and the second is 29px on the 420
-    // sidebar, where the mat grows upward. Nothing 46px fits in either.
+    // to fit it (stageText, refreshAll), and the artifact mat is wall to wall.
+    // The only gap that survives all of that is 11px (HP bar to shield).
+    // Nothing 46px fits in it.
     //
-    // So the chip goes in the portrait's own lane, at the hero card's bottom
-    // right corner. That box is bounded by FIXED geometry only: the card ends
-    // at SIDEBAR_W/2 + 99, the hero's name starts at y 324, and the thorn ring
-    // (radius 118 about SIDEBAR_W/2, 182) has closed back to x 245 by y 273.
-    // Hand size, kit length, debuff count and relic count cannot reach it, and
-    // the same expression clears the same way on both sidebar widths.
+    // So the chips go in the portrait's own lane, off the hero card's right
+    // edge. That box is bounded by FIXED geometry only: the card ends at
+    // SIDEBAR_W/2 + 99, the hero's name starts at y 324, and the thorn ring
+    // (radius 118 about SIDEBAR_W/2, 182) has closed back inside x
+    // SIDEBAR_W/2 + 103 by y 240 — so a 46px chip centred on +130 clears the
+    // painting at BOTH stops. Hand size, debuff count and relic count cannot
+    // reach the lane, and the same expressions clear the same way on both
+    // sidebar widths.
+    //
+    // The passive is the UPPER of the two on purpose: it is the one fact about
+    // the run that was true before the run began, and the one that will swell
+    // and shout during a cascade — so it sits nearer the hero it belongs to,
+    // and its floating label has clear parchment above it to fly into.
+    this.passiveChip = addPassiveChip(this, SIDEBAR_W / 2 + 130, 240, run.chrId,
+      // Its bow's label is clamped to the parchment, exactly as the mat's own
+      // pulse labels are: '1 CARD ×4' centred on a chip 40px from the sidebar's
+      // edge would otherwise hang half of itself over the arena.
+      { size: 46, depth: DEPTH.panel + 3, labelBounds: [96, SIDEBAR_W - 74] });
     this.oracleChip = addOracleChip(this, SIDEBAR_W / 2 + 130, 296, run.oracle,
       { size: 46, depth: DEPTH.panel + 3 });
-  }
-
-  /**
-   * SQUEEZE THE KIT BLURB ABOVE THE ARTIFACT MAT (mobile only).
-   *
-   * The mat is bottom-anchored and scaled to the sidebar, so on the 420 build
-   * the room above it is not a constant any more — and the kit strings are
-   * copy, which changes. Hand-tuning a font size per hero would be wrong the
-   * next time someone rewrites one, so the label is measured against the mat's
-   * REAL lid and stepped down until it clears: first the wrap (widening it is
-   * free on a 420 panel, and a wider line can delete a whole line), then the
-   * type, then — only if nothing legible fits — the block itself, which is
-   * exactly what stageText does when a floor label outgrows the sidebar.
-   *
-   * `lid` is the top of the brass plaque, drawn 5px down the 240px-tall
-   * hud_mat texture, read off the size the mat was ACTUALLY given rather than
-   * off a second copy of the numbers that placed it.
-   */
-  fitKitBlurb(label, matImg) {
-    const lid = matImg.y + 5 * (matImg.displayHeight / 240);
-    const room = lid - 6 - label.y;
-    if (room <= 0 || label.height <= room) return;
-    for (const size of [19, 18, 17, 16, 15, 14]) {
-      label.setWordWrapWidth(SIDEBAR_W - 26);
-      label.setFontSize(size);
-      if (label.height <= room) return;
-    }
-    label.setScale(Math.min(1, room / label.height));
   }
 
   /** Timed micro-animations so the HUD breathes: wiggles, glints, gleams. */
@@ -2214,14 +2578,23 @@ export class CombatScene extends Phaser.Scene {
     // MOBILE (v2): same grid, same home in the sidebar — just a size class up,
     // paid for by the sidebar's extra 80px (JC: "the artifact pad a bit
     // larger including the artifacts themselves").
+    // 2026-08-06: the mat grew into the kit blurb's band (see MAT) and the
+    // relics grew with it — a full size class on the 340 sidebar, a smaller
+    // step on the 420 one, which had less to gain because its mat was already
+    // the taller of the two. The row pair is centred on the leather's own
+    // middle rather than on a constant, so any future change to MAT.bodyH
+    // carries the grid, the ordinals, the chain grooves, the USE tags, the
+    // empty sockets and the drag code's row boundary with it in one edit.
     const cols = capacity > 6 ? 4 : 3;
     const spread = MOBILE ? (cols === 4 ? 96 : 126) : (cols === 4 ? 78 : 102);
-    const iconSize = MOBILE ? (cols === 4 ? 80 : 96) : (cols === 4 ? 66 : 78);
-    const socketR = MOBILE ? (cols === 4 ? 26 : 30) : (cols === 4 ? 21 : 24);
-    const rowGap = MOBILE ? 56 : 46;
+    const iconSize = MOBILE ? (cols === 4 ? 84 : 108) : (cols === 4 ? 72 : 92);
+    const socketR = MOBILE ? (cols === 4 ? 28 : 34) : (cols === 4 ? 23 : 28);
+    // The phone's leather grew 24px taller (see MAT), and the row pair opens up
+    // with it rather than leaving the extra room as a stripe of empty hide.
+    const rowGap = MOBILE ? 64 : 62;
     const cellOf = i => ({
-      x: SIDEBAR_W / 2 + ((i % cols) - (cols - 1) / 2) * spread,
-      y: GAME_H - (MOBILE ? 124 : 118) + (i < cols ? -rowGap : rowGap),
+      x: MAT.cx + ((i % cols) - (cols - 1) / 2) * spread,
+      y: MAT.cy + (i < cols ? -rowGap : rowGap),
     });
     const shown = Math.min(capacity, cols * 2);
 
@@ -2369,7 +2742,7 @@ export class CombatScene extends Phaser.Scene {
      */
     const HYST = 0.18;        // fractions of a slot
     const ROW_HYST = 18;      // px
-    const rowMidY = GAME_H - (MOBILE ? 124 : 118);
+    const rowMidY = MAT.cy;
     const slotIndexAt = (px, py, cur, n) => {
       let row = cols > 0 ? Math.floor(cur / cols) : 0;
       if (n > cols) {
@@ -2397,8 +2770,10 @@ export class CombatScene extends Phaser.Scene {
         this.artifactPanelG.add(noMirrorBadge(this, x + 26, y - 24, 11).setDepth(DEPTH.panel + 3));
       }
       // ACTIVE-USE relics hang a tab off their lower lip: brass and breathing
-      // while charged, cold iron and ✓ once spent. It is the button.
-      if (art.active) this.buildActiveTag(art, icon, x, y + 40);
+      // while charged, cold iron and ✓ once spent. It is the button. The offset
+      // is read off the ICON's own size so the tab keeps hanging off the lip
+      // rather than climbing onto the painting as the row's size class changes.
+      if (art.active) this.buildActiveTag(art, icon, x, y + iconSize / 2 + 1);
       const entry = { art, icon, shadow, dragging: false };
       entries.push(entry);
 
@@ -2932,7 +3307,10 @@ export class CombatScene extends Phaser.Scene {
     // run off the parchment's edge — nudge it back inside without moving the
     // relic it belongs to. Nook icons live outside the sidebar and are left be.
     const lx = icon.x < SIDEBAR_W ? Phaser.Math.Clamp(icon.x, 84, SIDEBAR_W - 84) : icon.x;
-    tot.labelObj = this.add.text(lx, icon.y - 54, label, {
+    // ...and it clears the ICON rather than a constant: the row changes size
+    // class with the mat, and a fixed -54 that cleared a 78px relic sits on top
+    // of a 92px one.
+    tot.labelObj = this.add.text(lx, icon.y - icon.displayHeight / 2 - 15, label, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: `${size}px`,
       color: job.color ?? '#ffd23e', stroke: '#241505', strokeThickness: 6,
     }).setOrigin(0.5).setDepth(DEPTH.overlay).setScale(0);
@@ -3023,6 +3401,22 @@ export class CombatScene extends Phaser.Scene {
     // the row, because that is where scoring.js actually added it.
     const chaosQueue = [...(this._chaosJobs ?? [])];
     this._chaosJobs = [];
+    // THE HERO PASSIVE, if it moved this hand at all (core/passives.js). It is
+    // scheduled like any other job — same 195ms tick, same ledger row, same
+    // eqAdd/eqMul contract — because to the player it IS a relic that happens
+    // to live above the oracle instead of on the mat. What it must NOT do is
+    // fire at the wrong moment: `when` names the passive's own position in the
+    // walk scoring.js performed, and the two jobs below are inserted at exactly
+    // that seam so the running total on screen is one the arithmetic held.
+    const passive = passiveAttribution(run.chrId, res);
+    const passiveJob = () => [null, {
+      passive, text: passive.label, color: passive.color,
+      eqAdd: passive.eqAdd || undefined, eqMul: passive.eqMul !== 1 ? passive.eqMul : undefined,
+    }];
+    // DRUSKY's hoard is flat mult paid at step 3 — BEFORE the relic walk, which
+    // is exactly the position the Solid Gold Sack exists to trade away — so his
+    // is the first thing that happens in the cascade.
+    if (passive?.when === 'open') jobs.push(passiveJob());
     // THE CHAIN, left to right. This is the exact list scoring.js walked, cell
     // by cell (mirrors sitting at the MIRROR's position), so what the player
     // watches climb is the order that produced the number.
@@ -3157,6 +3551,13 @@ export class CombatScene extends Phaser.Scene {
     }
     this._wheelSpent = null;
 
+    // DEXTRA's few-card ×N and THE BULL's Diamond ×2 both resolve AFTER the
+    // ordered walk (scoring step 5), so they take their bow here rather than at
+    // some relic's cell. The Bull's carries no eqMul on purpose: his doubling
+    // already ticked onto the SCORE side card by card, and a × on the mult
+    // would be the same damage claimed twice.
+    if (passive?.when === 'late') jobs.push(passiveJob());
+
     // THE ANCIENT SHIELD spends the wall on the mult. It resolves AFTER the
     // ordered walk in scoring.js (Zeal's exact position in the pipeline), so it
     // takes its bow here rather than in the loop above — a relic that pulsed at
@@ -3176,9 +3577,14 @@ export class CombatScene extends Phaser.Scene {
     // it takes its bow LAST with a job of its own (`a` is null) — the sidebar
     // ZEAL readout flares, a golden pulse crosses the hero, and the mult side
     // jumps by exactly the factor scoring.js already applied.
+    //
+    // His PASSIVE CHIP rides this same job rather than getting one of its own:
+    // the discharge IS his passive, and a second beat would move the mult twice
+    // for one spend. Hence `when: 'zeal'` in core/passives.js.
     if (res.zealConsumed > 0 && (res.zealFactor ?? 1) > 1) {
       jobs.push([null, {
         zeal: res.zealConsumed,
+        passive: passive?.when === 'zeal' ? passive : null,
         text: `ZEAL ${res.zealConsumed}  ×${Math.round(res.zealFactor * 100) / 100}`,
         color: COLORS.zeal, eqMul: res.zealFactor,
       }]);
@@ -3196,10 +3602,16 @@ export class CombatScene extends Phaser.Scene {
           slot: job.slot ?? (a ? run.artifacts.indexOf(a) : -1),
           add: job.eqAdd ?? job.add ?? 0, mult: job.eqMul ?? job.mult ?? 1,
           text: job.text ?? null,
+          // THE PASSIVE'S ROW, so a verification run can prove the chip swelled
+          // on the beat the mult moved — and, just as importantly, that it did
+          // not swell on a hand the passive sat out.
+          passive: job.passive?.id ?? null,
+          passiveAmount: job.passive?.amount ?? 0,
         });
         // ONE LADDER: the cascade used to restart its own ramp at 1.05 here,
         // which is what made a big hand sound like "rise, restart, rise".
         this.handTick('score_tick', { volume: 0.5 });
+        if (job.passive) pulsePassive(this, job.passive.label, { color: job.passive.color });
         if (a) this.pulseArtifact(a, job);
         else if (job.zeal) this.zealPulse(job.zeal, res.zealFactor);
         if (job.eqAdd) this.eqAddMult(job.eqAdd);
@@ -3506,6 +3918,14 @@ export class CombatScene extends Phaser.Scene {
     const stacks = Math.round(amount * rate);
     if (stacks <= 0) return 0;
     this.applyPoison(enemy, stacks);
+    // OPHELIA'S CHIP TAKES ITS BOW HERE, and only here. Her passive is the one
+    // of the five that is not arithmetic in the equation at all — it is an
+    // event, fired per damage event, long after eqSlam — so the attribution is
+    // measured off the stacks that were ACTUALLY applied rather than predicted
+    // from the hand. A blow that seeps nothing (a pure heal, a fully-gated
+    // strike) leaves the chip still, which is the whole contract.
+    const pa = passiveAttribution(run.chrId, null, { poisonSeep: stacks });
+    if (pa) pulsePassive(this, pa.label, { color: pa.color });
     // STORMCALLER'S IDOL (Ophelia only): the storm carries every drop of it to
     // every other body in the room, at full stacks.
     if (this.prop('poisonSpread') > 0) {
@@ -6055,6 +6475,39 @@ export class CombatScene extends Phaser.Scene {
    * It is a no-op for every name that already fits, which is all of them in a
    * one-body fight, so nothing that reads right today changes.
    */
+  /**
+   * THE HEALTH BAR FITS ITS LANE TOO (2026-08-06).
+   *
+   * The phone's bar is a size class wider (ENEMY_HUD.barMin 220 -> 300, barMax
+   * 300 -> 400) because a 24px-tall bar with a 15px numeral in it is not
+   * legible at arm's length — and ENEMY_SLOTS is the SAME table on both builds,
+   * so a three-body line-up whose neighbours are 240px apart got three 300px
+   * bars drawn through each other. The lane is what it always was; the plate
+   * in it now respects it, exactly the way fitBossName already made the
+   * nameplate respect it.
+   *
+   * `neighbourGap` is the same measurement both use, so a bar and a name can
+   * never disagree about how much room this body has.
+   */
+  fitBarWidth(enemy, dispW) {
+    let w = Math.min(ENEMY_HUD.barMax, Math.max(ENEMY_HUD.barMin, dispW * 0.9));
+    const gap = this.neighbourGap(enemy);
+    if (Number.isFinite(gap)) w = Math.min(w, Math.max(140, gap - ENEMY_HUD.barLaneAir));
+    return w;
+  }
+
+  /** Distance to the nearest OTHER enemy slot, or Infinity in a one-body fight. */
+  neighbourGap(enemy) {
+    const slots = this.enemySlots ?? [];
+    if (slots.length < 2) return Infinity;
+    const me = slots[enemy.slotIndex]?.dx;
+    if (!Number.isFinite(me)) return Infinity;
+    const gaps = slots
+      .filter((s, k) => k !== enemy.slotIndex && Number.isFinite(s?.dx))
+      .map(s => Math.abs(s.dx - me));
+    return gaps.length ? Math.min(...gaps) : Infinity;
+  }
+
   fitBossName(enemy, ex, nameY) {
     const label = enemy.uiName;
     if (!label?.width) return;
@@ -6095,7 +6548,10 @@ export class CombatScene extends Phaser.Scene {
     const bosses = (this.enemies ?? []).filter(e => e.alive && e.def?.boss);
     if (!bosses.length) return;
     bosses.sort((a, b) => (a.homeX ?? 0) - (b.homeX ?? 0));
-    const STRIP_W = 900, gap = 40;
+    // The strip is a size class wider on the phone (BOSS_BAR.stripW), which the
+    // 2340 canvas has room for: 1320 centred on ARENA_CX still clears the 420
+    // sidebar and the potion mat at the other end.
+    const STRIP_W = BOSS_BAR.stripW, gap = BOSS_BAR.gap;
     const w = bosses.length > 1
       ? (STRIP_W - gap * (bosses.length - 1)) / bosses.length : STRIP_W;
     bosses.forEach((enemy, i) => {
@@ -6112,9 +6568,12 @@ export class CombatScene extends Phaser.Scene {
     for (const s of Object.values(enemy.statusUI ?? {})) { s.icon?.destroy(); s.text?.destroy(); }
     enemy.bossBar = true;
 
-    const nameY = duo ? 38 : 44, barY = duo ? 92 : 100, barH = duo ? 34 : 42;
+    const nameY = duo ? BOSS_BAR.nameYDuo : BOSS_BAR.nameY;
+    const barY = duo ? BOSS_BAR.barYDuo : BOSS_BAR.barY;
+    const barH = duo ? BOSS_BAR.barHDuo : BOSS_BAR.barH;
     enemy.uiName = this.add.text(cx, nameY, `☠  ${def.name}  ☠`, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: duo ? '28px' : '38px',
+      fontFamily: 'Lilita One', resolution: 2,
+      fontSize: `${duo ? BOSS_BAR.nameSizeDuo : BOSS_BAR.nameSize}px`,
       color: '#ff5a5a', stroke: '#241505', strokeThickness: duo ? 6 : 8,
     }).setOrigin(0.5);
     enemy.uiName.setShadow(0, 5, '#000000', 10, true, true);
@@ -6126,7 +6585,8 @@ export class CombatScene extends Phaser.Scene {
     enemy.hpBarW = w - 6;
     const accent = this.add.rectangle(cx, barY - barH / 2 - 4, w, 4, 0xff5a5a).setAlpha(0.85);
     enemy.hpText = this.add.text(cx, barY, '', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: duo ? '17px' : '21px', color: '#fff',
+      fontFamily: 'Lilita One', resolution: 2,
+      fontSize: `${duo ? BOSS_BAR.hpTextSizeDuo : BOSS_BAR.hpTextSize}px`, color: '#fff',
       stroke: '#40101c', strokeThickness: 4,
     }).setOrigin(0.5);
 
@@ -6135,15 +6595,15 @@ export class CombatScene extends Phaser.Scene {
     // chip would slide beneath it. Shield under the right end, statuses
     // marching right from under the left end; a duo bar's chips stay inside
     // its own span by construction.
-    const chipY = barY + barH / 2 + 18;
+    const chipY = barY + barH / 2 + BOSS_BAR.chipDrop;
     const shX = cx + w / 2 - 6;
     enemy.shieldText = this.add.text(shX, chipY, '', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '19px', color: '#9aeaff',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${ENEMY_HUD.chipTextSize}px`, color: '#9aeaff',
       stroke: '#0a2b3a', strokeThickness: 4,
     }).setOrigin(1, 0.5).setAlpha(0);
     enemy.shieldIcon = this.add.image(shX - enemy.shieldText.width - 18, chipY, 'icon_shield')
       .setTint(0x7fe0f4).setAlpha(0);
-    enemy.shieldIcon.setScale(24 / Math.max(enemy.shieldIcon.width, enemy.shieldIcon.height));
+    enemy.shieldIcon.setScale(ENEMY_HUD.statusIcon / Math.max(enemy.shieldIcon.width, enemy.shieldIcon.height));
 
     enemy.statusUI = {};
     const sdefs = [['poison', 'icon_skull', 0x63d84a, '#8fe098', '#123a0c'],
@@ -6151,11 +6611,11 @@ export class CombatScene extends Phaser.Scene {
       ['brittle', 'icon_shield', 0xe0b050, '#ffd98f', '#3a2a0c']];
     const chipParts = [];
     sdefs.forEach(([key, icon, tint, color, strokeCol], idx) => {
-      const sx = cx - w / 2 + 14 + idx * 76;
+      const sx = cx - w / 2 + 14 + idx * (ENEMY_HUD.statusStep + 12);
       const i = this.add.image(sx, chipY, icon).setTint(tint).setAlpha(0);
-      i.setScale(24 / Math.max(i.width, i.height));
+      i.setScale(ENEMY_HUD.statusIcon / Math.max(i.width, i.height));
       const t = this.add.text(sx + 15, chipY, '', {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '19px', color,
+        fontFamily: 'Lilita One', resolution: 2, fontSize: `${ENEMY_HUD.chipTextSize}px`, color,
         stroke: strokeCol, strokeThickness: 4,
       }).setOrigin(0, 0.5).setAlpha(0);
       chipParts.push(i, t);
@@ -6176,11 +6636,12 @@ export class CombatScene extends Phaser.Scene {
     // transparent headroom, so 30px ABOVE the frame floated the row in empty
     // air. +14 into the frame kisses the art's actual crown; the 150 floor
     // still keeps it out of the marquee's chips.
-    const headY = Math.max((enemy.groundY ?? 700) - (enemy.sprite?.displayHeight ?? 400) + 14, 150);
+    const headY = Math.max((enemy.groundY ?? 700) - (enemy.sprite?.displayHeight ?? 400) + 14,
+      BOSS_BAR.intentFloor);
     enemy.intentY = headY;
     enemy.intentIcons?.setPosition(enemy.homeX, headY);
     enemy.intentHit?.setPosition(enemy.homeX, headY);
-    enemy.sigText?.setPosition(enemy.homeX, headY + 44);
+    enemy.sigText?.setPosition(enemy.homeX, headY + ENEMY_HUD.sigRow);
   }
 
   spawnEnemy(def, slot, index, { rise = false, slotIndex = index } = {}) {
@@ -6286,18 +6747,23 @@ export class CombatScene extends Phaser.Scene {
     });
 
     // Info stack rides high above the creature so nothing covers the art.
-    const uiTop = Math.max(groundY - dispH - 66, 40);
-    const nameY = uiTop, hpY = uiTop + 36, intentY = uiTop + 82;
-    const barW = Math.max(220, Math.min(300, dispW * 0.9));
+    // Every offset and every size comes out of ENEMY_HUD; the phone's rows are
+    // a size class up and the headroom (`lift`) grew with them, so the bottom
+    // of the intent row lands exactly where it always did relative to the head.
+    const uiTop = Math.max(groundY - dispH - ENEMY_HUD.lift, 40);
+    const nameY = uiTop, hpY = uiTop + ENEMY_HUD.hpRow, intentY = uiTop + ENEMY_HUD.intentRow;
+    const barW = this.fitBarWidth(enemy, dispW);
     enemy.uiName = this.add.text(ex, nameY, def.name + (def.boss ? '  ☠' : ''), {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: def.boss ? '34px' : '23px',
+      fontFamily: 'Lilita One', resolution: 2,
+      fontSize: `${def.boss ? ENEMY_HUD.bossNameSize : ENEMY_HUD.nameSize}px`,
       color: def.boss ? '#ff5a5a' : '#fff6e0', stroke: '#241505', strokeThickness: 6,
     }).setOrigin(0.5);
-    enemy.hpBack = this.add.rectangle(ex, hpY, barW, 24, 0x2a1520).setStrokeStyle(3, 0x38220f);
-    enemy.hpFill = this.add.rectangle(ex - barW / 2 + 2, hpY, barW - 4, 18, COLORS.enemyHp).setOrigin(0, 0.5);
+    enemy.hpBack = this.add.rectangle(ex, hpY, barW, ENEMY_HUD.barH, 0x2a1520).setStrokeStyle(3, 0x38220f);
+    enemy.hpFill = this.add.rectangle(ex - barW / 2 + 2, hpY, barW - 4, ENEMY_HUD.barFillH, COLORS.enemyHp).setOrigin(0, 0.5);
     enemy.hpBarW = barW - 4;
     enemy.hpText = this.add.text(ex, hpY, '', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '15px', color: '#fff', stroke: '#40101c', strokeThickness: 3,
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${ENEMY_HUD.hpTextSize}px`,
+      color: '#fff', stroke: '#40101c', strokeThickness: 3,
     }).setOrigin(0.5);
     // SHIELD chip, hung off the health bar: the icon_shield glyph + ◆N in
     // cyan, hidden entirely until something grants a pool. It normally sits to
@@ -6309,16 +6775,20 @@ export class CombatScene extends Phaser.Scene {
     // ...and the NAMEPLATE gets the same treatment, for the same reason and off
     // the same geometry. See fitBossName: a 34px boss name is the one label in
     // the arena long enough to reach its neighbour's.
-    if (def.boss) this.fitBossName(enemy, ex, nameY);
+    // EVERY nameplate now, not only a boss's: the phone prints ordinary names
+    // at 30px instead of 23, which is enough for BELOW-ZERO SKELETON to reach
+    // its neighbour in a three-body line-up. It is still a no-op for every
+    // label that already fits, which is most of them on both builds.
+    this.fitBossName(enemy, ex, nameY);
     enemy.shieldIcon = this.add.image(chipX, hpY, 'icon_shield').setTint(0x7fe0f4).setAlpha(0);
-    enemy.shieldIcon.setScale(22 / Math.max(enemy.shieldIcon.width, enemy.shieldIcon.height));
+    enemy.shieldIcon.setScale(ENEMY_HUD.chipIcon / Math.max(enemy.shieldIcon.width, enemy.shieldIcon.height));
     enemy.shieldText = this.add.text(chipX + (matBlocked ? -14 : 14), hpY, '', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '19px', color: '#9aeaff',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${ENEMY_HUD.chipTextSize}px`, color: '#9aeaff',
       stroke: '#0a2b3a', strokeThickness: 4,
     }).setOrigin(matBlocked ? 1 : 0, 0.5).setAlpha(0);
     // Free-floating intent icons (no plate) with an invisible hover zone.
     enemy.intentIcons = this.add.container(ex, intentY);
-    enemy.intentHit = this.add.rectangle(ex, intentY, 300, 64, 0xffffff, 0.001);
+    enemy.intentHit = this.add.rectangle(ex, intentY, INTENT_ART.hitW, INTENT_ART.hitH, 0xffffff, 0.001);
     enemy.intentY = intentY;
     ui.add([enemy.uiName, enemy.hpBack, enemy.hpFill, enemy.hpText,
       enemy.shieldIcon, enemy.shieldText, enemy.intentHit, enemy.intentIcons]);
@@ -6330,8 +6800,8 @@ export class CombatScene extends Phaser.Scene {
     // whole rule on hover. refreshAll keeps it honest — see syncSignatureBadge.
     const sig = signatureOf(def);
     if (sig) {
-      enemy.sigText = this.add.text(ex, intentY + 44, '', {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '21px', color: sig.ink,
+      enemy.sigText = this.add.text(ex, intentY + ENEMY_HUD.sigRow, '', {
+        fontFamily: 'Lilita One', resolution: 2, fontSize: `${ENEMY_HUD.sigSize}px`, color: sig.ink,
         stroke: '#180c04', strokeThickness: 6, align: 'center',
       }).setOrigin(0.5);
       enemy.sigText.setShadow(0, 4, '#000000', 8, true, true);
@@ -6390,13 +6860,13 @@ export class CombatScene extends Phaser.Scene {
     // The shield chip took chipX; the statuses take the other end of the bar.
     const statusLeft = !matBlocked ? true : false;   // shield right → statuses left
     const sBase = statusLeft ? ex - barW / 2 - 18 : ex + barW / 2 + 18;
-    const sStep = (statusLeft ? -1 : 1) * 64;
+    const sStep = (statusLeft ? -1 : 1) * ENEMY_HUD.statusStep;
     sdefs.forEach(([key, icon, tint, color, strokeCol], idx) => {
       const cx = sBase + idx * sStep;
       const i = this.add.image(cx, hpY, icon).setTint(tint).setAlpha(0);
-      i.setScale(24 / Math.max(i.width, i.height));
+      i.setScale(ENEMY_HUD.statusIcon / Math.max(i.width, i.height));
       const t = this.add.text(cx + (statusLeft ? -15 : 15), hpY, '', {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '19px', color,
+        fontFamily: 'Lilita One', resolution: 2, fontSize: `${ENEMY_HUD.chipTextSize}px`, color,
         stroke: strokeCol, strokeThickness: 4,
       }).setOrigin(statusLeft ? 1 : 0, 0.5).setAlpha(0);
       ui.add([i, t]);
@@ -7599,19 +8069,76 @@ export class CombatScene extends Phaser.Scene {
 
   // ---------------- Hand UI ----------------
   buildHandUI() {
-    this.playBtn = this.makeButton(552, 944, 'btn_yellow', 'PLAY HAND', '#5b3a00', () => this.playHand());
-    this.discardBtn = this.makeButton(GAME_W - 194, 944, 'btn_red', 'DISCARD', '#4a0a10', () => this.discardSelected());
-    this.makeButton(GAME_W - 194, 1026, 'btn_dark', 'SORT: RANK', '#cfc8e8', (btn) => {
+    const H = BTN_LANE.home, [R1, R2] = BTN_LANE.rowY;
+    this.playBtn = this.makeButton(H.play, R1, 'btn_yellow', 'PLAY HAND', '#5b3a00',
+      () => this.playHand(), BTN_LANE.playW);
+    this.discardBtn = this.makeButton(GAME_W + H.discard, R1, 'btn_red', 'DISCARD', '#4a0a10',
+      () => this.discardSelected(), BTN_LANE.discardW);
+    this.sortBtn = this.makeButton(GAME_W + H.sort, R2, 'btn_dark', 'SORT: RANK', '#cfc8e8', (btn) => {
       this.sortMode = this.sortMode === 'rank' ? 'suit' : 'rank';
       btn.label.setText(this.sortMode === 'rank' ? 'SORT: RANK' : 'SORT: SUIT');
       this.sortHand();
-    });
+    }, BTN_LANE.sortW);
     this.sortMode = 'rank';
-    this.makeButton(466, 1026, 'btn_dark', 'HANDS', '#cfc8e8', () => handChartOverlay(this, run), 152);
-    this.makeButton(636, 1026, 'btn_dark', 'DECK', '#cfc8e8', () =>
-      deckInfoOverlay(this, run, { remaining: this.deck, spent: this.discardPile }), 152);
+    this.handsBtn = this.makeButton(H.hands, R2, 'btn_dark', 'HANDS', '#cfc8e8',
+      () => handChartOverlay(this, run), BTN_LANE.handsW);
+    this.deckBtn = this.makeButton(H.deck, R2, 'btn_dark', 'DECK', '#cfc8e8', () =>
+      deckInfoOverlay(this, run, { remaining: this.deck, spent: this.discardPile }), BTN_LANE.deckW);
+    // The plates NAME THEMSELVES so a driver asks for the one it wants rather
+    // than remembering where it used to be — the same contract the map's left
+    // column adopted when the capsule grew (see __hf.buttons()).
+    for (const [btn, label] of [[this.playBtn, 'PLAY HAND'], [this.discardBtn, 'DISCARD'],
+      [this.sortBtn, 'SORT'], [this.handsBtn, 'HANDS'], [this.deckBtn, 'DECK']]) {
+      btn.setData('hfLabel', label);
+    }
+    this.layoutHandButtons();
 
     this.buildEquationHUD();
+  }
+
+  /**
+   * PUT THE FIVE PLATES WHERE THE FAN IS NOT (mobile only).
+   *
+   * Called from layoutHand, so it re-runs on every deal, discard, sort, drag
+   * and Frenzy — every event that can change how wide the hand is. Desktop is
+   * a deliberate no-op: its fan is capped at 740 in a 1920 canvas and the
+   * shipped coordinates already clear it at every hand size the game can deal.
+   *
+   * `_handLayout` is written by layoutHand immediately before this call; the
+   * fallback covers the one frame where buildHandUI runs before any deal.
+   */
+  layoutHandButtons() {
+    if (!MOBILE || !this.playBtn) return;
+    const n = this.handCards?.length ?? 0;
+    const { startX = CARD.fanCenterX, spread = CARD.fanSpread } = this._handLayout ?? {};
+    const fanLeft = startX - CARD.w / 2;
+    const fanRight = startX + Math.max(n - 1, 0) * spread + CARD.w / 2;
+    const lanes = handButtonLanes(fanLeft, fanRight, {
+      leftWall: SIDEBAR_W, rightWall: GAME_W,
+      needLeft: BTN_LANE.needLeft, needRight: BTN_LANE.needRight,
+      gutter: BTN_LANE.gutter, clear: BTN_LANE.clear, minScale: BTN_LANE.minScale,
+    });
+    const [R1, R2] = BTN_LANE.rowY;
+    const sL = lanes.left.scale, sR = lanes.right.scale;
+    const place = (btn, x, y, w) => {
+      if (!btn) return;
+      btn.setDisplaySize(w, 66);
+      btn.setPosition(x, y);
+      btn.label.setPosition(x, y - 4);
+      // The plate shrank; the word on it has to fit inside what is left.
+      btn.label.setScale(1);
+      if (btn.label.width > w - 24) btn.label.setScale((w - 24) / btn.label.width);
+    };
+    const lx = lanes.left.x, rx = lanes.right.x;
+    const playW = BTN_LANE.playW * sL;
+    place(this.playBtn, lx + playW / 2, R1, playW);
+    const handsW = BTN_LANE.handsW * sL, deckW = BTN_LANE.deckW * sL, gap = BTN_LANE.gap * sL;
+    place(this.handsBtn, lx + handsW / 2, R2, handsW);
+    place(this.deckBtn, lx + handsW + gap + deckW / 2, R2, deckW);
+    const discardW = BTN_LANE.discardW * sR, sortW = BTN_LANE.sortW * sR;
+    place(this.discardBtn, rx - discardW / 2, R1, discardW);
+    place(this.sortBtn, rx - sortW / 2, R2, sortW);
+    this._btnLanes = lanes;
   }
 
   // ---------------- The score equation ----------------
@@ -7674,14 +8201,24 @@ export class CombatScene extends Phaser.Scene {
   }
 
   /**
-   * A new hand: name it, zero the score, and set the mult to where it STARTS —
-   * the printed hand mult plus the Smith's levels. Everything above that has to
-   * earn its way onto the number in front of the player.
+   * A new hand: name it, and set BOTH SIDES to where the hand itself starts.
+   *
+   * THE OPENING BEAT (JC, 2026-08-06 — THE HANDS OVERHAUL). The score side used
+   * to open on 0 and the mult on the hand's printed mult, which said that a
+   * Full House and a High Card begin the same conversation. Every hand now
+   * carries its OWN BASE VALUE as well as its mult (poker.js HAND_DEFS), both
+   * rising with the Smith's levels — so the equation opens on `base × mult`,
+   * the starting equation the player is working from, and the card ticks build
+   * on top of it instead of out of nothing.
+   *
+   * res.handBase is the number scoring.js actually put on baseSum, levels
+   * included, so the opening frame is not a second copy of the arithmetic.
+   *
    * Hands that deal no damage at all get a dimmed mult side, because that
-   * output genuinely does not multiply — and their total is the raw sum instead
-   * of a lie. (Since the 2026-08-01 Diamonds rework a gem hand DOES deal
-   * damage, so the wall lights up like everything else; the dim path now only
-   * belongs to the Bottomless Vile's damageless club hands.)
+   * output genuinely does not multiply. Since the base value rides EVERY hand
+   * that path is effectively unreachable now (a gem hand deals base × mult and
+   * still plates you); it is kept lit for the currency rewrites and costs
+   * nothing while nothing takes it.
    */
   eqBegin(res, ev) {
     // THE HAND'S ONE RISING LADDER starts here and does not reset again until
@@ -7695,12 +8232,22 @@ export class CombatScene extends Phaser.Scene {
     this.eqMultApplies = res.multApplies ?? (res.baseSum > 0);
     this.eqCurrency = res.scoreCurrency ?? 'damage';
     this.eqScoreIsDamage = this.eqCurrency === 'damage';
-    this.eqScoreVal = 0;
+    // THE HAND'S OWN BASE VALUE opens the score side — but only in the currency
+    // it is denominated in. A hand whose equation is counting shield or heal
+    // (the currency rewrites) opens on 0 exactly as it always did: the base is
+    // damage-side, and putting it on a ♥ readout would be a lie.
+    this.eqScoreVal = this.eqScoreIsDamage ? Math.round(res.handBase ?? 0) : 0;
     this.eqMultVal = res.baseMult;
+    // VERIFICATION HOOK (__hfCombat.eqState().open). The opening beat is one
+    // frame long before the card ticks start adding to it, so a driver that
+    // polls for it races the cascade and reads whatever the ticks got to first.
+    // Recording it here is the only way to assert `base × mult` was what the
+    // player was actually shown at the top of the hand.
+    this._eqOpen = { score: this.eqScoreVal, mult: this.eqMultVal, type: res.handType };
     this._eqScoreTween = null;
     this._eqMultTween = null;
     this.eqName.setText(`${ev.name}${res.handLevel ? `  Lv.${res.handLevel + 1}` : ''}`);
-    this.eqScore.setText('0');
+    this.eqScore.setText(fmtTotal(this.eqScoreVal));
     this.eqMult.setText(fmtMult(res.baseMult));
     for (const p of this.eqParts) {
       p._punch?.remove(); p._punch = null;
@@ -7722,6 +8269,16 @@ export class CombatScene extends Phaser.Scene {
     const soft = this.eqMultApplies ? 1 : 0.42;
     this.tweens.add({ targets: [this.eqName, this.eqScore], alpha: 1, duration: 180, delay });
     this.tweens.add({ targets: [this.eqTimes, this.eqMult], alpha: soft, duration: 180, delay });
+    // THE HAND LANDS AS A BLOW, not as a label: base × mult arrives together,
+    // punched, so the player reads "Full House: 30 × 4" as the thing they are
+    // building on before the first card lifts.
+    if (this.eqScoreVal > 0) {
+      this.time.delayedCall(delay + 20, () => {
+        if (!this.eqScore?.active) return;
+        this.eqPunch(this.eqScore, 1.24);
+        this.eqPunch(this.eqMult, 1.24);
+      });
+    }
     if (this.eqSplashVal > 0) {
       this.tweens.add({ targets: this.eqAoe, alpha: 1, duration: 180, delay: delay + 60 });
     }
@@ -7961,8 +8518,11 @@ export class CombatScene extends Phaser.Scene {
     // it that quietly drifts the next time the spread is retuned.
     const { startX, spread, slots } = fanSlots(n, {
       spread: CARD.fanSpread, centerX: CARD.fanCenterX, fanY: CARD.fanY,
+      maxWidth: CARD.fanMaxWidth, arcMax: CARD.fanArcMax,
     });
     this._handLayout = { startX, spread };
+    // The fan just changed width; the plates either side of it have to give way.
+    this.layoutHandButtons();
     order.forEach((cs, i) => {
       const { x: tx, y: ty, angle: ang } = slots[i];
       cs.baseX = tx; cs.baseY = ty; cs.baseAngle = ang;
@@ -9005,6 +9565,9 @@ export class CombatScene extends Phaser.Scene {
     if (this.hypnoCard) { this.hypnoCard.setLockState(null); this.hypnoCard = null; }
 
     this.resetArtifactPulses();
+    // ...and the passive chip's own running total, which is the mat's rule
+    // applied to the one socket that is not on the mat.
+    resetPassivePulse(this);
 
     // Cards LAND left to right. this.selected is CLICK order, so a full house
     // picked K,7,K,7,K used to deal its row — and tick, and morph, and feed the
@@ -10409,8 +10972,9 @@ export class CombatScene extends Phaser.Scene {
         // ELITE SPOILS (JC, 2026-07-31; mixed pool PATCH 0803 §2): an elite used
         // to hand you one relic, take it or leave it. It drops THREE and you
         // choose, and since 0803 those three come off ONE weighted pool of
-        // relics AND potions — with at least one artifact always among them, and
-        // the Bounty Board's rarity boost still applied.
+        // relics AND potions — with at least one artifact always among them.
+        // The Bounty Board promotes ONE offering a tier (2026-08-06), ordinary
+        // and Forged shelves alike — see elites.promoteOneOffering.
         //
         // A FORGED elite (IRON and up, 1 in 4, flagged on the node when the map
         // was generated) pays a different table entirely: RARE or better,
@@ -10599,6 +11163,18 @@ export class CombatScene extends Phaser.Scene {
     const heal = Math.round(this.player.maxHp * 0.3);
     this.player.hp = Math.min(this.player.maxHp, this.player.hp + heal);
     const next = actOf(nextIdx);
+    /**
+     * THE DESCENT'S OWN PREFETCH. This panel names the world below out loud and
+     * then makes the player read it, wait out a 1250ms beat, watch a payday and
+     * open a bounty wrap before DESCEND is even armed — which is several seconds
+     * of ceremony in front of a 36 MB bundle. Kicking it here means the map's
+     * gate on the other side has nothing left to wait for.
+     *
+     * ENDLESS INCLUDED: `actBundle` resolves through actSlotFor, so index 8 asks
+     * for Act I's world again — the one MapScene evicted four descents ago, and
+     * the reason the endless stays flat instead of climbing.
+     */
+    ensure(this, actBundle(nextIdx, run));
     ov.add(this.add.text(GAME_W / 2, GAME_H / 2 - 62,
       `${clearedAct.name} falls silent.  You rest and recover ${heal} HP.`, {
         fontFamily: '"Baloo 2"', resolution: 2, fontSize: '24px', color: PARCH.textDim, fontStyle: 'bold',
@@ -11070,7 +11646,11 @@ export class CombatScene extends Phaser.Scene {
       yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
     });
     this._endUI.btn = btn;
-    btn.on('pointerdown', () => this.scene.start('CharacterSelect'));
+    // ON RELEASE, NOT ON PRESS (JC bug, 2026-08-06): starting the select scene
+    // on pointerDOWN let the same gesture's pointerUP land on whatever hero
+    // card had just been dealt under the cursor — which opened that hero's
+    // difficulty picker, reading as "the game chose Zelus for me".
+    btn.on('pointerup', () => this.scene.start('CharacterSelect'));
     // The recap says what the run DID; the deck says what it BECAME, and that
     // is the half a player wants to screenshot. The run is over and the save is
     // cleared by now, but run.runDeck is still standing in memory — guarded
@@ -11750,21 +12330,26 @@ export class CombatScene extends Phaser.Scene {
       // thirteen biome effects are switches, not quantities.
       ...BIOME_VALUE_EFFECTS,
     ]);
-    const parts = intent.effects.map(e => ({ e, w: showsValue.has(e.type) ? 92 : 54 }));
+    // SIZE COMES OUT OF INTENT_ART, not out of a literal: the glyph, the
+    // numeral and the per-effect advance have to grow together or a two-effect
+    // telegraph prints its second icon through its first one's number.
+    const R = INTENT_ART.icon / 2;
+    const parts = intent.effects.map(e => ({ e, w: showsValue.has(e.type) ? INTENT_ART.wValue : INTENT_ART.wPlain }));
     const totalW = parts.reduce((s, p) => s + p.w, 0);
     let x = -totalW / 2;
     for (const { e, w } of parts) {
       const def = CombatScene.INTENT_ICONS[e.type] ?? CombatScene.INTENT_ICONS.attack;
       // Plate-free icons: a soft cast shadow keeps them readable on any backdrop.
-      const shadow = this.add.image(x + 25, 4, def.key).setTint(0x140c08).setAlpha(0.55);
-      shadow.setScale(41 / Math.max(shadow.width, shadow.height));
-      const icon = this.add.image(x + 22, 0, def.key).setTint(def.tint);
-      icon.setScale(41 / Math.max(icon.width, icon.height));
+      const shadow = this.add.image(x + R + 3, 4, def.key).setTint(0x140c08).setAlpha(0.55);
+      shadow.setScale(INTENT_ART.icon / Math.max(shadow.width, shadow.height));
+      const icon = this.add.image(x + R, 0, def.key).setTint(def.tint);
+      icon.setScale(INTENT_ART.icon / Math.max(icon.width, icon.height));
       enemy.intentIcons.add(shadow);
       enemy.intentIcons.add(icon);
       if (showsValue.has(e.type)) {
-        const t = this.add.text(x + 48, 0, `${e.value}`, {
-          fontFamily: 'Lilita One', resolution: 2, fontSize: '31px', color: '#fff6e0', stroke: '#241505', strokeThickness: 7,
+        const t = this.add.text(x + INTENT_ART.icon + 4, 0, `${e.value}`, {
+          fontFamily: 'Lilita One', resolution: 2, fontSize: `${INTENT_ART.numSize}px`,
+          color: '#fff6e0', stroke: '#241505', strokeThickness: 7,
         }).setOrigin(0, 0.5);
         t.setShadow(2, 4, '#000000', 6);
         enemy.intentIcons.add(t);
@@ -11777,7 +12362,7 @@ export class CombatScene extends Phaser.Scene {
       for (const o of enemy.intentIcons.list) o.setAlpha?.(0.22);
       const bar = this.add.rectangle(0, 0, Math.max(150, totalW + 26), 5, 0x9adcff, 0.9).setAngle(-7);
       const stamp = this.add.text(0, 0, 'SILENCED', {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '27px', color: '#d8f2ff',
+        fontFamily: 'Lilita One', resolution: 2, fontSize: `${INTENT_ART.stampSize}px`, color: '#d8f2ff',
         stroke: '#0d2c3d', strokeThickness: 7,
       }).setOrigin(0.5).setAngle(-7);
       stamp.setShadow(2, 4, '#000000', 6);
@@ -11851,6 +12436,18 @@ export class CombatScene extends Phaser.Scene {
     return bars;
   }
 
+  /**
+   * Re-seat the heartbeat loop on the CURRENT sfx bus level. Called by
+   * core/sfx.refreshSfxVolume the moment a volume row moves, and once more from
+   * updateHeartbeat so a fade that is still in flight cannot land on the old
+   * number after the slider has already moved past it.
+   */
+  applyHeartbeatVolume() {
+    if (!this.heartbeat) return;
+    this.tweens.killTweensOf(this.heartbeat);
+    this.heartbeat.setVolume(HEARTBEAT_VOLUME * sfxBusVolume());
+  }
+
   /** Low-health heartbeat loop — pulses under everything while you're in danger. */
   updateHeartbeat() {
     const frac = this.player.hp / this.player.maxHp;
@@ -11876,7 +12473,11 @@ export class CombatScene extends Phaser.Scene {
       if (!this.cache.audio.exists('sfx_heartbeat')) return;
       this.heartbeat = this.sound.add('sfx_heartbeat', { loop: true, volume: 0 });
       this.heartbeat.play();
-      this.tweens.add({ targets: this.heartbeat, volume: 0.55 * settings.master * settings.sfx, duration: 600 });
+      this.tweens.add({ targets: this.heartbeat, volume: HEARTBEAT_VOLUME * sfxBusVolume(), duration: 600 });
+      // THE SLIDER IS LIVE (2026-08-06). This loop can run for a whole fight,
+      // so it re-reads the SFX bus whenever a volume row moves rather than
+      // keeping the level it happened to start at. Registered once per scene
+      // (see buildScene) — this is the callback it fires.
       this.events.once('shutdown', () => { this.heartbeat?.stop(); this.heartbeat?.destroy(); this.heartbeat = null; });
     } else if (!low && this.heartbeat) {
       const hb = this.heartbeat;

@@ -82,9 +82,17 @@ export function gestureKind(dx, dy, { lift = LIFT_COMMIT_PX, sweep = SWEEP_COMMI
  * card — deliberately not its live position, because a selected card is lifted
  * 56px and a card that has been lifted out of the row is still, to the sweep,
  * sitting in its slot. You sweep the ROW, not the sprites.
+ *
+ * `arcMax` CAPS THE BOW (2026-08-06). The fan drops off by arc², which is a
+ * pretty curve at eight cards and a card half off the bottom of the screen at
+ * twelve — the ten-plus hands (Handy, the Overstuffed Satchel, Bottled Frenzy
+ * on top of both) put the outermost card 67px below the baseline on a canvas
+ * with 36px of room. The cap is a CLAMP, not a rescale, so every hand small
+ * enough to fit is laid out exactly as it always was.
  */
 export function fanSlots(n, {
   spread = 96, maxWidth = 740, centerX = 1130, fanY = 938, arcK = 2.2, tilt = 2.4,
+  arcMax = Infinity,
 } = {}) {
   const step = Math.min(spread, maxWidth / Math.max(n - 1, 1));
   const startX = centerX - ((n - 1) / 2) * step;
@@ -93,11 +101,54 @@ export function fanSlots(n, {
     const arc = Math.abs(i - (n - 1) / 2);
     slots.push({
       x: startX + i * step,
-      y: fanY + arc * arc * arcK,
+      y: fanY + Math.min(arc * arc * arcK, arcMax),
       angle: (i - (n - 1) / 2) * tilt,
     });
   }
   return { startX, spread: step, slots };
+}
+
+/**
+ * THE TWO PLATE LANES EITHER SIDE OF THE FAN (JC, 2026-08-06: the buttons must
+ * be "repositioned OFF the HUD so nothing overlaps, and they must shift/shrink
+ * gracefully when huge hands widen the fan").
+ *
+ * PLAY HAND / HANDS / DECK and DISCARD / SORT used to be five hard-coded
+ * coordinates, which is fine on a canvas whose fan is capped at 740px and wrong
+ * on every other one: on the 2340 phone HANDS sat at x 390, which is UNDER the
+ * 420 sidebar — the plate was drawn on top of the artifact mat. And the moment
+ * the phone's fan was allowed to use the width it has, a twelve-card hand
+ * reached both lanes at once.
+ *
+ * So the lanes are computed from the fan that is actually on screen. Each lane
+ * gets whatever room is left between the wall behind it and the fan's outer
+ * card, and the plates in it scale to fit — down to `minScale`, below which the
+ * lane simply stops shrinking and accepts the overlap (a hand that wide cannot
+ * happen: CARD.fanMaxWidth is chosen so it doesn't).
+ *
+ * Pure arithmetic on purpose: the collision this exists to prevent is exactly
+ * the kind a screenshot review misses at eight cards and a player finds at
+ * twelve, so a unit test walks it at 5, 8 and 12 instead.
+ *
+ * @param {number} fanLeft   left edge of the leftmost card
+ * @param {number} fanRight  right edge of the rightmost card
+ * @returns {{left:{x:number,scale:number,avail:number}, right:{x:number,scale:number,avail:number}}}
+ *          `left.x` is the lane's LEFT edge, `right.x` its RIGHT edge.
+ */
+export function handButtonLanes(fanLeft, fanRight, {
+  leftWall, rightWall, needLeft, needRight,
+  gutter = 16, clear = 24, minScale = 0.62,
+} = {}) {
+  const fit = (avail, need) => {
+    if (!(need > 0)) return 1;
+    return Math.max(minScale, Math.min(1, avail / need));
+  };
+  const leftAvail = (fanLeft - clear) - (leftWall + gutter);
+  const rightAvail = (rightWall - gutter) - (fanRight + clear);
+  return {
+    left: { x: leftWall + gutter, scale: fit(leftAvail, needLeft), avail: leftAvail },
+    right: { x: rightWall - gutter, scale: fit(rightAvail, needRight), avail: rightAvail },
+  };
 }
 
 /**

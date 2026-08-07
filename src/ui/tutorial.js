@@ -7,6 +7,10 @@ import { BASE_ARTIFACT_SLOTS } from '../core/artifacts.js';
 import { MAX_POTIONS } from '../core/potions.js';
 import { ORACLE_OFFER_SIZE } from '../core/oracle.js';
 import { DIFFICULTIES, PREVIEW_MAX_DIFFICULTY } from '../core/difficulty.js';
+import { HAND_DEFS } from '../core/poker.js';
+
+/** `10 ×2`, off the live table — the tutorial cannot teach a retuned hand wrong. */
+const worth = (t) => `${HAND_DEFS[t].base} ×${HAND_DEFS[t].mult}`;
 
 const PAGES = [
   {
@@ -17,9 +21,9 @@ const PAGES = [
       'Only the cards that FORM the hand score. Kickers do',
       'nothing, and a junk hand scores a single card.',
       '',
-      'Pair ×2 · Two Pair ×2 · Trips ×3 · Straight ×4 · Flush ×4',
-      'Full House ×4 · Quads ×7 · Straight Flush ×8. THE SMITH',
-      'can forge any of them higher, forever.',
+      'Every hand carries a VALUE and a MULT of its own before',
+      `you play a card: a Pair is ${worth('pair')}, a Full House ${worth('fullHouse')}.`,
+      'Your cards add to it. THE SMITH forges both higher.',
       '',
       'CARDS SCORE FIRST, then RELICS resolve LEFT TO RIGHT,',
       'so a +MULT left of a ×MULT is worth more. Drag to reorder.',

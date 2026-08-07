@@ -15,9 +15,9 @@
 
 import { CHARACTERS, SUIT_GLYPH } from '../config.js';
 import { SUITS, cardLabel, cardList } from './deck.js';
-import { HAND_DEFS, HAND_TYPES, mostPlayedHandType } from './poker.js';
+import { HAND_DEFS, HAND_TYPES, handStats, handPlayedThisRun, offerableHandTypes, mostPlayedHandType } from './poker.js';
 import { rollMythical, rollEliteDrop, rollLegendaryPlus, rollOfRarity, getProp } from './artifacts.js';
-import { isHandDiscovered, isAchievementUnlocked } from './progress.js';
+import { isAchievementUnlocked } from './progress.js';
 // The ETHEREAL numbers, so the Ethereal Rite quotes the engine and not a memory
 // of it. scoring.js reaches only config/deck/poker, so this edge cannot cycle.
 import { MOD_MULT_FACTOR, ETHEREAL_VANISH_CHANCE } from './scoring.js';
@@ -498,6 +498,15 @@ const WITCH_RITES = [
  * kept as-shipped alongside the Witch's 'etherial-rite' and the Forge's
  * 'total-tramutation'. (smith_royal-flush.png is drawn but unused — HANDFORGED
  * has no separate Royal Flush hand; a royal IS a straight flush here.)
+ *
+ * FLUSH HOUSE (2026-08-06) IS DELIBERATELY ABSENT. There is no painting for it
+ * yet, and this table is what packCardArtList() feeds the deferred loader — an
+ * entry here with no file behind it is a guaranteed 404 on the shelf. With no
+ * entry, smithOption's `art` is undefined, optionArtSlug falls back to the
+ * option's slugified name, no texture exists under it, and ui/rewards.js draws
+ * the option as an icon panel: the established half-delivered-set fallback,
+ * already exercised every time a new option ships ahead of its art.
+ * The ask is filed in docs/ART_NEEDED_0804.txt.
  */
 export const SMITH_ART = {
   highCard: 'high-crad',
@@ -516,11 +525,19 @@ export const SMITH_ART = {
 /**
  * One hammer-blow on the shelf. The painted card carries the hand's NAME, so
  * everything the pick actually does lives in `desc` — the hover tooltip under
- * the row — spelled out with live numbers (JC: "it should tell you what it does
- * in terms of how much mult it'll increase that hand by"):
+ * the row — spelled out with live numbers.
  *
- *   Lv.2 → Lv.3   ·   ×4 → ×6 mult
- *   +2 mult, forever, every time you play Full House.
+ * SINCE THE HANDS OVERHAUL (2026-08-06) A TEMPER BUYS TWO THINGS, so the
+ * tooltip shows both, exactly as the engine will pay them:
+ *
+ *   Lv.2 → Lv.3
+ *   VALUE 45 → 60   (+15)
+ *   MULT  ×6 → ×8   (+2)
+ *   every time you play Full House. Forever.
+ *
+ * Every number here is DERIVED from HAND_DEFS through handStats(), which is the
+ * same call scoring.js makes when the hand is actually played — so the shelf
+ * cannot advertise arithmetic the engine will not honour.
  *
  * Levels display 1-based (level 0 = "Lv.1"), matching the hands chart and the
  * combat equation banner.
@@ -528,19 +545,25 @@ export const SMITH_ART = {
 function smithOption(type, run, rng = Math.random) {
   const def = HAND_DEFS[type];
   const lvl = run.handLevels?.[type] ?? 0;
-  const now = def.mult + lvl * def.levelStep;
   // Deeper acts hammer harder: growing chance of a DOUBLE-level tempering.
   const jumps = rng() < smithDoubleChance(run.actIndex) ? 2 : 1;
-  const after = now + def.levelStep * jumps;
+  const before = handStats(type, lvl);
+  const after = handStats(type, lvl + jumps);
+  const dValue = after.base - before.base;
+  const dMult = after.mult - before.mult;
   return {
     id: `smith-${type}`, name: jumps > 1 ? `${def.name} ×2` : def.name,
     icon: 'icon_anvil', tint: jumps > 1 ? 0xff8c28 : 0xd07028,
     art: SMITH_ART[type],
     // Plain scalars so the UI (and the tests) never re-derive the math.
-    handType: type, levels: jumps, multNow: now, multAfter: after,
-    desc: `Lv.${lvl + 1} → Lv.${lvl + 1 + jumps}   ·   ×${now} → ×${after} mult`
+    handType: type, levels: jumps,
+    multNow: before.mult, multAfter: after.mult,
+    valueNow: before.base, valueAfter: after.base,
+    desc: `Lv.${lvl + 1} → Lv.${lvl + 1 + jumps}`
+      + `\nVALUE ${before.base} → ${after.base}   (+${dValue})`
+      + `\nMULT ×${before.mult} → ×${after.mult}   (+${dMult})`
       + (jumps > 1 ? '\nDOUBLE TEMPERING: two levels in one strike.' : '')
-      + `\n+${after - now} mult every time you play ${def.name}.`,
+      + `\nEvery time you play ${def.name}. Forever.`,
     apply(r) { r.handLevels[type] = (r.handLevels[type] ?? 0) + jumps; },
   };
 }
@@ -569,7 +592,7 @@ export const SMITH_WEIGHTS = {
   highCard: 1.5, pair: 1.5, twoPair: 1.5, straight: 1.5, flush: 1.5, fullHouse: 1.5,
   trips: 0.8,
   quads: 0.4, straightFlush: 0.3,
-  fiveOfAKind: 0.3, flushFive: 0.3,
+  fiveOfAKind: 0.3, flushHouse: 0.3, flushFive: 0.3,
 };
 
 /** Weighted, DISTINCT sample of `count` hand types off SMITH_WEIGHTS. */
@@ -589,14 +612,18 @@ export function pickSmithTypes(pool, count, rng = Math.random) {
 /**
  * THE WORN ANVIL (veryRare): the hand you play most is always on the Smith's
  * shelf. Returns the hand type to force in, or null — no relic, no hands played
- * yet, or the mode is a secret hand this save has never uncovered (impossible
- * in practice: playing one discovers it, but a wiped ledger shouldn't leak).
+ * yet, or the mode is a secret hand THIS RUN has not made.
+ *
+ * RUN-SCOPED SINCE 2026-08-06 (was the lifetime discovery ledger). The anvil
+ * reads mostPlayedHandType, which already counts this run only, so the gate is
+ * belt-and-braces — but it is the same gate the shelf itself uses now, and one
+ * question deserves one answer.
  * @returns {string|null}
  */
 export function anvilForcedType(run) {
   if (!getProp(ownedArtifacts(run), 'anvilMemory')) return null;
   const type = mostPlayedHandType(run);
-  if (!type || !isHandDiscovered(type)) return null;
+  if (!type || !handPlayedThisRun(run, type)) return null;
   return type;
 }
 
@@ -651,6 +678,15 @@ function artisanCard(run, rng) {
  * id here is also an ART SLOT — assets/ui/deals/<id>.png, drawn as a physical
  * card in the spread the moment the file lands (see rewards.js / BootScene).
  */
+
+/**
+ * THE SUIT RACKET'S RATE — buffed 2 -> 5 by THE HANDS OVERHAUL (2026-08-06),
+ * with the flat VALUE relics it shares a channel with (run.bonusMods.suitValue,
+ * the same lane as the Whetstone Charm). Read by all three sites: the shelf
+ * copy, the resolved copy that names the cards you are paying, and the grant.
+ */
+export const RACKET_SUIT_VALUE = 5;
+
 export const DEALER_DEALS = [
   {
     id: 'deal-loan', name: 'High-Stakes Loan', icon: 'icon_coins', tint: 0xffd23e,
@@ -696,15 +732,15 @@ export const DEALER_DEALS = [
   },
   {
     id: 'deal-racket', name: 'Suit Racket', icon: 'icon_gem', tint: 0x2bb3d6,
-    desc: 'GAIN: a chosen suit is worth +2 value all run.\nPRICE: your 3 highest cards.',
+    desc: `GAIN: a chosen suit is worth +${RACKET_SUIT_VALUE} value all run.\nPRICE: your 3 highest cards.`,
     resolve(r) {
       const paid = highest(r.runDeck, 3);
-      return { desc: `GAIN: a chosen suit is worth +2 value all run.\nPRICE: your ${cardList(paid)}.`, cards: paid };
+      return { desc: `GAIN: a chosen suit is worth +${RACKET_SUIT_VALUE} value all run.\nPRICE: your ${cardList(paid)}.`, cards: paid };
     },
     ui: 'pickSuit',
     available: r => r.runDeck.length >= 15,
     apply(r, { suit }) {
-      r.bonusMods.suitValue[suit] = (r.bonusMods.suitValue[suit] ?? 0) + 2;
+      r.bonusMods.suitValue[suit] = (r.bonusMods.suitValue[suit] ?? 0) + RACKET_SUIT_VALUE;
       // Same three cards resolve() named, taken out by identity rather than by
       // sorting the master deck in place.
       for (const c of highest(r.runDeck, 3)) {
@@ -1189,9 +1225,12 @@ export function openPack(kind, run, extra = 0, rng = Math.random) {
   } else if (kind === 'dealer') {
     options = [...DEALER_DEALS].sort(() => rng() - 0.5).slice(0, 3 + extra);
   } else if (kind === 'smith') {
-    // Secret hands are not on the shelf until you've played one — the Smith
-    // won't temper a hand you don't know exists.
-    const pool = HAND_TYPES.filter(isHandDiscovered);
+    // Secret hands are not on the shelf until you have made one THIS RUN
+    // (2026-08-06, was a lifetime ledger). The Smith won't temper a hand you
+    // cannot make: a FLUSH FIVE level is a dead pick on a deck with no
+    // duplicates in it, and the lifetime ledger handed the player exactly that
+    // on every run after the one where they found it. See poker.offerableHandTypes.
+    const pool = offerableHandTypes(run);
     const count = Math.min(3 + extra, pool.length);
     // Weighted toward the hands you actually make — see SMITH_WEIGHTS.
     const types = pickSmithTypes(pool, count, rng);

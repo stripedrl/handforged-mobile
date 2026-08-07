@@ -12,8 +12,7 @@
 
 import { rollEliteDrop, rollMythical } from './artifacts.js';
 import { gainGold } from './run.js';
-import { HAND_DEFS } from './poker.js';
-import { discoveredHandTypes } from './progress.js';
+import { HAND_DEFS, offerableHandTypes } from './poker.js';
 import { cardLabel } from './deck.js';
 import { CASINO_GAMES, MIN_WAGER, MAX_WAGER, casinoAvailable, affordableWagers } from './casino.js';
 import { actSlotFor } from './acts.js';
@@ -185,9 +184,12 @@ export const EVENTS = [
       {
         label: 'Hold out a hand', hint: 'A random hand type gains a level, free',
         resolve(run) {
-          // Never a SECRET hand you haven't found — his free sample would
-          // print its name and spoil the discovery.
-          const t = rand(discoveredHandTypes());
+          // Never a SECRET hand you have not made THIS RUN (2026-08-06, was the
+          // lifetime ledger). Two reasons, and the second is the bigger one:
+          // his free sample prints the hand's NAME, which would spoil a
+          // discovery — and a free level in a hand this deck cannot make is a
+          // free level in nothing at all.
+          const t = rand(offerableHandTypes(run));
           run.handLevels[t] = (run.handLevels[t] ?? 0) + 1;
           // Levels read 1-BASED everywhere else (handLevels 0 = "Lv.1"), so the
           // hammer used to announce a level one lower than the hands chart shows.

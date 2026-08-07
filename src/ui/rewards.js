@@ -15,7 +15,7 @@ import { ARTIFACT_RARITY, acquireArtifact, getProp, artifactLiveLine } from '../
 import { openPack, PACK_TYPES, rollBountyRewards, bountyRewardsById, optionArtSlug, rollCuratorRelics, CURATOR_RELICS, previewLabel } from '../core/packs.js';
 import { rollOracleOffer, ORACLE_OFFER_SIZE } from '../core/oracle.js';
 import { FORGED_FLOOR_LABEL } from '../core/elites.js';
-import { HAND_DEFS, HAND_TYPES } from '../core/poker.js';
+import { HAND_DEFS, HAND_TYPES, handStats } from '../core/poker.js';
 import { SUITS, sortCards, rankLabel } from '../core/deck.js';
 import { isHandDiscovered } from '../core/progress.js';
 import { collectMods, chr, effectiveArtifacts, slotsUsed, mirrorBlockedBy, mirrorNote, beltArtifacts, gainGold, run } from '../core/run.js';
@@ -23,6 +23,11 @@ import { collectMods, chr, effectiveArtifacts, slotsUsed, mirrorBlockedBy, mirro
 // on the same pedestals, so the overlay layer speaks both languages.
 import { POTION_RARITY, MAX_POTIONS, potionUsableIn } from '../core/potions.js';
 import { addPotionIcon } from './potionIcon.js';
+// DEFERRED ART (core/lazyload.js): the eight pack wrappers and the seventy-two
+// painted option cards. 126 MB between them, of which one shelf is ever on
+// screen — see packCovers/packCards for how the two halves are split.
+import { ensure, missingKeys, packCovers, packCards } from '../core/lazyload.js';
+import { gateOn } from './loadingVeil.js';
 
 const OV_DEPTH = DEPTH.overlay + 5;
 
@@ -36,14 +41,6 @@ const OV_DEPTH = DEPTH.overlay + 5;
  */
 const CARD_OPTION_H = 460;
 const CARD_OPTION_W = Math.round(CARD_OPTION_H * (520 / 768));   // 311
-
-/**
- * "You have not found this yet" ink for the hand chart. Dim on purpose, but it
- * used to be `#8a7a68`, a neutral grey that read as 2.8:1 on the cream panel and
- * so was dim to the point of unreadable. This is the same idea in the parchment's
- * own hue and dark enough to actually be a word.
- */
-const UNKNOWN_INK = '#7a6650';
 
 /**
  * A text bubble sized to what it SAYS, not to a magic number. Pass the label
@@ -412,6 +409,17 @@ export function deckInfoOverlay(scene, run, { remaining = null, spent = null, de
   const tabs = [['ALL', [...run.runDeck]]];
   if (remaining) tabs.push(['REMAINING', [...remaining]]);
   if (spent) tabs.push(['PLAYED / DISCARDED', [...spent]]);
+  /**
+   * WHICH TAB OPENS (JC, 2026-08-06). Everyone who opens this panel MID-FIGHT
+   * is asking one question — "what is still in there?" — and the panel opened on
+   * ALL, which answers a question nobody asked and takes a click to leave.
+   *
+   * REMAINING only exists when the caller had a draw pile to hand it (the combat
+   * DECK button), so this is also the exact test for "am I in a fight": the map
+   * and the pack shelves pass no `remaining` and keep ALL, where the whole deck
+   * IS the question.
+   */
+  const defaultTab = Math.max(0, tabs.findIndex(([label]) => label === 'REMAINING'));
 
   // --- geometry ------------------------------------------------------------
   // The block is sized so a THIRTEEN-card row exactly fills its band: that is
@@ -435,6 +443,7 @@ export function deckInfoOverlay(scene, run, { remaining = null, spent = null, de
   ov.add(content);
   const tabBtns = [];
   let live = null;              // what the open tab currently shows (dev hook)
+  let activeTab = 0;            // ...and WHICH tab that is (index into `tabs`)
 
   /**
    * One row's card scale and pitch. Under thirteen cards nothing moves; over it
@@ -553,12 +562,13 @@ export function deckInfoOverlay(scene, run, { remaining = null, spent = null, de
       if (!quiet) sfx(scene, 'button', { volume: 0.6 });
       tabBtns.forEach(t => { t.btn.setTexture('btn_dark'); t.txt.setColor('#cfc8e8'); });
       btn.setTexture('btn_yellow'); txt.setColor('#5b3a00');
+      activeTab = i;
       render([...cards]);
     };
     tabBtns[i].pick = pick;
     btn.on('pointerdown', () => pick());
   });
-  tabBtns[0].pick(true);
+  tabBtns[defaultTab].pick(true);
 
   button(scene, ov, GAME_W / 2, GAME_H - 56, 'CLOSE', () => ov.destroy(true), { w: 240, h: 60 });
   dim.on('pointerdown', () => ov.destroy(true));
@@ -569,6 +579,10 @@ export function deckInfoOverlay(scene, run, { remaining = null, spent = null, de
   // without reading the canvas. See tools/verify_qol_0805.py.
   const hook = {
     tabs: () => tabs.map(([label]) => label),
+    // Which tab is OPEN, and which one the panel chose to open on: REMAINING
+    // wherever it exists (a fight), ALL where it does not (the map, a shelf).
+    activeTab: () => activeTab,
+    activeLabel: () => tabs[activeTab]?.[0] ?? null,
     setTab: (i) => { tabBtns[Phaser.Math.Clamp(i, 0, tabBtns.length - 1)].pick(true); return live; },
     report: () => live,
     close: () => ov.destroy(true),
@@ -622,58 +636,119 @@ export function suitPickerOverlay(scene, { title = 'Choose a suit', exclude = nu
 // ---------------------------------------------------------------------------
 
 /**
- * The chart lists all eleven hands, biggest first — but a SECRET hand you have
- * never played prints as a locked '???' row instead of its name and mult. The
- * row count never changes, so the tease is "there is something above a straight
- * flush, and there are exactly two of them" without saying what. Discovery is
- * persistent (progress.discoveredHands), so once it's yours it stays named.
+ * THE HANDS CHART, REWRITTEN FOR THE HANDS OVERHAUL (JC, 2026-08-06).
+ *
+ * A hand is TWO numbers now — its own base VALUE on the score side and its
+ * MULT — and the chart used to print only the second, which meant the panel
+ * whose entire job is "what is this hand worth to me right now" was answering
+ * half the question. Every row now carries the whole answer:
+ *
+ *   FULL HOUSE      ×4 played     Lv.3      60      ×8
+ *   ^ name                        ^ Smith   ^ VALUE ^ MULT
+ *
+ *   VALUE  the hand's base + valueStep per Smith level (handStats).
+ *   MULT   the same, plus every artifact's handMult for that type.
+ *   played THIS RUN's count off run.stats.handTypeCounts — small and muted,
+ *          because it is history rather than arithmetic, and because it is the
+ *          number that now decides whether the SMITH will offer a secret.
+ *
+ * A SECRET hand never discovered (LIFETIME — progress.discoveredHands) is
+ * ABSENT from the chart entirely (JC, 2026-08-06 follow-up: the '???' tease
+ * read as confusing, not enticing). Seen-ever still means named-forever —
+ * the lifetime ledger now decides whether the ROW EXISTS, while the Smith
+ * keeps his separate played-THIS-RUN gate. Rows run ASCENDING (High Card
+ * first), and every row prints its level — Lv.1 at base, because a blank
+ * level column read as "no level" rather than "level nothing yet".
  */
 export function handChartOverlay(scene, run) {
   const ov = scene.add.container(0, 0).setDepth(OV_DEPTH + 2);
   const dim = dimmer(scene, 0.8);
   ov.add(dim);
   const cy = GAME_H / 2;
-  const parts = woodPanel(scene, GAME_W / 2, cy, 700, 880, { accent: 0xd07028 });
+  const cx = GAME_W / 2;
+  // WIDER THAN IT WAS, and it has to be: four columns instead of two, and
+  // the row count breathes — undiscovered secrets are not rows at all.
+  //
+  // THE PANEL IS SIZED BY ITS CONTENT. Every offset below is measured off the
+  // panel's own top and bottom edges rather than typed against a remembered
+  // height, and the height itself is the row block plus the two fixed bands
+  // (title/subtitle/column heads above, the note and CLOSE below). Add a
+  // thirteenth hand type and the panel grows by one row; it cannot silently
+  // push the bottom row through the CLOSE button, and it cannot leave a band
+  // of empty parchment when the ladder is short. Clamped to the canvas so a
+  // very long ladder tightens its PITCH instead of overflowing 1080.
+  // ASCENDING, High Card first (JC), and only hands the profile has ever seen.
+  const rows = HAND_TYPES.filter(t => !HAND_DEFS[t].secret || isHandDiscovered(t));
+  const HEAD_BAND = 180;                    // panel top -> the first row
+  const FOOT_BAND = 124;                    // the last row -> panel bottom
+  const MAX_H = GAME_H - 80;
+  const PITCH = Math.min(52, Math.max(34,
+    Math.floor((MAX_H - HEAD_BAND - FOOT_BAND) / Math.max(1, rows.length - 1))));
+  const PANEL_H = Math.min(MAX_H, HEAD_BAND + (rows.length - 1) * PITCH + FOOT_BAND);
+  const top = cy - PANEL_H / 2;
+  const bot = cy + PANEL_H / 2;
+  const parts = woodPanel(scene, cx, cy, 820, PANEL_H, { accent: 0xd07028 });
   ov.add([parts.shadow, parts.panel, parts.line]);
-  ov.add(scene.add.text(GAME_W / 2, cy - 386, 'YOUR HANDS', {
+  ov.add(scene.add.text(cx, top + 58, 'YOUR HANDS', {
     fontFamily: 'Lilita One', resolution: 2, fontSize: '40px', color: PARCH.text,
   }).setOrigin(0.5));
-  ov.add(scene.add.text(GAME_W / 2, cy - 342, 'base mult + Smith levels + artifacts', {
+  ov.add(scene.add.text(cx, top + 100, 'VALUE and MULT · base + Smith levels + artifacts', {
     fontFamily: '"Baloo 2"', resolution: 2, fontSize: '20px', color: PARCH.textDim, fontStyle: 'bold',
   }).setOrigin(0.5));
 
+  // --- the columns, declared once ---
+  const X_NAME = cx - 380;    // left
+  const X_PLAYS = cx - 116;   // right-aligned, small, muted
+  const X_LEVEL = cx - 24;    // centred
+  const X_VALUE = cx + 176;   // right-aligned
+  const X_MULT = cx + 380;    // right-aligned
+  const HEAD_Y = top + 144;
+  const head = (x, label, origin) => ov.add(scene.add.text(x, HEAD_Y, label, {
+    fontFamily: '"Baloo 2"', resolution: 2, fontSize: '17px', color: PARCH.textDim, fontStyle: 'bold',
+  }).setOrigin(origin, 0.5));
+  head(X_LEVEL, 'LEVEL', 0.5);
+  head(X_VALUE, 'VALUE', 1);
+  head(X_MULT, 'MULT', 1);
+
   const mods = collectMods();
-  const rows = [...HAND_TYPES].reverse();   // biggest hands on top
+  const counts = run?.stats?.handTypeCounts ?? {};
+  const TOP = top + HEAD_BAND;
   rows.forEach((t, i) => {
     const def = HAND_DEFS[t];
-    const known = isHandDiscovered(t);
     const lvl = run.handLevels[t] ?? 0;
+    // The one derivation, shared with the Smith's shelf and with scoring.js.
+    const { base, mult } = handStats(t, lvl);
     const bonus = mods.handMult[t] ?? 0;
-    const now = def.mult + lvl * def.levelStep + bonus;
-    const y = cy - 286 + i * 56;
-    ov.add(scene.add.text(GAME_W / 2 - 290, y, known ? def.name : '???', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '27px',
-      color: known ? PARCH.text : UNKNOWN_INK,
+    const now = mult + bonus;
+    const played = Number(counts[def.name]) || 0;
+    const y = TOP + i * PITCH;
+    ov.add(scene.add.text(X_NAME, y, def.name, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: '25px', color: PARCH.text,
     }).setOrigin(0, 0.5));
-    if (known && lvl > 0) {
-      ov.add(scene.add.text(GAME_W / 2 + 80, y, `Lv.${lvl + 1}`, {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '22px', color: '#b45c10',
-      }).setOrigin(0.5));
+    // HISTORY, NOT ARITHMETIC: quiet, and only when there is any.
+    if (played > 0) {
+      ov.add(scene.add.text(X_PLAYS, y + 1, `×${played} played`, {
+        fontFamily: '"Baloo 2"', resolution: 2, fontSize: '16px',
+        color: PARCH.textDim, fontStyle: 'bold',
+      }).setOrigin(1, 0.5));
     }
-    ov.add(scene.add.text(GAME_W / 2 + 290, y, known ? `×${now}` : '×?', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '29px',
-      color: !known ? UNKNOWN_INK : now > def.mult ? '#1d7a56' : PARCH.textDim,
+    // Lv.1 at base — the display level is always internal + 1, same as the
+    // Smith's shelf, and a filled column reads as "this is a thing you level".
+    ov.add(scene.add.text(X_LEVEL, y, `Lv.${lvl + 1}`, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: '21px',
+      color: lvl > 0 ? '#b45c10' : PARCH.textDim,
+    }).setOrigin(0.5));
+    ov.add(scene.add.text(X_VALUE, y, `${base}`, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: '26px',
+      color: base > def.base ? '#1d7a56' : PARCH.textDim,
+    }).setOrigin(1, 0.5));
+    ov.add(scene.add.text(X_MULT, y, `×${now}`, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: '27px',
+      color: now > def.mult ? '#1d7a56' : PARCH.textDim,
     }).setOrigin(1, 0.5));
   });
-  if (rows.some(t => !isHandDiscovered(t))) {
-    // The instruction that explains the whole panel: full-strength parchment ink,
-    // not the dim UNKNOWN_INK the rows it is explaining are drawn in.
-    ov.add(scene.add.text(GAME_W / 2, cy + 320, 'some hands must be PLAYED to be known', {
-      fontFamily: '"Baloo 2"', resolution: 2, fontSize: '19px', color: PARCH.textDim, fontStyle: 'bold',
-    }).setOrigin(0.5));
-  }
 
-  button(scene, ov, GAME_W / 2, cy + 386, 'CLOSE', () => ov.destroy(true), { w: 240, h: 62 });
+  button(scene, ov, cx, bot - 56, 'CLOSE', () => ov.destroy(true), { w: 240, h: 62 });
   viewDeckButton(scene, ov, run);
   dim.on('pointerdown', () => ov.destroy(true));
   return ov;
@@ -1361,8 +1436,24 @@ export function curatorOverlay(scene, run, done) {
 // Pack offer → open → pick
 // ---------------------------------------------------------------------------
 
-/** Offer 3 packs; the player opens one; done() when everything resolves. */
+/**
+ * Offer 3 packs; the player opens one; done() when everything resolves.
+ *
+ * THE COVERS ARE GATED, THE CARDS ARE NOT (2026-08-06). This shelf draws three
+ * of the eight painted wrappers and nothing else, and all eight together are
+ * only 15.8 MB — MapScene prefetches them the moment its board stands, so this
+ * gate is satisfied before a fight has even been picked. The OPTION CARDS behind
+ * each wrapper are the expensive half (110 MB for all seventy-two) and belong to
+ * whichever pack is actually torn open; they are fetched at pointerdown and
+ * waited for by packOpenOverlay, behind the ~700ms the tear takes.
+ */
 export function packOfferOverlay(scene, run, offer, done) {
+  return gateOn(scene, packCovers(offer.map(p => p.kind)),
+    () => buildPackOffer(scene, run, offer, done),
+    { label: 'The pack table', ensure, missingKeys });
+}
+
+function buildPackOffer(scene, run, offer, done) {
   const ov = scene.add.container(0, 0).setDepth(OV_DEPTH);
   ov.add(dimmer(scene, 0.82));
   ov.add(bigTitle(scene, 170, 'CHOOSE A PACK'));
@@ -1411,6 +1502,12 @@ export function packOfferOverlay(scene, run, offer, done) {
     cover.on('pointerout', () => scene.tweens.add({ targets: box, scale: 1, angle: 0, duration: 120 }));
     cover.on('pointerdown', () => {
       cover.disableInteractive();
+      // THE OPEN IS THE LOAD WINDOW. From here to packOpenOverlay is 280ms of
+      // slide, a burst, and a 420ms hold — comfortably enough for this ONE
+      // kind's option cards (nine to eleven paintings), and the only kind that
+      // will ever be resident. packOpenOverlay gates on the same keys, so a slow
+      // fetch costs a beat rather than a shelf of missing textures.
+      ensure(scene, packCards([pack.kind]));
       for (const other of boxes) if (other !== box) {
         scene.tweens.add({ targets: other, alpha: 0, scale: 0.9, duration: 180 });
       }
@@ -1454,6 +1551,22 @@ export function packOfferOverlay(scene, run, offer, done) {
  * into a normal pack-contents overlay. `subtitle` names the act you just cleared.
  */
 export function bountyPackOverlay(scene, run, { subtitle = '' } = {}, done) {
+  // HIS ELEVEN REWARDS, FETCHED UNDER HIS OWN REVEAL. The board hangs there for
+  // 2.2 seconds of suspense before it tears into a contents shelf, which is the
+  // longest load window any pack in the game offers — and unlike the pack table
+  // there is no cover to CLICK, so nothing else would start the fetch.
+  // packOpenOverlay gates on the same keys, so a slow one costs a beat.
+  ensure(scene, packCards(['bounty']));
+  // The wrap is the first thing on screen and it is `pack_bounty` — deferred art
+  // since 2026-08-06. MapScene prefetches all eight covers on arrival, so this
+  // gate is normally already satisfied; it is here for the road that skips the
+  // map (a CONTINUE straight into a boss fight, then the act-clear ceremony).
+  return gateOn(scene, packCovers(['bounty']),
+    () => buildBountyPack(scene, run, { subtitle }, done),
+    { label: 'The Bounty Hunter', ensure, missingKeys });
+}
+
+function buildBountyPack(scene, run, { subtitle = '' } = {}, done) {
   const ov = scene.add.container(0, 0).setDepth(OV_DEPTH + 2);
   ov.add(dimmer(scene, 0.88));
   suspense(scene, { volume: 0.85 });
@@ -1537,6 +1650,20 @@ const ORACLE_TINT_PALE = 0xd8b0ff;
  * `mandatory`, so there is no TAKE NOTHING. You must choose a future.
  */
 export function oraclePackOverlay(scene, run, done) {
+  // ...and hers, for the same reason: 2.2s of reveal in front of a twenty-card
+  // shelf. mapPrefetch has been fetching them since the board stood, so this is
+  // belt-and-braces for the door that skips the map (`__hf.openOracle`).
+  ensure(scene, packCards(['oracle']));
+  // Her wrap is `pack_oracle` and it turns in the air for 1.7s before the shelf
+  // exists, so the COVER has to be here and the twenty cards behind it do not
+  // (packOpenOverlay gates those, and mapPrefetch has been fetching them since
+  // the board stood).
+  return gateOn(scene, packCovers(['oracle']),
+    () => buildOraclePack(scene, run, done),
+    { label: 'The Oracle', ensure, missingKeys });
+}
+
+function buildOraclePack(scene, run, done) {
   const ov = scene.add.container(0, 0).setDepth(OV_DEPTH + 2);
   ov.add(dimmer(scene, 0.9));
   suspense(scene, { volume: 0.8 });
@@ -1794,6 +1921,20 @@ const WITCH_WHEEL_SEGMENTS = [
  * is the line under the title, so a mandatory shelf can say so out loud.
  */
 export function packOpenOverlay(scene, run, pack, options, done, opts = {}) {
+  /**
+   * THE ONE CHOKEPOINT FOR OPTION-CARD ART. Every painted shelf in the game
+   * arrives here — the pack table's chosen wrapper, THE BOUNTY HUNTER's payoff,
+   * THE ORACLE's mandatory three — and `hasArt` below is asked SYNCHRONOUSLY at
+   * build time, so the cards have to be resident before this body runs or the
+   * whole shelf silently falls back to icon panels. Hence a gate rather than a
+   * pop-in: an option card that appears a second late has already been read.
+   */
+  return gateOn(scene, packCards([pack.kind]),
+    () => buildPackOpen(scene, run, pack, options, done, opts),
+    { label: pack.label ?? 'Opening…', ensure, missingKeys });
+}
+
+function buildPackOpen(scene, run, pack, options, done, opts = {}) {
   const { mandatory = false, subtitle = 'Take ONE' } = opts;
   const ov = scene.add.container(0, 0).setDepth(OV_DEPTH + 1);
   ov.add(dimmer(scene, 0.85));

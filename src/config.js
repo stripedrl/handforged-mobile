@@ -2,7 +2,7 @@
 
 // Build stamp — shown on the title screen so playtest feedback can name a
 // version. Bump this string every time a build goes out to testers.
-export const BUILD = 'alpha 0.26';
+export const BUILD = 'alpha 0.27';
 
 /**
  * IMAGE EXTENSION — the one knob the shipped build turns.
@@ -118,24 +118,61 @@ export const PARTICLE_VARIANTS = {
   gallowsash: 1, gallowsember: 2,              // Burning Gallows
 };
 
+/**
+ * THE PHONE'S BIGGER CARD (JC, 2026-08-06: "bigger hand cards with more
+ * vertical room"). V2 widened the WORLD and left the card at its desktop
+ * 140x210, so the fan read as a strip of postage stamps across a screen with
+ * 420 more pixels than it needed. ONE scalar grows the whole card — face,
+ * corner cluster, pip, banner, and the lifts that move it — because every
+ * number printed on a card is an inset from its own edge (see ui/CardSprite.js)
+ * and scaling the frame without its insets is how you get a rank floating in
+ * the middle of painted filigree.
+ *
+ * 1.171 and not 1.2: 140x210 -> 164x246 is EXACTLY 2:3 on both builds (a
+ * fractional card is a blurry card), and 246 is the tallest card that clears
+ * the played row above it (CARD.playedY 668 + 123 = 791, the fan's ceiling at
+ * 918 - 123 = 795) without moving the score equation into the enemy plates.
+ */
+const CARD_SCALE = MOBILE ? 1.171 : 1;
+const cs = (n) => Math.round(n * CARD_SCALE);
+
 export const CARD = {
-  w: 140, h: 210,          // display size — true 2:3, matches Caleb's painted card faces
-  fanY: 938,               // hand fan baseline (raised for the taller cards)
+  w: cs(140), h: cs(210), // display size — true 2:3, matches Caleb's painted card faces
+  // MOBILE sits 20px higher than desktop's 938: the card grew 36px taller and
+  // the arc still has to land inside 1080. See fanArcMax.
+  fanY: MOBILE ? 918 : 938,
   fanCenterX: (SIDEBAR_W + GAME_W) / 2,
-  fanSpread: MOBILE ? 112 : 96,   // px between card centers (wider fan on the wide screen)
-  hoverLift: 34,
-  selectLift: 56,
+  fanSpread: MOBILE ? 131 : 96,   // px between card centers (wider fan on the wide screen)
+  /**
+   * HOW WIDE THE FAN MAY EVER GET, centre to centre. This used to live as
+   * fanSlots' own `maxWidth = 740` default and nothing passed it, so the phone
+   * drew a 740px fan in the middle of a 2340px screen with 400px of dead air
+   * either side. 1180 is measured, not guessed: it is the widest fan that still
+   * leaves both button lanes (see BTN_LANE in CombatScene) above their minimum
+   * width at a twelve-card hand.
+   */
+  fanMaxWidth: MOBILE ? 1180 : 740,
+  /**
+   * THE ARC'S CEILING. The fan bows by arc² — fine at eight cards (27px), off
+   * the bottom of the screen at twelve (67px, and the card is 246 tall). The
+   * cap is set ABOVE the nine-card bow (35.2) on desktop so nothing that reads
+   * right today moves; it only ever bites on the ten-plus hands (Handy, the
+   * Overstuffed Satchel) that put it there.
+   */
+  fanArcMax: MOBILE ? 28 : 36,
+  hoverLift: cs(34),
+  selectLift: cs(56),
   playedY: 668,
   // Painted-face safe zone: the ornate frame eats ~9-13% per side, and the
   // corner filigree bites further in on the diagonal. Everything printed on
   // the card is anchored off these so a frame swap never needs a code change.
-  padX: 30,                // corner cluster: x inset from the card's side edge
-  padY: 24,                // corner cluster: y inset from the card's top/bottom
-  cornerColW: 26,          // width of the rank/pip column ('10' shrinks to fit)
-  cornerPip: 24,           // corner pip display box
-  cornerGap: 3,            // px between the rank's painted ink and the pip below it
-  pipY: 10,                // center pip offset from card center (down is +)
-  bannerY: 34,             // mod banner text: distance up from the card's bottom edge
+  padX: cs(30),            // corner cluster: x inset from the card's side edge
+  padY: cs(24),            // corner cluster: y inset from the card's top/bottom
+  cornerColW: cs(26),      // width of the rank/pip column ('10' shrinks to fit)
+  cornerPip: cs(24),       // corner pip display box
+  cornerGap: cs(3),        // px between the rank's painted ink and the pip below it
+  pipY: cs(10),            // center pip offset from card center (down is +)
+  bannerY: cs(34),         // mod banner text: distance up from the card's bottom edge
 };
 
 /**

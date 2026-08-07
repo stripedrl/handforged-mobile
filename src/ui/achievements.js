@@ -29,6 +29,7 @@ import {
 import { PACK_GATES, PACK_TYPES } from '../core/packs.js';
 import { kineticScroll } from './kinetic.js';
 import { exportProfile, importProfile } from '../core/progress.js';
+import { ensure, achievementTiles } from '../core/lazyload.js';
 
 const GOLD = '#ffd23e';
 const GOLD_TINT = 0xffd23e;
@@ -198,6 +199,18 @@ export function fireAchievements(scene, event, ctx = {}) {
 export function openAchievements(scene) {
   if (scene.__achievementsOpen) return;
   scene.__achievementsOpen = true;
+  /**
+   * THE TILES, FETCHED HERE (2026-08-06, deferred loading). Not one of the
+   * seventy-three has been painted yet, so this is seventy-three 404s that used
+   * to happen on every BOOT and now happen once, on the one screen that draws
+   * them — see the essay in core/lazyload.js.
+   *
+   * Fire-and-forget, because `achievementBadge` has fallen back to a drawn medal
+   * since the shelf existed and a tile arriving a beat late is a tile fading in.
+   * The day the art lands this becomes a pop-in worth having; today it is a
+   * fifth of the boot, deleted.
+   */
+  ensure(scene, achievementTiles());
 
   const PANEL_W = 1240, PANEL_H = 800;
   const cx = GAME_W / 2, cy = GAME_H / 2;

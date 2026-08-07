@@ -17,6 +17,12 @@
  * of one printed card) to make that stack a flush too. They are hidden from
  * the Smith's offer pool and the hands chart until the player plays one; see
  * progress.js discoveredHands.
+ *
+ * FLUSH HOUSE (2026-08-06) joins them as the third secret: a full house whose
+ * five cards ALSO agree on a suit. Unlike the other two it IS reachable from a
+ * legal deck the moment a single WILD is in play (a wild counts as every suit,
+ * so trips + pair + one wild suit is a flush), which makes it the secret a
+ * player can stumble into rather than build a whole deck toward.
  */
 
 import { SUITS } from './deck.js';
@@ -30,29 +36,67 @@ import { SUITS } from './deck.js';
  * @property {string} type - machine key, e.g. 'twoPair'
  * @property {string} name - display name, e.g. 'Two Pair'
  * @property {number} mult - the base scoring multiplier for this hand type (level 0)
+ * @property {number} base - the hand's own BASE VALUE at level 0 (score side)
  */
 
 /**
- * Base mults match Balatro's starting hand mults (JC, 2026-07-29) — power now
- * comes from Smith levels and artifacts, not the base chart.
- * levelStep = extra mult granted per Smith (hand-upgrade) level.
+ * THE HANDS OVERHAUL (JC, 2026-08-06). Every hand now brings TWO numbers to the
+ * table instead of one:
+ *
+ *   base       the hand's own VALUE, landing on the SCORE side of the equation
+ *              before a single card has ticked. This is the "starting equation
+ *              to work from" — a Full House is 30 × 4 before you have added one
+ *              point of card value to it.
+ *   mult       unchanged in meaning: the multiplier the score side is taken
+ *              against.
+ *   valueStep  extra BASE VALUE per Smith (hand-upgrade) level.
+ *   levelStep  extra MULT per Smith level.
+ *
+ * So a temper is worth strictly more than it used to be, in both currencies,
+ * and the ladder finally reads as a ladder: High Card 5×1 = 5 against a Flush
+ * Five's 100×16 = 1,600 before either of them has looked at a card.
+ *
+ * THE BASE IS DAMAGE-SIDE ONLY. It joins the score side and multiplies out into
+ * damage; it contributes NOTHING to heal (Hearts), shield (Diamonds), the club
+ * splash's per-card share or chips — those stay pure card-value channels. See
+ * scoring.js (handBase) for the one place it is added.
  */
 export const HAND_DEFS = {
-  highCard: { name: 'High Card', mult: 1, levelStep: 1 },
-  pair: { name: 'Pair', mult: 2, levelStep: 1 },
-  twoPair: { name: 'Two Pair', mult: 2, levelStep: 1 },
-  trips: { name: 'Three of a Kind', mult: 3, levelStep: 1 },
-  straight: { name: 'Straight', mult: 4, levelStep: 2 },
-  flush: { name: 'Flush', mult: 4, levelStep: 2 },
-  fullHouse: { name: 'Full House', mult: 4, levelStep: 2 },
-  quads: { name: 'Four of a Kind', mult: 7, levelStep: 3 },
-  straightFlush: { name: 'Straight Flush', mult: 8, levelStep: 3 },
+  highCard: { name: 'High Card', base: 5, mult: 1, valueStep: 5, levelStep: 1 },
+  pair: { name: 'Pair', base: 10, mult: 2, valueStep: 5, levelStep: 1 },
+  twoPair: { name: 'Two Pair', base: 15, mult: 2, valueStep: 10, levelStep: 1 },
+  trips: { name: 'Three of a Kind', base: 20, mult: 3, valueStep: 10, levelStep: 2 },
+  straight: { name: 'Straight', base: 25, mult: 4, valueStep: 10, levelStep: 2 },
+  flush: { name: 'Flush', base: 25, mult: 4, valueStep: 10, levelStep: 2 },
+  fullHouse: { name: 'Full House', base: 30, mult: 4, valueStep: 15, levelStep: 2 },
+  quads: { name: 'Four of a Kind', base: 40, mult: 7, valueStep: 20, levelStep: 3 },
+  straightFlush: { name: 'Straight Flush', base: 60, mult: 8, valueStep: 25, levelStep: 4 },
   // --- SECRET, above the printed chart. `secret: true` is the ONLY gate: the
   // Smith's pool, the hands chart and the discovery ledger all read this flag,
   // so a future secret hand needs nothing but an entry here.
-  fiveOfAKind: { name: 'Five of a Kind', mult: 10, levelStep: 4, secret: true },
-  flushFive: { name: 'Flush Five', mult: 15, levelStep: 4, secret: true },
+  //
+  // LADDER ORDER IS THIS OBJECT'S KEY ORDER (HAND_TYPES), and bestHandOf ranks
+  // by it — so FLUSH HOUSE sits between FIVE OF A KIND and FLUSH FIVE exactly
+  // where its mult puts it (12 · 14 · 16).
+  fiveOfAKind: { name: 'Five of a Kind', base: 75, mult: 12, valueStep: 25, levelStep: 4, secret: true },
+  flushHouse: { name: 'Flush House', base: 100, mult: 14, valueStep: 25, levelStep: 4, secret: true },
+  flushFive: { name: 'Flush Five', base: 100, mult: 16, valueStep: 30, levelStep: 5, secret: true },
 };
+
+/**
+ * The hand's numbers AT A GIVEN SMITH LEVEL — the one place value and mult are
+ * derived, so the Smith's tooltip, the hands chart, the combat equation and the
+ * engine can never quote different arithmetic. `level` is 0-based (0 = "Lv.1").
+ * @param {string} type
+ * @param {number} level
+ * @returns {{ base: number, mult: number, def: object }}
+ */
+export function handStats(type, level = 0) {
+  const def = HAND_DEFS[type];
+  if (!def) return { base: 0, mult: 0, def: null };
+  const l = Math.max(0, Math.round(Number(level) || 0));
+  return { base: def.base + l * def.valueStep, mult: def.mult + l * def.levelStep, def };
+}
 
 export const HAND_TYPES = Object.keys(HAND_DEFS);
 
@@ -63,6 +107,41 @@ export const SECRET_HAND_TYPES = HAND_TYPES.filter(t => HAND_DEFS[t].secret);
 export const HAND_TYPE_BY_NAME = Object.fromEntries(
   HAND_TYPES.map(t => [HAND_DEFS[t].name, t]),
 );
+
+/**
+ * HAS THIS RUN PLAYED THIS HAND? (JC, 2026-08-06 — the Smith's gating fix.)
+ *
+ * There are two different questions about a secret hand and they had been
+ * answered by one ledger:
+ *
+ *   "have I ever SEEN it?"   progress.discoveredHands, LIFETIME. Still what
+ *                            decides whether the hands chart prints a name or
+ *                            a '???' row — seen-ever means named-forever.
+ *   "have I made it HERE?"   run.stats.handTypeCounts, THIS RUN. What decides
+ *                            whether the Smith will temper it, whether the Worn
+ *                            Anvil may force it, and whether the Traveling
+ *                            Smith's free level can land on it.
+ *
+ * Tempering FLUSH FIVE on a deck that cannot make one is a dead pick, and a
+ * lifetime ledger handed the player exactly that on every run after the first.
+ *
+ * handTypeCounts is keyed by DISPLAY NAME (the recap prints it), so this reads
+ * through the def rather than the machine key.
+ */
+export function handPlayedThisRun(run, type) {
+  const def = HAND_DEFS[type];
+  if (!def) return false;
+  const counts = run?.stats?.handTypeCounts ?? {};
+  return (Number(counts[def.name]) || 0) > 0;
+}
+
+/**
+ * The hand types the SMITH may temper this run: every printed hand, plus any
+ * secret this run has actually made. Ladder order.
+ */
+export function offerableHandTypes(run) {
+  return HAND_TYPES.filter(t => !HAND_DEFS[t].secret || handPlayedThisRun(run, t));
+}
 
 /** Card mods whose suit is "all of them" for hand evaluation. */
 export const WILD_MODS = new Set(['wild', 'star', 'joker']);
@@ -77,7 +156,7 @@ export function isWild(card) {
  */
 function result(type) {
   const def = HAND_DEFS[type];
-  return { type, name: def.name, mult: def.mult };
+  return { type, name: def.name, mult: def.mult, base: def.base };
 }
 
 /**
@@ -137,6 +216,13 @@ export function evaluateHand(cards) {
   // (four dupes + a wild share a suit, five dupes share a rank).
   if (n === 5 && maxCount === 5) return result(isFlush ? 'flushFive' : 'fiveOfAKind');
   if (isStraight && isFlush) return result('straightFlush');
+  // FLUSH HOUSE (2026-08-06): a full house whose five cards also agree on a
+  // suit. It has to be asked BEFORE quads and before the plain full house, or
+  // the hand would answer with the lesser of the two things it genuinely is —
+  // and after flushFive above, because five of one rank in one suit is both a
+  // flush five and (vacuously) not a full house at all. maxCount is already
+  // known to be < 5 here, so `3 and 2` is an honest trips+pair.
+  if (isFlush && counts[0] === 3 && counts[1] === 2) return result('flushHouse');
   if (maxCount >= 4) return result('quads');
   if (n === 5 && counts[0] === 3 && counts[1] === 2) return result('fullHouse');
   if (isFlush) return result('flush');
@@ -233,6 +319,7 @@ export function scoringIds(cards, hand) {
     case 'fullHouse':
     case 'straightFlush':
     case 'fiveOfAKind':
+    case 'flushHouse':
     case 'flushFive':
       return all();
     case 'quads':

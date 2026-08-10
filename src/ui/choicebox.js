@@ -88,21 +88,36 @@ export const BOX = {
   // and 36% of the tablet's 1920, and that difference is enough to push the box
   // onto a neighbouring option on the narrower board — where the three-across
   // shelf keeps its 372px pitch but has 420 fewer pixels to spread over.
-  maxW: TOUCH ? Math.round(GAME_W * 0.30) : 640,
+  maxW: TOUCH ? Math.round(GAME_W * 0.34) : 640,
   padX: TOUCH ? 32 : 28,
-  padTop: TOUCH ? 26 : 24,
-  padBottom: TOUCH ? 24 : 22,
+  padTop: TOUCH ? 22 : 24,
+  padBottom: TOUCH ? 16 : 22,
   titleSize: TOUCH ? 32 : 28,
   bodySize: TOUCH ? 24 : 21,
   noteSize: TOUCH ? 21 : 18,
   titleGap: 12,
   bodyGap: 18,
-  btnH: TOUCH ? 74 : 66,
+  /**
+   * THE COMMIT BUTTON IS THE BIGGEST TARGET IN THE GAME, and it should be: it
+   * is now the ONLY thing on a shelf that acts, and it is the last thing
+   * between a player and a decision they cannot take back.
+   *
+   * 88x230 is 33 x 86 pt on the phone (2.69 game px to the point at 2340 over
+   * 874). That is still under Apple's 44pt guidance — every plate in this game
+   * is, because a 1080-tall world on a 402pt screen cannot afford 118px of
+   * button — but it is half again the 66px the old confirms used and it is
+   * comfortably the largest thing a thumb is asked to find.
+   *
+   * The padding above and the clearances below were shaved to pay for it, so
+   * the box still fits UNDER a full-height option card (250px of room beneath
+   * the pack shelf) rather than being pushed over the shelf's own title.
+   */
+  btnH: TOUCH ? 88 : 66,
   btnGap: 16,
-  btnMinW: TOUCH ? 190 : 168,
-  btnFont: TOUCH ? 29 : 26,
-  gap: 16,             // clearance between the box and the thing it describes
-  edge: 14,            // clearance between the box and the canvas edge
+  btnMinW: TOUCH ? 230 : 168,
+  btnFont: TOUCH ? 32 : 26,
+  gap: TOUCH ? 12 : 16,   // clearance between the box and the thing it describes
+  edge: TOUCH ? 10 : 14,  // clearance between the box and the canvas edge
 };
 
 /** Button flavours -> the wood they are cut from. */
@@ -184,7 +199,18 @@ function wireDismiss(scene) {
  * `twoTap` tags every trigger with `hfTwoTap`, so the box can find its own
  * siblings without a single call site having to describe its shelf.
  */
-function siblingRects(scene, selfKey) {
+function siblingRects(scene, selfKey, source) {
+  // ONLY THE TRIGGER'S OWN LAYER. Walking the whole scene finds triggers on the
+  // board BEHIND a full-screen overlay — the map's node icons are still live
+  // objects under the Oracle's dimmer — and the placer then contorts itself to
+  // miss a node the player cannot even see. The trigger's top-level ancestor is
+  // the right boundary in every case that exists: an overlay's options share
+  // its container, the map's nodes share the map layer, and the artifact belt
+  // shares its panel.
+  const top = new Set(scene.children.list);
+  let root = source ?? null;
+  while (root && !top.has(root)) root = root.parentContainer;
+
   const out = [];
   const walk = (o) => {
     if (!o) return;
@@ -197,7 +223,7 @@ function siblingRects(scene, selfKey) {
     }
     (o.list ?? []).forEach(walk);
   };
-  scene.children.list.forEach(walk);
+  if (root) walk(root); else scene.children.list.forEach(walk);
   return out;
 }
 
@@ -218,7 +244,7 @@ function overlapArea(a, b) {
  * wins; if every home covers something, the least-bad one does, which is the
  * honest answer on a screen with no room left.
  */
-function place(scene, anchor, w, h, selfKey) {
+function place(scene, anchor, w, h, selfKey, source) {
   const E = BOX.edge;
   const ax = anchor.x, ay = anchor.y;
   const aw = anchor.w ?? 0, ah = anchor.h ?? 0;
@@ -250,7 +276,7 @@ function place(scene, anchor, w, h, selfKey) {
   // Siblings are INFLATED by the same gap the box keeps from its own anchor, so
   // a home that merely kisses the next option is not counted as clean. A tap
   // aimed at a card's edge has to land on the card, not on the box's shadow.
-  const sibs = siblingRects(scene, selfKey).map(s => ({
+  const sibs = siblingRects(scene, selfKey, source).map(s => ({
     left: s.left - BOX.gap, right: s.right + BOX.gap,
     top: s.top - BOX.gap, bottom: s.bottom + BOX.gap,
   }));
@@ -320,20 +346,34 @@ export function openChoiceBox(scene, spec) {
   const roomBelow = GAME_H - (anchor.y + (anchor.h ?? 0) / 2) - BOX.gap - BOX.edge * 2;
   const heightBudget = Math.max(roomAbove, roomBelow, 280);
   const wrapMax = BOX.maxW - BOX.padX * 2;
+  // ~the fixed furniture around the body: title, note, buttons, padding.
+  const overhead = BOX.padTop + BOX.padBottom + 90 + BOX.titleGap + BOX.bodyGap + BOX.btnH;
   let wrap = BOX.wrap;
+  let bodySize = BOX.bodySize;
   let body = null;
   if (bodyStr) {
-    for (;;) {
-      body?.destroy();
-      body = scene.add.text(0, 0, bodyStr, {
-        fontFamily: '"Baloo 2"', resolution: 2, fontSize: `${BOX.bodySize}px`,
-        color: PARCH.textDim, fontStyle: 'bold',
-        wordWrap: { width: wrap }, align: 'center', lineSpacing: 3,
-      }).setOrigin(0.5, 0);
-      // ~the fixed furniture around the body: title, note, buttons, padding.
-      const overhead = BOX.padTop + BOX.padBottom + 90 + BOX.titleGap + BOX.bodyGap + BOX.btnH;
-      if (body.height + overhead <= heightBudget || wrap >= wrapMax) break;
-      wrap = Math.min(wrapMax, wrap + 120);
+    // Width first, then — for the handful of rules long enough to overrun even
+    // the widest box (FOOLISH NATURE runs to four lines) — two steps of type
+    // size. In that order because a wider measure costs nothing and a smaller
+    // one costs legibility, and because the alternative is a box shoved onto
+    // the option beside it, which costs the whole browse interaction.
+    const sizes = TOUCH ? [BOX.bodySize, BOX.bodySize - 2, BOX.bodySize - 4] : [BOX.bodySize];
+    let done = false;
+    for (const size of sizes) {
+      wrap = BOX.wrap;
+      bodySize = size;
+      for (;;) {
+        body?.destroy();
+        body = scene.add.text(0, 0, bodyStr, {
+          fontFamily: '"Baloo 2"', resolution: 2, fontSize: `${size}px`,
+          color: PARCH.textDim, fontStyle: 'bold',
+          wordWrap: { width: wrap }, align: 'center', lineSpacing: 3,
+        }).setOrigin(0.5, 0);
+        if (body.height + overhead <= heightBudget) { done = true; break; }
+        if (wrap >= wrapMax) break;
+        wrap = Math.min(wrapMax, wrap + 120);
+      }
+      if (done) break;
     }
   }
 
@@ -378,7 +418,7 @@ export function openChoiceBox(scene, spec) {
     + BOX.padBottom,
   );
 
-  const pos = place(scene, anchor, w, h, spec.key ?? null);
+  const pos = place(scene, anchor, w, h, spec.key ?? null, spec.source ?? null);
   ov.setPosition(pos.x, pos.y);
 
   const parts = woodPanel(scene, 0, 0, w, h, { accent, shadow: true });
@@ -493,7 +533,9 @@ export function twoTap(scene, obj, spec) {
   tapBind(scene, obj, () => {
     if (spec.guard && spec.guard() === false) return;
     sfx(scene, 'menu_select', { volume: 0.3, jitter: 0.06 });
-    openChoiceBox(scene, spec);
+    // `source` is what tells the placer which LAYER this shelf lives on, so it
+    // avoids the options beside this one and ignores whatever is behind them.
+    openChoiceBox(scene, { ...spec, source: obj });
     spec.onOpen?.();
   });
   return obj;

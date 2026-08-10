@@ -963,6 +963,11 @@ export function collectMods() {
     gemDamageFactor: 0,    // gems ALSO deal value*factor damage
     faceValue: 0,          // J/Q/K value bonus (generic; no relic uses it today)
     faceMult: 0,           // flat mult per scoring J/Q/K (Kingmaker)
+    // THE UNDERSTUDY (ships next wave): of-a-kind hands form with ONE FEWER
+    // CARD, which is the only way SIX OF A KIND exists. A COUNT rather than a
+    // boolean so a mirrored copy is countable instead of silently swallowed;
+    // scoring.js reads it as truthy, so two Understudies are not two shifts.
+    ofAKindMinus1: 0,
     handLevels: run.handLevels,
   };
   for (const s of Object.keys(run.bonusMods?.suitValue ?? {})) {
@@ -1008,6 +1013,7 @@ export function collectMods() {
     if (m.heartDamageOff) mods.heartDamageOff += m.heartDamageOff;
     if (m.cloverDamageOff) mods.cloverDamageOff += m.cloverDamageOff;
     if (m.gemDamageFactor) mods.gemDamageFactor += m.gemDamageFactor;
+    if (m.ofAKindMinus1) mods.ofAKindMinus1 += m.ofAKindMinus1;
     if (m.faceValue) mods.faceValue += m.faceValue;
     if (m.faceMult) mods.faceMult += m.faceMult;
   }

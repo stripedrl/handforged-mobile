@@ -50,7 +50,10 @@
  * Owned instances are CLONES with their own `state` bag (per-run counters).
  */
 
-import { gainGold, killsOfKind, run, SELL_FRACTION, NEGOTIATED_SELL_FRACTION } from './run.js';
+import {
+  CHIPS_PER_HAND_LEFT, gainGold, killsOfKind, run,
+  SELL_FRACTION, NEGOTIATED_SELL_FRACTION,
+} from './run.js';
 // Leaf modules with no imports of their own (config.js and deck.js both sit at
 // the bottom of the graph), so neither of these edges can close a cycle.
 import { HOARD_CHIP_STEP, SUIT_GLYPH } from '../config.js';
@@ -229,8 +232,21 @@ export function rollOfRarity(rarity, ownedIds = [], rng = Math.random, heroId = 
  * `ownSuitStatus`, `statusSplash`, `statusByMult`, `chipFactor`.
  */
 
-/** The matched-rank family, secrets included (see scoring.js OF_A_KIND_TYPES). */
-const OF_A_KIND_HANDS = ['pair', 'twoPair', 'trips', 'fullHouse', 'quads', 'fiveOfAKind', 'flushHouse', 'flushFive'];
+/**
+ * THE MATCHED-RANK FAMILY — every hand made of cards that share a rank,
+ * secrets included. This is what the ECHO BELL rings for.
+ *
+ * SIX OF A KIND joined it on 2026-08-10, and it belongs here more plainly than
+ * anything else on the list: it IS six of a rank. The Bell's payout is a flat
+ * handMult, which lands on the mult side BEFORE the hand's square (scoring.js
+ * step 8b) — so ringing the Bell on a Six of a Kind is squared with everything
+ * else, which is exactly what the relic and the hand each promise.
+ *
+ * Hand-maintained on purpose (a straight flush is not of a kind and no
+ * substring says so), and tests/hands0810.test.js asserts the membership of
+ * every new hand type so a future secret cannot slip past it silently.
+ */
+const OF_A_KIND_HANDS = ['pair', 'twoPair', 'trips', 'fullHouse', 'quads', 'fiveOfAKind', 'flushHouse', 'flushFive', 'sixOfAKind'];
 
 /**
  * THE FLUSH FAMILY — any hand whose TYPE NAME contains "flush", case-folded:
@@ -359,7 +375,7 @@ export const GRINDER_VALUE_PER_CARD = 2;
 function suitGrinder({ id, name, suit, icon, tint, glyph, price = 125, rarity = 'rare' }) {
   return {
     id, name, rarity, price, icon, tint,
-    desc: `Every ${glyph} card that scores grinds the edge sharper: ${glyph} cards gain +${GRINDER_VALUE_PER_CARD} value, permanently.`,
+    desc: `Every scoring ${glyph} card: ${glyph} cards gain +${GRINDER_VALUE_PER_CARD} value, permanently.`,
     mods(a) { return { suitValue: { [suit]: a.state.ground ?? 0 } }; },
     hooks: {
       afterHand(scene, a, ctx) {
@@ -601,7 +617,7 @@ export const POTATO_VALUE = 2;
 export const GOLDEN_SPUD_VALUE = 100;
 export const GOLDEN_SPUD = {
   name: 'The Golden Spud',
-  desc: `+${GOLDEN_SPUD_VALUE} value. Turns out it was worth keeping.`,
+  desc: `+${GOLDEN_SPUD_VALUE} value.`,
   icon: 'icon_coins', tint: 0xffd23e, artKey: 'art_goldenSpud',
 };
 export function becomeGoldenSpud(a) {
@@ -620,6 +636,8 @@ export function artifactArtKey(art) { return art?.artKey ?? ('art_' + art?.id); 
 
 /** PROSPECTOR'S PAN: chance one played card comes up SHINY, per card, per play. */
 export const SHINY_CHANCE = 0.01;
+/** HANDY POUCH: chips added to the per-unused-hand rate (run.CHIPS_PER_HAND_LEFT). */
+export const HANDY_POUCH_BONUS = 10;
 /** SLOT BUTTON: what changes hands, either way. Never below zero chips. */
 export const SLOT_BUTTON_CHIPS = 75;
 /** DOUBLES VOUCHER: chips per Two Pair played. */
@@ -716,7 +734,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'chalice', name: 'Vampiric Chalice', rarity: 'common', price: 60,
     icon: 'icon_heart_small', tint: 0x8a1830,
-    desc: 'Heal 1 HP for every card you play. Kickers drink too.',
+    desc: 'Heal 1 HP for every card you play, kickers included.',
     hooks: {
       afterHand(scene, a, ctx) {
         // A repeated hand really did play those cards again, so the chalice
@@ -742,7 +760,7 @@ export const ARTIFACT_POOL = [
         bank(a, 'given', 2);
       },
     },
-    liveDesc(a) { return `Currently: +${a.state.given ?? 0} Max HP fed to you so far`; },
+    liveDesc(a) { return `Currently: +${a.state.given ?? 0} Max HP given`; },
   },
   {
     // Kills stopped paying on 2026-08-01 (the fight budget is gone; a won fight
@@ -761,8 +779,8 @@ export const ARTIFACT_POOL = [
     // worth exactly as much as you are good at ending fights early.
     id: 'handyPouch', name: 'Handy Pouch', rarity: 'common', price: 55,
     icon: 'icon_coins', tint: 0xffc542,
-    desc: 'Every hand you did not need pays double: 10 → 20 chips.',
-    props: { handsChipBonus: 10 },
+    desc: `Chips per unused hand: ${CHIPS_PER_HAND_LEFT} → ${CHIPS_PER_HAND_LEFT + HANDY_POUCH_BONUS}.`,
+    props: { handsChipBonus: HANDY_POUCH_BONUS },
   },
   {
     id: 'cardsharp', name: "Cardsharp's Ring", rarity: 'common', price: 60,
@@ -782,7 +800,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'towerWax', name: 'Tower Shield Wax', rarity: 'common', price: 55,
     icon: 'icon_shield', tint: 0xc0a040,
-    desc: 'Start fights with +8 Shield; every fight won waxes on +1 more.',
+    desc: 'Start fights with +8 Shield, and +1 more for every fight won.',
     onAcquire(run) { run.startShield += 8; },
     // THE WAX COMES OFF WITH IT (0803 revocation audit). It used to grant the
     // +8 at pickup and never take it back, so a sold tin left its shield on the
@@ -800,13 +818,13 @@ export const ARTIFACT_POOL = [
     },
     liveDesc(a) {
       const waxed = a.state.waxed ?? 0;
-      return `Currently: +${8 + waxed} Shield  (${waxed} coat${waxed === 1 ? '' : 's'} of wax)`;
+      return `Currently: +${8 + waxed} Shield  (${waxed} fight${waxed === 1 ? '' : 's'} won)`;
     },
   },
   {
     id: 'snackSatchel', name: 'Snack Satchel', rarity: 'common', price: 50,
     icon: 'icon_heart_small', tint: 0x3fa64b,
-    desc: 'Heal 5 HP and gain +1 Max HP after every fight. There is always something left in it.',
+    desc: 'Heal 5 HP and gain +1 Max HP after every fight.',
     hooks: {
       // Max HP first, so the 5 has the extra point of room to fill.
       fightEnd(scene, a) {
@@ -815,7 +833,7 @@ export const ARTIFACT_POOL = [
         bank(a, 'given');
       },
     },
-    liveDesc(a) { return `Currently: +${a.state.given ?? 0} Max HP from the satchel`; },
+    liveDesc(a) { return `Currently: +${a.state.given ?? 0} Max HP given`; },
   },
   {
     // A DELIBERATE DUD, nudged 15 -> 20 and no further. Playing ONE card throws
@@ -823,13 +841,13 @@ export const ARTIFACT_POOL = [
     // for that, so it is not meant to. See BLUNT_DAGGER_VALUE.
     id: 'bluntDagger', name: 'Blunt Dagger', rarity: 'common', price: 50,
     icon: 'icon_sword_small', tint: 0x706860,
-    desc: `Play a single card and it is worth +${BLUNT_DAGGER_VALUE} value. Small knife, committed grip.`,
+    desc: `A hand of ONE card: that card is worth +${BLUNT_DAGGER_VALUE} value.`,
     props: { oneCardValue: BLUNT_DAGGER_VALUE },
   },
   {
     id: 'luckyPenny', name: 'Lucky Penny', rarity: 'common', price: 50,
     icon: 'icon_coins', tint: 0xb87333,
-    desc: 'Merchant RESTOCKS cost half. Fortune favors the browser.',
+    desc: 'Merchant RESTOCKS cost half.',
     props: { restockHalf: 1 },
   },
   {
@@ -855,7 +873,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'freeCoupon', name: 'Free Coupon', rarity: 'common', price: 50,
     icon: 'icon_coins', tint: 0x8fd8ff,
-    desc: 'The first RESTOCK at each merchant is free. Somebody already clipped it out for you.',
+    desc: 'The first RESTOCK at each merchant is free.',
     props: { freeFirstRestock: 1 },
   },
   {
@@ -863,7 +881,7 @@ export const ARTIFACT_POOL = [
     // is the point: it banks on hands you were going to play anyway.
     id: 'matchmaker', name: 'Matchmaker', rarity: 'common', price: 60,
     icon: 'icon_heart_small', tint: 0xe07aa0,
-    desc: `Every pair in a hand you play adds +${MATCHMAKER_VALUE_PER_PAIR} VALUE to this artifact, forever. Two Pair counts twice.`,
+    desc: `Every pair in a played hand: +${MATCHMAKER_VALUE_PER_PAIR} value on this artifact, forever. Two Pair counts twice.`,
     mods(a) { return { flatValue: a.state.value ?? 0 }; },
     hooks: {
       afterHand(scene, a, ctx) {
@@ -893,13 +911,13 @@ export const ARTIFACT_POOL = [
   {
     id: 'pocketAnvil', name: 'Pocket Anvil', rarity: 'common', price: 55,
     icon: 'icon_anvil', tint: 0x8898b8,
-    desc: `+${POCKET_ANVIL_VALUE} value. It fits in a pocket. It should not.`,
+    desc: `+${POCKET_ANVIL_VALUE} value.`,
     mods: { flatValue: POCKET_ANVIL_VALUE },
   },
   {
     id: 'scrappersLicense', name: "Scrapper's License", rarity: 'common', price: 60,
     icon: 'icon_trash', tint: 0x60a848,
-    desc: '+1 Discard in every fight. Licensed, apparently.',
+    desc: '+1 Discard in every fight.',
     // Cardsharp's Ring's pattern exactly: granted at pickup, revoked on sale,
     // and uncopyable because a mirror has nothing left to re-read.
     uncopyable: true,
@@ -909,7 +927,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'tailoredSleeve', name: 'Tailored Sleeve', rarity: 'common', price: 60,
     icon: 'icon_refresh', tint: 0xd8c8b0,
-    desc: '+1 hand size. Tailored generously.',
+    desc: '+1 hand size.',
     props: { handSizeBonus: 1 },
   },
   {
@@ -939,7 +957,7 @@ export const ARTIFACT_POOL = [
     // every fight, and planning around a suit you did not choose is the game.
     id: 'turncoatBanner', name: 'Turncoat Banner', rarity: 'common', price: 55,
     icon: 'icon_volume', tint: 0x9a4030,
-    desc: 'Every fight it flies one random suit: +1 mult for each card of that suit you score. It picks a different one tomorrow.',
+    desc: 'Each fight names one random suit: +1 mult per scoring card of that suit.',
     mods(a) {
       const s = a.state.suit;
       return s ? { suitMult: { [s]: 1 } } : {};
@@ -953,7 +971,7 @@ export const ARTIFACT_POOL = [
       const s = a.state.suit;
       return s
         ? `Currently: +1 mult per ${SUIT_GLYPH[s]} card  (this fight only)`
-        : 'Currently: no colours flown. It picks a suit at the next opening bell.';
+        : 'Currently: no suit. One is drawn at the start of the next fight.';
     },
   },
   {
@@ -961,7 +979,7 @@ export const ARTIFACT_POOL = [
     // at the bell, the RANK's winnings are kept forever.
     id: 'wantedPoster', name: 'Wanted Poster', rarity: 'common', price: 60,
     icon: 'icon_skull', tint: 0xc8a860,
-    desc: 'At the start of every fight a rank is WANTED. Score one and this artifact gains +1 MULT, forever.',
+    desc: 'Each fight names a WANTED rank. Score one: +1 mult on this artifact, forever.',
     mods(a) { return { flatMult: a.state.mult ?? 0 }; },
     hooks: {
       fightStart(scene, a) {
@@ -980,7 +998,7 @@ export const ARTIFACT_POOL = [
       const r = a.state.rank;
       return r
         ? `Currently: +${m} mult  ·  WANTED: ${rankLabel(r)}`
-        : `Currently: +${m} mult  (a new face goes up at the next opening bell)`;
+        : `Currently: +${m} mult  (a rank is drawn at the start of the next fight)`;
     },
   },
   {
@@ -989,7 +1007,7 @@ export const ARTIFACT_POOL = [
     // relics resolve left to right and where a relic stands is a decision.
     id: 'theEgg', name: 'The Egg', rarity: 'common', price: 60,
     icon: 'icon_gem', tint: 0xf0e0c0,
-    desc: `Becomes a VERY RARE artifact after ${EGG_HATCH_FIGHTS} fights. ${oneIn(EGG_HATCH_TABLE.legendary)} hatches LEGENDARY instead. Warm to the touch.`,
+    desc: `Becomes a VERY RARE artifact after ${EGG_HATCH_FIGHTS} fights. ${oneIn(EGG_HATCH_TABLE.legendary)} hatches LEGENDARY instead.`,
     hooks: {
       fightEnd(scene, a) {
         bank(a, 'fights');
@@ -1000,7 +1018,7 @@ export const ARTIFACT_POOL = [
     },
     liveDesc(a) {
       const left = Math.max(0, EGG_HATCH_FIGHTS - (a.state.fights ?? 0));
-      if (a.state.queued || left === 0) return 'Currently: HATCHING. Something is coming out.';
+      if (a.state.queued || left === 0) return 'Currently: HATCHING.';
       return `Currently: ${left} fight${left === 1 ? '' : 's'} until it hatches`;
     },
   },
@@ -1010,15 +1028,15 @@ export const ARTIFACT_POOL = [
     // everything you have and never a chip more.
     id: 'slotButton', name: 'Slot Button', rarity: 'common', price: 50,
     icon: 'icon_dice', tint: 0xd8b830,
-    desc: `Once a fight: ${SLOT_BUTTON_CHIPS} chips change hands. The house does not specify which way. It never takes you below zero.`,
+    desc: `Once per fight: win or lose ${SLOT_BUTTON_CHIPS} chips, even odds. Never below 0 chips.`,
     uncopyable: true,
     active: {
-      label: 'PULL', hint: `${SLOT_BUTTON_CHIPS} chips, one way or the other`,
+      label: 'PULL', hint: `Win or lose ${SLOT_BUTTON_CHIPS} chips, even odds`,
       use(scene, a) { return scene.useSlotButton(a); },
     },
     liveDesc(a) {
       const w = a.state.won ?? 0, l = a.state.lost ?? 0;
-      if (!w && !l) return 'Currently: never pulled. The machine is patient.';
+      if (!w && !l) return 'Currently: never pulled.';
       return `Currently: ${w} win${w === 1 ? '' : 's'}, ${l} loss${l === 1 ? '' : 'es'}  (${(a.state.net ?? 0) >= 0 ? '+' : ''}${a.state.net ?? 0} chips)`;
     },
   },
@@ -1027,7 +1045,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'echoBell', name: 'Echo Bell', rarity: 'rare', price: 125,
     icon: 'icon_music_note', tint: 0xd8b830,
-    desc: 'Of-a-kind hands gain +2 mult. Every one you play rings the bell louder: +0.2 more, forever.',
+    desc: 'Of-a-kind hands gain +2 mult, and +0.2 more for every of-a-kind hand you play, forever.',
     // "Of a kind" includes the SECRET hands — five matched ranks is the
     // loudest of-a-kind there is, and a FLUSH HOUSE is a full house wearing a
     // suit. Read straight off OF_A_KIND_HANDS so the bell's mult table and the
@@ -1046,7 +1064,7 @@ export const ARTIFACT_POOL = [
     },
     liveDesc(a) {
       const rung = a.state.rung ?? 0;
-      return `Currently: +${num(2 + rung)} mult  (${Math.round(rung / 0.2)} rung)`;
+      return `Currently: +${num(2 + rung)} mult  (${Math.round(rung / 0.2)} of-a-kind hands)`;
     },
   },
   {
@@ -1057,7 +1075,7 @@ export const ARTIFACT_POOL = [
     // splash rather than replacing it — see CombatScene.deliverStrike.
     id: 'tether', name: 'Spectral Tether', rarity: 'rare', price: 130,
     icon: 'icon_refresh', tint: 0x8fd8ff,
-    desc: 'Your damage also strikes every OTHER enemy for 40%. Every strike, every time.',
+    desc: 'Your damage also strikes every OTHER enemy for 40%, on every strike.',
     props: { tether: 0.40 },
   },
   {
@@ -1091,7 +1109,7 @@ export const ARTIFACT_POOL = [
     // pack payouts, event purses, interest, the wheel.
     id: 'stickyGloves', name: 'Sticky Gloves', rarity: 'rare', price: 100,
     icon: 'icon_refresh', tint: 0x3fa64b,
-    desc: '+25% chips from ALL gains. Coins stick to these fingers.',
+    desc: '+25% chips from every gain.',
     props: { chipGain: 0.25 },
   },
   {
@@ -1104,7 +1122,7 @@ export const ARTIFACT_POOL = [
     // returns 0 for anyone but Ophelia. Dead in any other hand, Cultured or not.
     id: 'cruelSting', name: 'Cruel Sting', rarity: 'rare', hero: 'venomancer', heroBound: 1, price: 125,
     icon: 'icon_skull', tint: 0x3fa64b,
-    desc: '+25% of your damage seeps in as poison, on top of the half that already does.',
+    desc: '+25% of your damage also seeps in as Poison, on top of your base 50%.',
     props: { poisonConvert: 0.25 },
   },
   {
@@ -1143,8 +1161,8 @@ export const ARTIFACT_POOL = [
     props: { secondWind: 1 },
     liveDesc(a, run) {
       return a.state.usedAct === run.actIndex
-        ? 'Currently: SPENT. It breathes again next act.'
-        : 'Currently: CHARGED. One death refused this act.';
+        ? 'Currently: SPENT until next act.'
+        : 'Currently: CHARGED.';
     },
   },
   {
@@ -1164,7 +1182,7 @@ export const ARTIFACT_POOL = [
      */
     id: 'straightedge', name: 'Straightedge', rarity: 'rare', price: 125,
     icon: 'icon_sword_small', tint: 0xc8c8d8,
-    desc: `Every straight you play banks +${STRAIGHTEDGE_VALUE_PER_STRAIGHT} VALUE onto this artifact, forever. Straights are worth all of it.`,
+    desc: `Every straight you play: +${STRAIGHTEDGE_VALUE_PER_STRAIGHT} value on this artifact, forever. It pays on straights and straight flushes.`,
     mods(a) {
       const v = a.state.filed ?? 0;
       return { handValue: { straight: v, straightFlush: v } };
@@ -1188,7 +1206,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'paintersPalette', name: "Painter's Palette", rarity: 'rare', price: 125,
     icon: 'icon_star', tint: 0xc060c0,
-    desc: 'Flushes strike at ×2 mult.',
+    desc: 'Flushes and straight flushes strike at ×2 mult.',
     mods: { handFactor: { flush: 2, straightFlush: 2 } },
   },
   {
@@ -1210,7 +1228,7 @@ export const ARTIFACT_POOL = [
      */
     id: 'wolfsbane', name: 'Wolfsbane Charm', rarity: 'rare', price: 95,
     icon: 'icon_drop', tint: 0xffffff,
-    desc: `+${WOLFSBANE_MULT_PER_WOLF} mult for every WOLF killed this run, the ones before you found it included. Regular enemies cannot Bleed you.`,
+    desc: `+${WOLFSBANE_MULT_PER_WOLF} mult per WOLF killed this run, kills before you found it included. Regular enemies cannot Bleed you.`,
     props: { immuneBleed: 1 },
     mods(a, run) {
       return { flatMult: wolvesSlain(run) * WOLFSBANE_MULT_PER_WOLF };
@@ -1223,7 +1241,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'emberheart', name: 'Ember Heart', rarity: 'rare', price: 95,
     icon: 'icon_fire', tint: 0xe06828,
-    desc: `Nothing freezes an ember: immune to Freeze from EVERY source, bosses included. Heart cards are also worth +${EMBERHEART_HEART_VALUE} value.`,
+    desc: `Immune to Freeze from every source, bosses included. Heart cards are worth +${EMBERHEART_HEART_VALUE} value.`,
     props: { immuneFreeze: 1, immuneFreezeAll: 1 },
     mods: { suitValue: { hearts: EMBERHEART_HEART_VALUE } },
   },
@@ -1241,7 +1259,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'luckyDeuce', name: 'Lucky Deuce', rarity: 'rare', price: 125,
     icon: 'icon_dice', tint: 0x4aa8ff,
-    desc: 'Every 2 you score adds +1 MULT to this artifact, forever. Nobody else wanted them.',
+    desc: 'Every 2 you score: +1 mult on this artifact, forever.',
     mods(a) { return { flatMult: a.state.deuces ?? 0 }; },
     hooks: {
       afterHand(scene, a, ctx) {
@@ -1278,7 +1296,7 @@ export const ARTIFACT_POOL = [
     // that rolls leaks the outcome and then desyncs from the play that follows.
     id: 'prospectorsPan', name: "Prospector's Pan", rarity: 'rare', price: 110,
     icon: 'icon_drop', tint: 0xc8a860,
-    desc: 'Every card you play has a 1 in 100 chance of coming up SHINY, permanently. Shiny cards score at ×1.25 mult.',
+    desc: `Every card you play has a 1 in ${Math.round(1 / SHINY_CHANCE)} chance to come away SHINY, permanently: ×${WRAP_MULT_FACTOR.shiny} mult whenever it scores.`,
     hooks: {
       handCommit(scene, a, ctx) {
         const chance = scene?._panForce ?? SHINY_CHANCE;
@@ -1292,7 +1310,7 @@ export const ARTIFACT_POOL = [
     },
     liveDesc(a) {
       const n = a.state.struck ?? 0;
-      return `Currently: ${n} card${n === 1 ? '' : 's'} panned out shiny`;
+      return `Currently: ${n} card${n === 1 ? '' : 's'} turned SHINY`;
     },
   },
   {
@@ -1328,7 +1346,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'impressiveTitle', name: 'Impressive Title', rarity: 'rare', price: 115,
     icon: 'icon_star', tint: 0xd8b830,
-    desc: '+4 mult. Nobody has checked whether it was ever awarded.',
+    desc: '+4 mult.',
     mods: { flatMult: 4 },
   },
   {
@@ -1338,7 +1356,7 @@ export const ARTIFACT_POOL = [
     // stranding a relic off the belt (see rewards.artifactCeremony).
     id: 'overstuffedSatchel', name: 'Overstuffed Satchel', rarity: 'rare', price: 110,
     icon: 'icon_lucky', tint: 0x8a6a3c,
-    desc: `+${SATCHEL_HAND_SIZE} hand size, and one fewer artifact slot. Something had to come out to make room.`,
+    desc: `+${SATCHEL_HAND_SIZE} hand size. One fewer artifact slot.`,
     props: { handSizeBonus: SATCHEL_HAND_SIZE, slotDrain: 1 },
     uncopyable: true,
     // Never below one slot: a belt with no cells at all is not a drawback, it
@@ -1388,7 +1406,7 @@ export const ARTIFACT_POOL = [
      */
     id: 'luckyStamper', name: 'Lucky Stamper', rarity: 'rare', price: 115,
     icon: 'icon_anvil', tint: 0xd8b830,
-    desc: `${oneIn(STAMPER_CHANCE)} chance that a card you play without a seal comes back SEALED, at random, permanently.`,
+    desc: `${oneIn(STAMPER_CHANCE)} chance a played card with no seal comes back SEALED at random, permanently.`,
     hooks: {
       handCommit(scene, a, ctx) {
         const chance = scene?._stamperForce ?? STAMPER_CHANCE;
@@ -1421,7 +1439,7 @@ export const ARTIFACT_POOL = [
      */
     id: 'negotiatorsCert', name: "Negotiator's Certification", rarity: 'rare', price: 120,
     icon: 'icon_coins', tint: 0xc8a860,
-    desc: `Relics sell for ${Math.round(NEGOTIATED_SELL_FRACTION * 100)}% of their price instead of ${Math.round(SELL_FRACTION * 100)}%. Everything you sell while you hold it is profit, and so is this.`,
+    desc: `Relics sell for ${Math.round(NEGOTIATED_SELL_FRACTION * 100)}% of their price instead of ${Math.round(SELL_FRACTION * 100)}%.`,
     props: { fullSellValue: 1 },
   },
   {
@@ -1430,7 +1448,7 @@ export const ARTIFACT_POOL = [
     // becomeGoldenSpud: three fights in, everything about it changes in place.
     id: 'potato', name: 'Potato', rarity: 'rare', price: 95,
     icon: 'icon_lucky', tint: 0xb08040,
-    desc: `+${POTATO_VALUE} value. It is a potato.`,
+    desc: `+${POTATO_VALUE} value.`,
     mods: { flatValue: POTATO_VALUE },
     hooks: {
       fightEnd(scene, a) {
@@ -1452,7 +1470,7 @@ export const ARTIFACT_POOL = [
     id: 'duckOfDoom', name: 'Duck of Doom', rarity: 'rare', price: 125,
     icon: 'icon_drop', tint: 0xffd23e,
     // A SCALER (off the kill ledger), so LEFT ALONE by THE HANDS OVERHAUL.
-    desc: `+${DUCK_VALUE_PER_ANIMAL} value for every ANIMAL you have killed this run. It was already counting before you found it.`,
+    desc: `+${DUCK_VALUE_PER_ANIMAL} value per ANIMAL killed this run, kills before you found it included.`,
     mods(a, run) { return { flatValue: animalsSlain(run) * DUCK_VALUE_PER_ANIMAL }; },
     liveDesc(a, run) {
       const n = animalsSlain(run);
@@ -1462,7 +1480,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'ruthlessEditor', name: 'The Ruthless Editor', rarity: 'rare', price: 110,
     icon: 'icon_trash', tint: 0xc03040,
-    desc: `+${EDITOR_DISCARDS} Discards in every fight, and one card fewer in hand. Cut it down.`,
+    desc: `+${EDITOR_DISCARDS} Discards in every fight. One card fewer in hand.`,
     props: { handSizeBonus: -1 },
     uncopyable: true,
     onAcquire(run) { run.discardsPerFightBonus += EDITOR_DISCARDS; },
@@ -1475,7 +1493,11 @@ export const ARTIFACT_POOL = [
     icon: 'icon_drop', tint: 0x3f8fd0,
     // "Flush family" is anything whose hand type contains FLUSH: a flush, a
     // straight flush, and the secret FLUSH FIVE. See isFlushHand.
-    desc: 'Every FLUSH you play raises this artifact +1 MULT, forever. Straight flushes count.',
+    // NO SPOILER IN THE RULES TEXT. isFlushHand() counts every hand type whose
+    // NAME says flush, secrets included, but naming them here would print two
+    // undiscovered hands on a shop mat. "Any FLUSH hand" is the whole rule and
+    // gives nothing away.
+    desc: 'Any FLUSH hand you play: +1 mult on this artifact, forever. Straight flushes count.',
     mods(a) { return { flatMult: a.state.tide ?? 0 }; },
     hooks: {
       afterHand(scene, a, ctx) {
@@ -1484,7 +1506,7 @@ export const ARTIFACT_POOL = [
     },
     liveDesc(a) {
       const t = a.state.tide ?? 0;
-      return `Currently: +${t} mult  (${t} flush${t === 1 ? '' : 'es'} played)`;
+      return `Currently: +${t} mult  (${t} flush hand${t === 1 ? '' : 's'} played)`;
     },
   },
   {
@@ -1498,11 +1520,11 @@ export const ARTIFACT_POOL = [
      */
     id: 'chaosOrb', name: 'Chaos Orb', rarity: 'veryRare', price: 190,
     icon: 'icon_magic', tint: 0xb45cff,
-    desc: 'Every hand, the orb decides: it adds between 0 and 15 MULT. It usually decides small.',
+    desc: `Every hand, the orb adds between 0 and ${CHAOS_ORB_MAX} mult. The roll leans low.`,
     props: { chaosMult: 1 },
     liveDesc(a) {
       const rolls = a.state.rolls ?? 0;
-      if (!rolls) return 'Currently: unrolled. The orb is still deciding.';
+      if (!rolls) return 'Currently: unrolled.';
       const avg = Math.round(((a.state.total ?? 0) / rolls) * 10) / 10;
       return `Last roll: +${a.state.last ?? 0} mult  ·  ${rolls} roll${rolls === 1 ? '' : 's'}, averaging +${avg}`;
     },
@@ -1535,7 +1557,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'twinfates', name: 'Twin Fates', rarity: 'veryRare', price: 210,
     icon: 'icon_refresh', tint: 0xb45cff,
-    desc: 'Your hand echoes: strikes again at 50% damage.',
+    desc: 'Your hand strikes a second time for 50% damage.',
     props: { handEcho: 0.5 },
   },
   {
@@ -1569,7 +1591,7 @@ export const ARTIFACT_POOL = [
     },
     liveDesc(a) {
       const n = a.state.gilded ?? 0;
-      return `Currently: ${n} card${n === 1 ? '' : 's'} turned SHINY by the gauntlet`;
+      return `Currently: ${n} card${n === 1 ? '' : 's'} turned SHINY`;
     },
   },
   {
@@ -1587,7 +1609,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'crownGreed', name: 'Crown of Greed', rarity: 'veryRare', price: 200,
     icon: 'icon_coins', tint: 0xd8b020,
-    desc: '+1% damage for every 20 chips in your purse. Wealth is a weapon.',
+    desc: '+1% damage per 20 chips held.',
     mods(a, run) {
       return { globalMultFactor: 1 + Math.floor(run.chips / 20) * 0.01 };
     },
@@ -1613,7 +1635,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'courtSession', name: 'Court in Session', rarity: 'veryRare', price: 200,
     icon: 'icon_star', tint: 0xe8d8a0,
-    desc: '+20% mult per card left in your hand. The court rewards what you hold back.',
+    desc: '+20% mult per card left in your hand.',
     props: { leftoverPct: 20 },
   },
   {
@@ -1634,7 +1656,7 @@ export const ARTIFACT_POOL = [
     // to spread to, so it lands whole (see CombatScene.deliverStrike).
     id: 'shockwaveCore', name: 'Hallowed Boulder', rarity: 'veryRare', price: 220,
     icon: 'icon_fire', tint: 0xffb347,
-    desc: 'Your damage stops picking a target: EVERY enemy takes 60% of it. Against one foe it lands whole. The boulder does not aim.',
+    desc: 'EVERY enemy takes 60% of your damage. Against one enemy it lands whole.',
     props: { aoeAll: 0.6 },
   },
   {
@@ -1653,7 +1675,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'wornAnvil', name: 'Worn Anvil', rarity: 'veryRare', price: 195,
     icon: 'icon_anvil', tint: 0xd07028,
-    desc: "The anvil remembers. Your most-played hand is always among the Smith's offerings.",
+    desc: "Your most-played hand is always among the Smith's offerings.",
     // Read at pack-open time by packs.js anvilForcedType(); the offered option
     // wears a WORN ANVIL badge so the guarantee is visible, not just felt.
     props: { anvilMemory: 1 },
@@ -1773,7 +1795,7 @@ export const ARTIFACT_POOL = [
      */
     id: 'kingmaker', name: 'Kingmaker', rarity: 'legendary', price: 330,
     icon: 'icon_star', tint: 0xd8b830,
-    desc: 'Every King you play crowns it: this artifact gains +1 MULT, forever.',
+    desc: 'Every King you score: +1 mult on this artifact, forever.',
     mods(a) { return { flatMult: a.state.crowns ?? 0 }; },
     hooks: {
       afterHand(scene, a, ctx) {
@@ -1826,7 +1848,7 @@ export const ARTIFACT_POOL = [
     // but it only counts the cards that gamble. Multiplicative per card.
     id: 'riggedWheel', name: 'Rigged Wheel', rarity: 'legendary', price: 310,
     icon: 'icon_dice', tint: 0x2e8b57,
-    desc: `×${RIGGED_WHEEL_FACTOR} mult for every ROULETTE card left in your hand when a hand scores. The wheel pays the ones who sit out.`,
+    desc: `×${RIGGED_WHEEL_FACTOR} mult for every ROULETTE card left in your hand when a hand scores.`,
     props: { riggedWheelFactor: RIGGED_WHEEL_FACTOR },
   },
   {
@@ -1837,7 +1859,7 @@ export const ARTIFACT_POOL = [
     // Rigged Wheel's bench pattern and at the same rate. Held back, they haunt.
     id: 'voidcaller', name: 'Voidcaller', rarity: 'legendary', price: 300,
     icon: 'icon_magic', tint: 0x7fe0d0,
-    desc: `ETHEREAL cards never vanish, and every ETHEREAL card left in your hand pays ×${ETHEREAL_BENCH_FACTOR} mult. The ones you keep back haunt for you.`,
+    desc: `ETHEREAL cards never vanish. Every ETHEREAL card left in your hand: ×${ETHEREAL_BENCH_FACTOR} mult.`,
     props: { voidcaller: 1, etherealBenchFactor: ETHEREAL_BENCH_FACTOR },
   },
   {
@@ -1853,14 +1875,14 @@ export const ARTIFACT_POOL = [
      */
     id: 'latentRepeater', name: 'Latent Repeater', rarity: 'legendary', price: 340,
     icon: 'icon_hourglass', tint: 0x7fe0d0,
-    desc: `Every LEFTOVER effect in your hand triggers ${LATENT_BENCH_REPEAT === 2 ? 'TWICE' : `${LATENT_BENCH_REPEAT} TIMES`}. The cards you hold back work a second shift.`,
+    desc: `Every LEFTOVER effect in your hand triggers ${LATENT_BENCH_REPEAT === 2 ? 'TWICE' : `${LATENT_BENCH_REPEAT} TIMES`}.`,
     mods: { benchRepeat: LATENT_BENCH_REPEAT },
   },
 
   {
     id: 'counterfeit', name: 'The Forgery', rarity: 'legendary', price: 350,
     icon: 'icon_refresh', tint: 0xff8c28,
-    desc: 'A perfect forgery: copies the ability of the artifact to its RIGHT.',
+    desc: 'Copies the ability of the artifact to its RIGHT.',
   },
   {
     // ONE MORE PLAY. Not the mult — the OUTPUT: every point of damage, heal,
@@ -1887,7 +1909,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'twinstrike', name: 'Duel-Wield Canes', rarity: 'legendary', price: 340,
     icon: 'icon_sword_small', tint: 0xffe08a,
-    desc: 'Your hand STRIKES TWICE. The second blow is its own hit: if the first one kills, the second finds the next enemy.',
+    desc: 'Your hand STRIKES TWICE. Damage only; if the first blow kills, the second finds the next enemy.',
     props: { handStrikes: 2 },
   },
   {
@@ -1895,7 +1917,7 @@ export const ARTIFACT_POOL = [
     // spill can kill the next body and roll straight on into the one after.
     id: 'overflowEdge', name: 'Overflowing Chalice', rarity: 'legendary', price: 340,
     icon: 'icon_sword_small', tint: 0xff9a3c,
-    desc: 'It never stops pouring: damage that overkills SPILLS into the next living enemy, and keeps spilling until it is spent.',
+    desc: 'Overkill damage SPILLS into the next living enemy, and keeps spilling until it is spent.',
     props: { overkillSpill: 1 },
   },
 
@@ -1906,7 +1928,7 @@ export const ARTIFACT_POOL = [
     id: 'sharpestDagger', name: 'The Sharpest Dagger', rarity: 'heroExclusive',
     hero: 'highRoller', price: 260,
     icon: 'icon_sword_small', tint: 0xff5ce1,
-    desc: 'A hand of ONE card gets +4 REPLAYS: it happens five times in all. Dextra only needs the one.',
+    desc: 'A hand of ONE card gets +4 REPLAYS: it happens five times in all.',
     // Conditional on hand SIZE, so the scene applies it in buildScoreState. The
     // printed 5 is read as "+4 replays" and the extras SUM (0803-B §1.2), so a
     // mirrored Dagger is nine plays rather than twenty five.
@@ -1926,7 +1948,7 @@ export const ARTIFACT_POOL = [
     id: 'ancientShield', name: 'The Ancient Shield', rarity: 'heroExclusive',
     hero: 'bulwark', heroBound: 1, price: 260,
     icon: 'icon_shield', tint: 0xff5ce1,
-    desc: 'The Shield your hands grant is multiplied by your MULT. All Shield melts at the end of every turn: the wall is a tide, not a bank.',
+    desc: 'The Shield your hands grant is multiplied by your MULT. All Shield melts at the end of every turn.',
     mods: { shieldByMult: 1 },
     props: { shieldMelts: 1 },
   },
@@ -1941,7 +1963,7 @@ export const ARTIFACT_POOL = [
     id: 'infiniteHeart', name: 'The Infinite Heart', rarity: 'heroExclusive',
     hero: 'zealot', heroBound: 1, price: 260,
     icon: 'icon_heart_small', tint: 0xff5ce1,
-    desc: 'The Healing your hands grant is multiplied by your MULT. Overheal still banks as ZEAL, and ZEAL has no ceiling.',
+    desc: 'The Healing your hands grant is multiplied by your MULT. Overheal banks as ZEAL, which has no ceiling.',
     mods: { healByMult: 1 },
   },
   {
@@ -1955,7 +1977,7 @@ export const ARTIFACT_POOL = [
     id: 'bottomlessVile', name: 'The Bottomless Vile', rarity: 'heroExclusive',
     hero: 'venomancer', heroBound: 1, price: 260,
     icon: 'icon_drop', tint: 0xff5ce1,
-    desc: 'Every point of damage you deal ALSO seeps in as poison. Your Clubs still hit for everything they are worth, venom included.',
+    desc: 'Every point of damage you deal also seeps in as Poison.',
     props: { poisonConvert: 0.5 },
   },
   {
@@ -1973,7 +1995,7 @@ export const ARTIFACT_POOL = [
     id: 'solidGoldSack', name: 'Solid Gold Sack', rarity: 'heroExclusive',
     hero: 'hoarder', price: 260,
     icon: 'icon_coins', tint: 0xff5ce1,
-    desc: `Your chips MULTIPLY the finished mult, ${HOARD_CHIP_STEP} to the x1. He was never saving for anything.`,
+    desc: `Your chips MULTIPLY the finished mult: ${HOARD_CHIP_STEP} chips = ×1.`,
     mods: { chipMultFactor: 1 },
     liveDesc(a, run) {
       const chips = run?.chips ?? 0;
@@ -1993,7 +2015,7 @@ export const ARTIFACT_POOL = [
     // stitched glove nook beside the mat. Six REAL relics, plus the glove.
     id: 'sixthFinger', name: 'The Sixth Finger', rarity: 'mythical', price: 0,
     icon: 'icon_magic', tint: 0xe03040,
-    desc: 'You may hold a SIXTH artifact, and the glove wears no slot of its own. It always felt like something was missing.',
+    desc: 'You may hold a SIXTH artifact. The glove takes no slot of its own.',
     uncopyable: true,
     props: { noSlot: 1, nook: 1 },
     onAcquire(run) { run.artifactSlots += 1; },
@@ -2009,7 +2031,7 @@ export const ARTIFACT_POOL = [
     // included; that is the entire point of a mythical that only fires once.
     id: 'hushedBell', name: 'The Hushed Bell', rarity: 'mythical', price: 0,
     icon: 'icon_music_note', tint: 0xe03040,
-    desc: 'ONCE PER FIGHT: toll the bell and your target is SILENCED, its next action cancelled entirely. Bosses are not exempt.',
+    desc: 'ONCE PER FIGHT: SILENCE your target. Its next action is cancelled entirely. Bosses included.',
     uncopyable: true,
     active: {
       label: 'TOLL', hint: 'Silence your current target',
@@ -2021,19 +2043,19 @@ export const ARTIFACT_POOL = [
     // lands SIX times (2 × 3), the same way two Pocketwatches compound.
     id: 'threefoldFang', name: 'Chip of Tripling Down', rarity: 'mythical', price: 0,
     icon: 'icon_anvil', tint: 0xe03040,
-    desc: 'Your hand STRIKES THREE TIMES. Three separate blows, each finding whoever is still standing. Damage only: the hand itself happens once.',
+    desc: 'Your hand STRIKES THREE TIMES. Damage only; each blow finds whoever is still standing.',
     props: { handStrikes: 3 },
   },
   {
     id: 'aurumHeart', name: 'Aurum Heart', rarity: 'mythical', price: 0,
     icon: 'icon_gem', tint: 0xe03040,
-    desc: 'Every scoring card ALSO grants shield equal to half its value. Everything is armor.',
+    desc: 'Every scoring card also grants Shield equal to half its value.',
     props: { aurum: 0.5 },
   },
   {
     id: 'crackedCrown', name: 'The Cracked Crown', rarity: 'mythical', price: 0,
     icon: 'icon_coins', tint: 0xe03040,
-    desc: `Gain ${CRACKED_CROWN_CHIPS} chips. That is all it does. It is VERY shiny.`,
+    desc: `Gain ${CRACKED_CROWN_CHIPS} chips, once. It does nothing else.`,
     uncopyable: true,
     // IT REVOKES WHAT IT ACTUALLY PAID (0803-B). A relic whose whole effect is a
     // payout at pickup is a profit loop the moment it can also be sold, so the
@@ -2068,7 +2090,7 @@ export const ARTIFACT_POOL = [
     // the hand count alone, so each copy tempers once.
     id: 'forgeEternal', name: 'The Forge Eternal', rarity: 'mythical', price: 0,
     icon: 'icon_fire', tint: 0xe03040,
-    desc: 'The FIRST hand you play each fight is tempered on the eternal anvil: that hand type gains +1 LEVEL, permanently. Copy this relic and it strikes twice.',
+    desc: 'The FIRST hand you play each fight gains +1 LEVEL for that hand type, permanently. A copy of this relic tempers again.',
     hooks: {
       handCommit(scene, a, ctx) {
         if (scene.handsThisFight !== 1) return;
@@ -2078,7 +2100,7 @@ export const ARTIFACT_POOL = [
     },
     liveDesc(a) {
       const t = a.state.tempered ?? 0;
-      return `Currently: ${t} hand${t === 1 ? '' : 's'} tempered on the eternal anvil`;
+      return `Currently: ${t} hand${t === 1 ? '' : 's'} tempered`;
     },
   },
   {
@@ -2090,7 +2112,7 @@ export const ARTIFACT_POOL = [
     // whole reason this relic is the named example in the 0803 audit.
     id: 'acesLegacy', name: "The Ace's Legacy", rarity: 'mythical', price: 0,
     icon: 'icon_star', tint: 0xe03040,
-    desc: `Score an Ace and something is left behind: this artifact gains +${ACES_LEGACY_MULT} MULT, forever. Once per hand, however many Aces turned up. A hand that repeats counts again.`,
+    desc: `Score an Ace: +${ACES_LEGACY_MULT} mult on this artifact, forever. Once per hand, however many Aces.`,
     mods(a) { return { flatMult: (a.state.aces ?? 0) * ACES_LEGACY_MULT }; },
     hooks: {
       afterHand(scene, a, ctx) {
@@ -2105,7 +2127,7 @@ export const ARTIFACT_POOL = [
   {
     id: 'singularity', name: 'Singularity', rarity: 'mythical', price: 0,
     icon: 'icon_star', tint: 0xe03040,
-    desc: 'Single-card hands strike with ×5 additional mult. One card. One point of impact.',
+    desc: 'Single-card hands strike with ×5 mult.',
     props: { oneCardFactor: 5 },
   },
   {
@@ -2134,7 +2156,7 @@ export const ARTIFACT_POOL = [
     desc: 'ONCE PER FIGHT, spin the wheel: +50 chips · +1 hand size this fight · ×2 mult next hand · every card retriggers next hand · or ONE random card in your hand is DESTROYED forever.',
     uncopyable: true,
     active: {
-      label: 'SPIN', hint: 'Five wedges. One of them bites.',
+      label: 'SPIN', hint: 'Five wedges. One destroys a card.',
       use(scene, a) { return scene.useWheelOfDivinity(a); },
     },
   },

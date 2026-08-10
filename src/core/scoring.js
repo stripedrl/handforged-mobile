@@ -81,7 +81,61 @@
 
 import { HOARD_CHIP_STEP, CHARACTERS } from '../config.js';
 import { cardValue } from './deck.js';
-import { evaluateHand, bestHandOf, scoringIds, handStats, WILD_MODS } from './poker.js';
+import { evaluateHand, bestHandOf, scoringIds, handStats, WILD_MODS, HAND_DEFS } from './poker.js';
+
+/**
+ * ============================== THE INFINITY CAP ==========================
+ * (JC, 2026-08-10, locked. THE BUG IT RETIRES is written up below it.)
+ *
+ * NOTHING IN THIS FILE MAY EVER BE LARGER THAN 1e30. Not the running mult, not
+ * the score side, not one card's share, not an output pool. A hand that reaches
+ * the ceiling IS the ceiling, and e30 and e100 are the same hand by design:
+ * the number stops being a number and becomes ∞ (see ui/juice.fmtNum), the
+ * payoff plays its top tier, and the blow is lethal to anything that is not
+ * immune (see CombatScene.damageEnemy).
+ *
+ * WHY A CAP AND NOT A BIGGER TYPE. IEEE doubles stop at ~1.8e308, and the
+ * ordered mult walk compounds ×2 layers per activation per window — five
+ * ethereal cards under an echo seal, an Ouroboros and a repeating hand is
+ * thousands of doublings, so 2^1024 = Infinity is a REACHABLE build, not a
+ * theoretical one. And Infinity is not a big number, it is a POISON:
+ *
+ *   Infinity × 0        = NaN   (a non-scoring card's share, an empty pool)
+ *   Infinity - Infinity = NaN   (scoring's own residual: addOf(mods) - listAdd)
+ *   Infinity ÷ Infinity = NaN   (residualFactor)
+ *   NaN > 0             = false — and THAT is the shipped bug: resolveHand
+ *                         gates the strike on `res.damage > 0`, so a hand whose
+ *                         equation had just counted past a trillion on screen
+ *                         dealt EXACTLY NOTHING. "I scored e12+ and it applied
+ *                         0" is this line.
+ *   Math.round(x*100)/100 overflows at 1.8e306, so the 2dp rounding at the
+ *                         bottom of the mult turned finite mults into Infinity
+ *                         two decades early, all on its own.
+ *
+ * Clamping INSIDE the walk means no intermediate is ever big enough for any of
+ * those to happen. capNum() is the one gate; every accumulator goes through it.
+ */
+export const INFINITY_CAP = 1e30;
+
+/**
+ * The clamp. Finite in, finite out, always.
+ *
+ * NaN answers 0 rather than propagating: a NaN that reaches the scene is a hand
+ * that silently deals nothing (see above), and zero is the only value that is
+ * honest about itself on screen. Negatives are clamped symmetrically so a
+ * future "the hand costs you" lever cannot underflow the other way.
+ */
+export function capNum(n) {
+  if (typeof n !== 'number' || Number.isNaN(n)) return 0;
+  if (n >= INFINITY_CAP) return INFINITY_CAP;
+  if (n <= -INFINITY_CAP) return -INFINITY_CAP;
+  return n;
+}
+
+/** Has this number hit the ceiling? The one question ∞ display and lethality ask. */
+export function isInfinite(n) {
+  return typeof n === 'number' && (Number.isNaN(n) ? false : n >= INFINITY_CAP);
+}
 
 /**
  * @typedef {import('./deck.js').Card} Card
@@ -120,9 +174,14 @@ export const ZEAL_DAMAGE_PCT = 0.02;
  * on the trophy shelf, and the yardstick a couple of strings still quote. The
  * function stays because scoring and the scene's bank-up both ask it, and one
  * answer in one place is what keeps them agreeing.
+ *
+ * IT ANSWERS INFINITY_CAP, NOT Infinity (2026-08-10). The meaning is unchanged
+ * — nothing in the game banks 1e30 Zeal — but the number now travels out on
+ * res.zealCap, into `Math.min(res.zealCap, ...)` in the scene, and a literal
+ * Infinity on a result field is exactly the poison the cap exists to keep out.
  */
 export function zealCapFor(_mods) {
-  return Infinity;
+  return INFINITY_CAP;
 }
 
 /**
@@ -207,7 +266,14 @@ const SUIT_BY_CHARACTER = Object.fromEntries(
   Object.values(CHARACTERS).map(c => [c.id, c.suit]));
 
 export const VALUE_BONUS_BY_MOD = { enhanced: 10, forged: 10, joker: 20, nuke: 90 };
-const CHIP_MODS = new Set(['gilded', 'forged']);
+export const CHIP_MODS = new Set(['gilded', 'forged']);
+/**
+ * What a chip mod pays, every activation it scores. Was a literal `4` inside
+ * the card walk until the CARD INSPECT panel (2026-08-10) needed to print it:
+ * a panel that quotes a number the arithmetic does not read is a panel that
+ * goes stale silently.
+ */
+export const MOD_CHIPS = 4;
 /**
  * Mods that MULTIPLY the hand mult when the card scores. They stack
  * multiplicatively with each other AND WITH THEMSELVES, once per ACTIVATION.
@@ -329,9 +395,19 @@ export function handRepeatOf(mods) {
   // outright with `{ ...mods, handRepeat: 1 }`, which is how every baseline in
   // the tests is built. handRepeatAdd only answers for a bag that never went
   // through collectMods (a relic's own mods, a hand-written state).
-  if (mods && 'handRepeat' in mods) return Math.max(1, Math.round(mods.handRepeat ?? 1));
-  return Math.max(1, 1 + Math.max(0, Math.round(mods?.handRepeatAdd ?? 0)));
+  const raw = (mods && 'handRepeat' in mods)
+    ? Math.max(1, Math.round(mods.handRepeat ?? 1))
+    : Math.max(1, 1 + Math.max(0, Math.round(mods?.handRepeatAdd ?? 0)));
+  // THE HARD CEILING. The mult walk below is `for (h = 0; h < handRepeat; h++)`,
+  // so a bag carrying Infinity here (a hand-edited save, a relic bug, NaN
+  // rounding to Infinity) is not a big number — it is a hung tab. Nothing in the
+  // game reaches double digits of hand repeats, let alone 512, so the clamp is
+  // invisible to play and total against the hang.
+  return Number.isFinite(raw) ? Math.min(MAX_HAND_REPEAT, raw) : MAX_HAND_REPEAT;
 }
+
+/** @see handRepeatOf — the anti-hang ceiling on whole-hand activations. */
+export const MAX_HAND_REPEAT = 512;
 
 /**
  * DRUSKY: one step of hoard buys one unit of mult.
@@ -353,7 +429,7 @@ export function chipMultAddOf(mods, chips) {
   if ((mods?.chipMultFactor ?? 0) > 0) return 0;
   const rate = mods?.chipMultAdd ?? 0;
   if (rate <= 0) return 0;
-  return rate * Math.floor(Math.max(0, chips) / CHIP_MULT_STEP);
+  return capNum(rate * Math.floor(Math.max(0, chips) / CHIP_MULT_STEP));
 }
 
 /**
@@ -365,7 +441,9 @@ export function chipMultAddOf(mods, chips) {
 export function chipMultFactorOf(mods, chips) {
   const rate = mods?.chipMultFactor ?? 0;
   if (rate <= 0) return 1;
-  return Math.max(1, (rate * Math.max(0, chips)) / CHIP_MULT_STEP);
+  // Capped here rather than only where it is applied, because this number is
+  // also REPORTED (res.chipMultFactor) and the cascade prints it.
+  return capNum(Math.max(1, (rate * Math.max(0, chips)) / CHIP_MULT_STEP));
 }
 /**
  * ETHEREAL: the price of the ×2 — rolled once per ACTIVATION, after the hand.
@@ -537,10 +615,15 @@ export function effectiveSuit(card, character) {
  */
 export function scoreHand({ cards, character, state }) {
   const n = cards.length;
+  // THE UNDERSTUDY'S RULE, read once and handed to BOTH halves of evaluation —
+  // the classification and the kicker rule have to agree about how many cards
+  // an of-a-kind takes, or the hand is named for one rule and scored by the
+  // other. (mods is read below; this is the one thing needed above it.)
+  const evalOpts = { ofAKindMinus1: !!(state.mods ?? {}).ofAKindMinus1 };
   // GO-GO GOO can hand this more than five cards, and the best five-card hand
   // in the pile is what sets the type and the mult. Everything else in the game
   // plays 1-5 and goes through the ordinary evaluator, unchanged.
-  const hand = state.allScore ? bestHandOf(cards) : evaluateHand(cards);
+  const hand = state.allScore ? bestHandOf(cards, evalOpts) : evaluateHand(cards, evalOpts);
   // Balatro rule: only cards that FORM the hand score. Kickers contribute nothing.
   //
   // ...unless state.allScore is set, which is GO-GO GOO and nothing else (JC's
@@ -550,7 +633,7 @@ export function scoreHand({ cards, character, state }) {
   // the whole scoring system and exactly one bottle in the game bends it.
   const scoring = state.allScore
     ? new Set(cards.map(c => c.id))
-    : scoringIds(cards, hand);
+    : scoringIds(cards, hand, evalOpts);
 
   const mods = state.mods ?? {};
   const suitValue = mods.suitValue ?? {};
@@ -762,7 +845,7 @@ export function scoreHand({ cards, character, state }) {
       let beatFactor = 1;        // the ×mult this activation signed, for the beat
 
       if (alive) {
-        if (CHIP_MODS.has(card.mod)) beatChips += 4;
+        if (CHIP_MODS.has(card.mod)) beatChips += MOD_CHIPS;
         if (spin === 'gold') beatChips += ROULETTE_GOLD_CHIPS;
         // THE STAMP LAYER, pressed ON TOP of whatever mod the card carries: a
         // sealed ROULETTE card spins AND pays, a stamped ETHEREAL card ghosts
@@ -972,11 +1055,23 @@ export function scoreHand({ cards, character, state }) {
   // Residual ADDS land BEFORE the walk, residual MULTIPLIES land AFTER it,
   // which is precisely where the old un-ordered pipeline put them — so an
   // unaccounted contribution can never change a number, only its position.
+  //
+  // BOTH RESIDUALS ARE DIFFERENCES OF TWO LARGE NUMBERS, which is exactly the
+  // shape that answers NaN when the two are Infinity (Infinity - Infinity,
+  // Infinity / Infinity). capNum keeps each side finite so the subtraction and
+  // the division are always ordinary arithmetic; the guards then refuse
+  // anything that still is not a usable number, because a residual is a
+  // CORRECTION and a broken correction must be no correction, never a zero.
   let listAdd = 0;
   let listFactor = 1;
-  for (const e of modList) { listAdd += addOf(e?.mods ?? {}); listFactor *= factorOf(e?.mods ?? {}); }
-  const residualAdd = addOf(mods) - listAdd;
-  const residualFactor = listFactor ? factorOf(mods) / listFactor : 1;
+  for (const e of modList) {
+    listAdd = capNum(listAdd + addOf(e?.mods ?? {}));
+    listFactor = capNum(listFactor * factorOf(e?.mods ?? {}));
+  }
+  const residualAdd = capNum(capNum(addOf(mods)) - listAdd);
+  const rawResidualFactor = listFactor ? capNum(factorOf(mods)) / listFactor : 1;
+  const residualFactor = Number.isFinite(rawResidualFactor) && rawResidualFactor > 0
+    ? rawResidualFactor : 1;
 
   // 1-2: THE CARD WALK (JC, 2026-08-04: "the hand takes the 4 seals' +12 and
   // THEN the ethereal doubles it... and a retrigger adds another +12 to 36 and
@@ -988,7 +1083,14 @@ export function scoreHand({ cards, character, state }) {
   // double what it is behind it, and a repeating hand replays the whole
   // sequence onto the running total. The walk reads the same beats[] the
   // cascade replays on screen: one contract, read twice.
-  let effMult = baseMult;
+  //
+  // THE CAP LIVES INSIDE THE WALK (2026-08-10). Every step of the running mult
+  // goes through capNum, so the walk can compound as many ×2 layers as a build
+  // can buy and the number simply arrives at 1e30 and stays there. Nothing
+  // downstream ever sees an intermediate large enough to overflow — which is
+  // the whole overflow class retired at its source rather than patched at its
+  // symptoms. See INFINITY_CAP at the top of this file.
+  let effMult = capNum(baseMult);
   let modMultFactor = 1;   // reporting: the product of every ×mult signed
   for (let h = 0; h < handRepeat; h++) {
     for (const r of raw) {
@@ -999,30 +1101,36 @@ export function scoreHand({ cards, character, state }) {
       for (let k = 0; k < r.times; k++) {
         const beat = r.beats[wheel ? (h * r.times + k) % L : k % L];
         if (!beat || beat.dead) continue;
-        effMult += beat.mult ?? 0;
+        effMult = capNum(effMult + (beat.mult ?? 0));
         const f = beat.multFactor ?? 1;
-        effMult *= f;
-        modMultFactor *= f;
+        effMult = capNum(effMult * f);
+        modMultFactor = capNum(modMultFactor * f);
       }
     }
   }
   // 3: the HOARD's flat mult, then anything not on the belt. The hoard lands
   // HERE, after the cards and at the front of the relics, which is exactly
   // the position the Solid Gold Sack exists to trade away.
-  effMult += chipMultAdd + residualAdd;
+  effMult = capNum(effMult + chipMultAdd + residualAdd);
   // 4: THE WALK. Left to right, each relic's adds then its own multiplies.
   const multOrder = [];
   for (const e of modList) {
     const m = e?.mods ?? {};
     const add = addOf(m);
     const factor = factorOf(m);
-    effMult += add;
-    effMult *= factor;
+    effMult = capNum(effMult + add);
+    effMult = capNum(effMult * factor);
     if (add !== 0 || factor !== 1) {
-      multOrder.push({ id: e?.id ?? null, name: e?.name ?? null, add, factor, mult: effMult });
+      // The ledger the cascade animates and a driver reads back. Clamped like
+      // everything else: these are DISPLAYED, and a row printing 1e307 beside a
+      // running total that says ∞ is the two halves of the screen disagreeing.
+      multOrder.push({
+        id: e?.id ?? null, name: e?.name ?? null,
+        add: capNum(add), factor: capNum(factor), mult: effMult,
+      });
     }
   }
-  effMult *= residualFactor;
+  effMult = capNum(effMult * residualFactor);
 
   // 5: the hero passive, then (below) the Zealot's Zeal discharge.
   //
@@ -1035,7 +1143,7 @@ export function scoreHand({ cards, character, state }) {
   let passiveMultFactor = 1;
   if (character === 'highRoller') {
     passiveMultFactor = HIGH_ROLLER_CARD_MULT[n] ?? 1;
-    effMult *= passiveMultFactor;
+    effMult = capNum(effMult * passiveMultFactor);
   }
 
   // --- the hand-wide output scale ---------------------------------------
@@ -1048,12 +1156,12 @@ export function scoreHand({ cards, character, state }) {
   // ADDITIVE since 0803-B — see handRepeatOf for why 1+1+4 and not 2×5.
   // (handRepeat itself is resolved at the top of the function now: the wheel has
   // to know how many activations it is spinning for before pass 1 runs.)
-  const valueFactor = Math.max(1, mods.valueFactor ?? 1);
-  const outScale = handRepeat * valueFactor;
+  const valueFactor = capNum(Math.max(1, mods.valueFactor ?? 1));
+  const outScale = capNum(handRepeat * valueFactor);
   // THE SCORE SIDE, WHOLE. baseSum is one hand-activation and takes outScale;
   // baseFlat has already counted every activation and takes valueFactor alone.
   // With no repeat in play baseFlat is 0 and this is exactly baseSum * outScale.
-  const scoreSide = baseSum * outScale + baseFlat * valueFactor;
+  const scoreSide = capNum(capNum(baseSum * outScale) + capNum(baseFlat * valueFactor));
   const shieldByMult = !!mods.shieldByMult;
   const healByMult = !!mods.healByMult;
 
@@ -1066,9 +1174,9 @@ export function scoreHand({ cards, character, state }) {
   if (character === 'zealot') {
     const zeal = state.zeal ?? 0;
     if (zeal > 0 && baseSum + baseFlat > 0) {
-      zealFactor = 1 + zeal * ZEAL_DAMAGE_PCT;
-      effMult *= zealFactor;
-      zealConsumed = zeal;
+      zealFactor = capNum(1 + zeal * ZEAL_DAMAGE_PCT);
+      effMult = capNum(effMult * zealFactor);
+      zealConsumed = capNum(zeal);
     }
   }
 
@@ -1078,10 +1186,10 @@ export function scoreHand({ cards, character, state }) {
   let shieldMultRead = 0;
   let shieldMultFactor = 1;
   if (mods.shieldMult) {
-    shieldMultRead = Math.max(0, Math.round((state.shield ?? 0) + shieldPool + shieldFlat));
+    shieldMultRead = capNum(Math.max(0, Math.round((state.shield ?? 0) + shieldPool + shieldFlat)));
     if (shieldMultRead > 0) {
-      shieldMultFactor = 1 + shieldMultRead * SHIELD_MULT_PCT;
-      effMult *= shieldMultFactor;
+      shieldMultFactor = capNum(1 + shieldMultRead * SHIELD_MULT_PCT);
+      effMult = capNum(effMult * shieldMultFactor);
     }
   }
 
@@ -1109,21 +1217,47 @@ export function scoreHand({ cards, character, state }) {
    * which cards are still in your hand — so it is deliberately absent from
    * factorOf() above and can never leak into the walk or the residual.)
    */
-  const benchFactor = Math.max(0, mods.benchFactor ?? 1) || 1;
-  if (benchFactor !== 1) effMult *= benchFactor;
+  const benchFactor = capNum(Math.max(0, mods.benchFactor ?? 1)) || 1;
+  if (benchFactor !== 1) effMult = capNum(effMult * benchFactor);
   // 8: THE SOLID GOLD SACK, dead last: the whole hoard multiplied into the
   // finished number (see chipMultFactorOf).
-  if (chipMultFactor !== 1) effMult *= chipMultFactor;
-  effMult = Math.round(effMult * 100) / 100;   // 9: round to 2dp, as always
+  if (chipMultFactor !== 1) effMult = capNum(effMult * chipMultFactor);
 
-  let damage = Math.round(scoreSide * effMult);
+  /**
+   * 8b: SIX OF A KIND SQUARES THE FINISHED MULT — THE LAST LINE OF THE MULT.
+   *
+   * THIS IS THE LINE (JC spec, 2026-08-10: "document the exact line in a
+   * comment"). It sits after the card walk, after the ordered relic chain,
+   * after the suit mults and the face mults that ride addOf, after the hero
+   * passive, after Zeal, after the Ancient Shield, after the leftover bench and
+   * after the Solid Gold Sack — and immediately before the 2dp rounding and the
+   * damage identity below. Everything the hand built is inside the square.
+   *
+   * ONCE PER SCORING, never per retrigger window. The card walk above has
+   * already replayed every window onto the running total by the time control
+   * reaches here, so a repeating SIX OF A KIND compounds first and squares once.
+   *
+   * THE CAP APPLIES AFTER THE SQUARE. A squared mult is exactly how a player
+   * reaches ∞ — 1e15 squared IS the ceiling — so this is the smooth path to the
+   * top tier rather than a special case bolted beside it.
+   */
+  const multBeforeSquare = effMult;
+  const handSquared = !!HAND_DEFS[hand.type]?.squaresMult;
+  if (handSquared) effMult = capNum(effMult * effMult);
+
+  effMult = capNum(Math.round(effMult * 100) / 100);   // 9: round to 2dp, as always
+
+  // THE DAMAGE IDENTITY, capped: damage = round(scoreSide × effMult). The
+  // equation on screen reconciles to exactly these two numbers at the slam
+  // (CombatScene.eqSlam), so what is displayed is what is dealt.
+  let damage = capNum(Math.round(capNum(scoreSide * effMult)));
 
   // (2026-08-01) The Bull's old '+25% of current Shield as bonus damage' used
   // to be added here. It is GONE — his damage now comes from the Diamonds
   // themselves (gemFactor above), which is a decision you make with your hand
   // rather than a number that accrues while you do something else.
   if (damage > 0 && state.flatBonus) {
-    damage += state.flatBonus;
+    damage = capNum(damage + state.flatBonus);
   }
 
   // --- breakdown: per-card damage scaled to match the final effMult ---
@@ -1147,11 +1281,14 @@ export function scoreHand({ cards, character, state }) {
     // `allDamage` already counts the repeats a wheel card resolved for itself,
     // so it takes valueFactor alone; everything else is one hand's worth and
     // takes the full outScale. The two are the same number when nothing repeats.
-    damage: Math.round(allDamage * valueFactor * effMult),
+    // capNum on the way out: a card that scored NOTHING is `0 × effMult`, which
+    // is NaN the instant effMult is not finite — and a NaN here reached the club
+    // splash's sum, the card bottoms and the recap.
+    damage: capNum(Math.round(capNum(allDamage * valueFactor * effMult))),
     // CLUBS: a quarter of what THIS card dealt reaches every other enemy. Zero
     // for every other suit, so the card bottoms only print it where it is real.
     aoe: effectiveSuit(card, character) === 'clovers'
-      ? Math.round(Math.round(allDamage * valueFactor * effMult) * CLUB_SPLASH) : 0,
+      ? capNum(Math.round(capNum(allDamage * valueFactor * effMult) * CLUB_SPLASH)) : 0,
     // --- the repeat (2026-08-04) ---
     times,          // CARD-level activations: an ECHO SEAL, the Ouroboros
     liveTimes,      // ...of which this many actually paid (a BLACK spin did not)
@@ -1178,7 +1315,7 @@ export function scoreHand({ cards, character, state }) {
     valueBonusMod: modBonus,
     valueBonusRoulette: rouletteBonus,        // a GREEN spin's +10 — morphs like the rest
     base: {                                   // contribution with valueBonus removed
-      damage: Math.round(own.rawDamage * outScale * effMult),
+      damage: capNum(Math.round(capNum(own.rawDamage * outScale * effMult))),
       heal: own.heal,
       shield: own.shield,
     },
@@ -1188,24 +1325,24 @@ export function scoreHand({ cards, character, state }) {
   // Summed from the cards rather than recomputed from the total, so the number
   // under a club card and the number in the preview readout are the same
   // arithmetic and can never drift by a rounding step.
-  const aoeSplash = breakdown.reduce((s, b) => s + (b.aoe ?? 0), 0);
+  const aoeSplash = capNum(breakdown.reduce((s, b) => capNum(s + (b.aoe ?? 0)), 0));
 
   // --- heal / shield / zeal gain ---
   // The hand-wide scale lands here, plus (for the two hero exclusives) the
   // hand's own mult. Shield still routes through the scene's Aegis factor.
-  const healScale = outScale * (healByMult ? effMult : 1);
-  const shieldScale = outScale * (shieldByMult ? effMult : 1);
+  const healScale = capNum(outScale * (healByMult ? effMult : 1));
+  const shieldScale = capNum(outScale * (shieldByMult ? effMult : 1));
   // The FLAT pool's twin of each scale: valueFactor where the repeating pool
   // takes outScale, because a wheel card has already counted its own repeats.
-  const healScaleFlat = valueFactor * (healByMult ? effMult : 1);
-  const shieldScaleFlat = valueFactor * (shieldByMult ? effMult : 1);
-  healPool = healPool * healScale + healFlat * healScaleFlat;
-  shieldPool = shieldPool * shieldScale + shieldFlat * shieldScaleFlat;
-  chipBonus = Math.round(chipBonus * outScale + chipFlat * valueFactor);
+  const healScaleFlat = capNum(valueFactor * (healByMult ? effMult : 1));
+  const shieldScaleFlat = capNum(valueFactor * (shieldByMult ? effMult : 1));
+  healPool = capNum(capNum(healPool * healScale) + capNum(healFlat * healScaleFlat));
+  shieldPool = capNum(capNum(shieldPool * shieldScale) + capNum(shieldFlat * shieldScaleFlat));
+  chipBonus = capNum(Math.round(capNum(chipBonus * outScale) + capNum(chipFlat * valueFactor)));
   // BLOOD SEALED pays per activation, so the hand-wide scale lands on it too —
   // exactly like the chips. It never touches healPool: this is the CARD healing
   // you, not the hand's Hearts, so no Zeal overflow and no ×mult rewrite.
-  sealHeal = Math.round(sealHeal * outScale + sealHealFlat * valueFactor);
+  sealHeal = capNum(Math.round(capNum(sealHeal * outScale) + capNum(sealHealFlat * valueFactor)));
 
   // Which currency does the equation's SCORE side count in this hand? Damage,
   // normally — since the 2026-08-01 reworks a DIAMONDS hand and a CLUBS hand
@@ -1245,13 +1382,13 @@ export function scoreHand({ cards, character, state }) {
   }
 
   return {
-    damage: Math.round(damage),
-    heal: Math.round(healApplied),
+    damage: capNum(Math.round(damage)),
+    heal: capNum(Math.round(healApplied)),
     // What the hand PRODUCED, before the missing-HP cap ate the rest. The
     // equation totals this (a Zealot's overflow becomes Zeal, so none of it is
     // a lie); `heal` above is what actually reached the hero.
-    healRaw: Math.round(healPool),
-    shield: Math.round(shieldPool),
+    healRaw: capNum(Math.round(healPool)),
+    shield: capNum(Math.round(shieldPool)),
     chipBonus,
     sealHeal,          // BLOOD SEALED cards' HP, hand-scale applied
     etherealIds,       // ethereal cards that SCORED — the scene rolls their vanish
@@ -1281,8 +1418,8 @@ export function scoreHand({ cards, character, state }) {
     passiveGemFactor,
     zealConsumed,      // Zeal spent by this hand (the battery discharged)
     zealFactor,        // ...and what it multiplied the mult by (1 = it did not fire)
-    zealGained: Math.round(zealGained),
-    zealCap: zealCapFor(mods),   // 40 normally, Infinity under the Infinite Heart
+    zealGained: capNum(Math.round(zealGained)),
+    zealCap: zealCapFor(mods),   // THE CAP, which is "no cap" (see zealCapFor)
     shieldMultRead,    // THE ANCIENT SHIELD: points of Shield the mult read
     shieldMultFactor,  // ...and the factor they bought (1 = the relic is not on)
     breakdown,
@@ -1291,7 +1428,8 @@ export function scoreHand({ cards, character, state }) {
     suitCounts,       // scoring cards per effective suit — Prayer Beads' pulse
     // RAW damage per effective suit, pre-mult. The Plains' FORGET SUIT reads
     // this to strip exactly one suit's share of the finished damage.
-    damageBySuit,
+    damageBySuit: Object.fromEntries(
+      Object.entries(damageBySuit).map(([s, v]) => [s, capNum(v)])),
     retrigger,        // how many times the top card counted (1 = no Ouroboros)
     retriggerId,      // which card that was
     handRepeat,       // whole-hand activations, ADDITIVE (Pocketwatch + Dagger)
@@ -1323,11 +1461,19 @@ export function scoreHand({ cards, character, state }) {
     residualAdd,      // mult adds not on the belt (a potion, a one-hand blessing)
     residualFactor,   // ...and the factors, applied after the walk
     effMult,
-    baseSum,
+    // SIX OF A KIND's square, reported so the cascade can give it its own beat
+    // and a verification run can assert the ORDER (see step 8b above).
+    handSquared,       // did this hand square the mult? (SIX OF A KIND only)
+    multBeforeSquare: capNum(multBeforeSquare),   // ...and what it squared
+    // Did this hand hit the ceiling? The one flag the ∞ readout, the top payoff
+    // tier, the lethality rule and the hidden trophy all read.
+    infinite: isInfinite(capNum(Math.round(damage))),
+    infinityCap: INFINITY_CAP,
+    baseSum: capNum(baseSum),
     // The wheel's own pool: score already counted across every activation, so
     // it takes valueFactor and never outScale. 0 unless a ROULETTE card met a
     // repeating hand, which is the only case the two pools differ at all.
-    baseFlat,
+    baseFlat: capNum(baseFlat),
     scoreSide,        // baseSum × outScale + baseFlat × valueFactor
   };
 }

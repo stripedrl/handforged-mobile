@@ -1,4 +1,5 @@
 import { GAME_W, GAME_H, DEPTH, PARCH, BUILD, CHARACTERS, applyMobileCamera } from '../config.js';
+import { installPointerPolicy } from '../ui/pointer.js';
 import { installLongPress } from '../ui/touch.js';
 import { DIFFICULTIES } from '../core/difficulty.js';
 import { addTavernBackdrop } from '../ui/tavern.js';
@@ -40,6 +41,7 @@ export class TitleScene extends Phaser.Scene {
   create() {
     applyMobileCamera(this);   // no-op on desktop
     installLongPress(this);    // hold = hover on touch; no-op on desktop
+    installPointerPolicy(this);   // right-click never acts, anywhere
     playMusic(this, 'menu');
     addTavernBackdrop(this, 0.4);
 

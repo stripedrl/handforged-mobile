@@ -18,19 +18,23 @@
                touch-action: none; -webkit-user-select: none; user-select: none;
                -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
                overscroll-behavior: none; }
-  /* THE FULL-BLEED FRAME (see tools/build_mobile.py, THE SCREEN FILL).
-     Pinned to the four viewport edges rather than sized in vh/vw: iOS's vh
-     lies about the standalone viewport, dvh is newer than some of the phones
-     this has to run on, and four offsets on a fixed box are unambiguous
-     everywhere. NO safe-area padding — the game IS the screen now. */
-  #game { position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+  /* THE FRAME (see tools/build_mobile.py, THE ASPECT GUARD + THE SCREEN FILL).
+     Pinned to the whole viewport here, and then RESIZED IN JS once the chosen
+     canvas's aspect is known — on a phone the script leaves it exactly as this
+     stylesheet has it (full bleed), on a tablet it centres a correctly-shaped
+     box and the page's own black becomes the letterbox. Sized in %, not vh:
+     iOS's vh lies about the standalone viewport and dvh is newer than some of
+     the phones this has to run on. NO safe-area padding — the game IS the
+     screen on the devices that fill it. */
+  #game { position: fixed; top: 0; left: 0; width: 100%; height: 100%;
           margin: 0; padding: 0; overflow: hidden; }
-  /* AND THE CANVAS FILLS IT, both axes, no letterbox, non-uniform allowed.
+  /* AND THE CANVAS FILLS THE FRAME, both axes, non-uniform allowed.
      !important because Phaser's ScaleManager writes width/height/margin INLINE
      on every refresh and an author !important rule outranks an inline
      declaration — so these four lines own the presentation outright. Input is
      unaffected: Phaser re-derives canvasBounds AND displayScale from the
-     canvas's real getBoundingClientRect(), never from what FIT wanted. */
+     canvas's real getBoundingClientRect(), never from what FIT wanted, and a
+     letterboxed canvas's rect carries the centring offset with it. */
   canvas { width: 100% !important; height: 100% !important;
            max-width: none !important; max-height: none !important;
            margin: 0 !important; display: block !important; }
@@ -42,6 +46,70 @@
   @media (orientation: portrait) { #rotate { display: flex; } }
 </style>
 <script>window.__HF_MOBILE = true;</script>
+<script>
+/* THE ASPECT GUARD (see tools/build_mobile.py). Runs BEFORE src/config.js,
+   because a module script is deferred by spec and this one is not — so
+   __HF_WIDE is on the window by the time GAME_W is computed off it. */
+
+(function () {
+  var WIDE_W = 2340, NARROW_W = 1920, H = 1080;
+  var A_WIDE = WIDE_W / H, A_NARROW = NARROW_W / H;
+  /* Whichever canvas the screen is CLOSER to: the midpoint of the two aspects. */
+  var PICK = (A_WIDE + A_NARROW) / 2;
+  var TOL = 0.06;
+
+  /* Orientation-agnostic on purpose: the page can very easily be evaluated
+     while the device is still held upright, and a boot-time decision that
+     flips with the wrist is not a decision. */
+  var w0 = window.innerWidth || (screen && screen.width) || 0;
+  var h0 = window.innerHeight || (screen && screen.height) || 0;
+  var a0 = (w0 > 0 && h0 > 0) ? Math.max(w0, h0) / Math.min(w0, h0) : A_WIDE;
+  var wide = a0 >= PICK;
+
+  window.__HF_WIDE = wide;
+  window.__HF_CANVAS = { w: wide ? WIDE_W : NARROW_W, h: H };
+  window.__HF_FILL_TOLERANCE = TOL;
+
+  /* Size the FRAME. The canvas is 100%x100% of it (see the stylesheet), so this
+     one function is the whole presentation policy. */
+  function fit() {
+    var el = document.getElementById('game');
+    if (!el) return null;
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var ca = window.__HF_CANVAS.w / window.__HF_CANVAS.h;
+    var sa = vh > 0 ? vw / vh : ca;
+    var bw, bh, mode;
+    if (Math.abs(sa / ca - 1) <= TOL) {
+      /* Close enough to be the same shape: take the whole screen. */
+      bw = vw; bh = vh; mode = 'fill';
+    } else if (sa > ca) {
+      bh = vh; bw = Math.round(vh * ca); mode = 'pillarbox';
+    } else {
+      bw = vw; bh = Math.round(vw / ca); mode = 'letterbox';
+    }
+    el.style.width = bw + 'px';
+    el.style.height = bh + 'px';
+    el.style.left = Math.round((vw - bw) / 2) + 'px';
+    el.style.top = Math.round((vh - bh) / 2) + 'px';
+    window.__HF_FIT = {
+      mode: mode, w: bw, h: bh, left: Math.round((vw - bw) / 2),
+      top: Math.round((vh - bh) / 2), vw: vw, vh: vh,
+      canvasAspect: ca, screenAspect: sa, wide: wide,
+      warp: (bw / bh) / ca
+    };
+    /* The picture is right the instant CSS lands; the POINTER arithmetic is
+       only re-derived inside ScaleManager.refresh(), and a frame it never
+       measured is a frame whose taps land somewhere else. */
+    var g = window.__game;
+    if (g && g.scale) { try { g.scale.refresh(); } catch (e) { /* not up yet */ } }
+    return window.__HF_FIT;
+  }
+  window.__hfFit = fit;
+  if (document.readyState !== 'loading') fit();
+  else addEventListener('DOMContentLoaded', fit);
+})();
+
+</script>
 <script>
 /* THE MOBILE AUDIO RATE (see tools/build_mobile.py, THE MOBILE AUDIO DIET).
 
@@ -78,21 +146,19 @@
 <div id="rotate"><div class="big">&#x1F4F1;&#x21BB;</div><div>ROTATE YOUR PHONE<br>HANDFORGED plays sideways</div></div>
 <script type="module" src="src/main.js"></script>
 <script>
-  /* ROTATION, AND THE ONE THING THE STYLESHEET CANNOT DO.
-     The canvas is sized entirely by CSS now, so a viewport change is absorbed
-     silently — no Phaser callback has to fire for the picture to be right. But
-     the POINTER arithmetic is only re-derived inside ScaleManager.refresh(),
+  /* ROTATION, AND THE TWO THINGS A STYLESHEET CANNOT DO.
+     (1) The FRAME has to be re-measured against the new viewport — on a
+     letterboxing device the bars change size and side on every rotation. (2)
+     The POINTER arithmetic is only re-derived inside ScaleManager.refresh(),
      and a frame it never measured is a frame whose taps land somewhere else.
-     So every event that can change the frame asks for a refresh, debounced
-     past the end of iOS's rotation animation. Guarded on __game because this
-     runs before the deferred module has built it. */
+     __hfFit does both, so every event that can change the frame calls it,
+     debounced past the end of iOS's rotation animation. */
   (function () {
     var t = null;
     function nudge() {
       clearTimeout(t);
       t = setTimeout(function () {
-        var g = window.__game;
-        if (g && g.scale) { try { g.scale.refresh(); } catch (e) { /* not up yet */ } }
+        if (window.__hfFit) { try { window.__hfFit(); } catch (e) { /* not up yet */ } }
       }, 140);
     }
     addEventListener('resize', nudge);

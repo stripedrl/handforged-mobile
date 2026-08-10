@@ -21,7 +21,7 @@ import { gainGold } from './run.js';
 // The two numbers the Phantom Phial quotes live in the scoring engine, so the
 // bottle READS them rather than restating them: its label said x1.5 and 25%, and
 // by 2026-08-04 both of those were wrong.
-import { MOD_MULT_FACTOR, ETHEREAL_VANISH_CHANCE } from './scoring.js';
+import { MOD_MULT_FACTOR, ETHEREAL_VANISH_CHANCE, SEAL_HEAL } from './scoring.js';
 
 export const MAX_POTIONS = 3;
 
@@ -131,7 +131,7 @@ export const POTION_POOL = [
   {
     id: 'honeyMead', name: 'Honeyed Mead', rarity: 'common', price: 25,
     tint: 0xe8b030, use: 'anywhere',
-    desc: 'Drink: heal 25 HP. Goes down easy, anywhere.',
+    desc: 'Drink: heal 25 HP. Usable anywhere.',
     effect: { type: 'heal', value: 25 },
   },
   {
@@ -162,19 +162,19 @@ export const POTION_POOL = [
      */
     id: 'goGoGoo', name: 'Go-Go Goo', rarity: 'common', price: 25,
     tint: 0x9ae04a, use: 'combat',
-    desc: 'Drink: play your whole hand at once. Every card scores, even kickers. The best hand present sets the type. Costs a hand.',
+    desc: 'Drink: play your whole hand at once. Every card scores, kickers included, and the best hand present sets the type. Costs a hand.',
     effect: { type: 'playAll' },
   },
   {
     id: 'bandAid', name: 'Bottled Band Aid', rarity: 'common', price: 25,
     tint: 0xffd6d0, use: 'anywhere',
-    desc: 'Drink: heal 5 HP. Better than nothing. Barely.',
+    desc: 'Drink: heal 5 HP. Usable anywhere.',
     effect: { type: 'heal', value: 5 },
   },
   {
     id: 'jarredCoin', name: 'Jarred Coin', rarity: 'common', price: 25,
     tint: 0xffc542, use: 'anywhere',
-    desc: 'Drink: gain 5 chips. Okay, this one is pretty rough.',
+    desc: 'Drink: gain 5 chips. Usable anywhere.',
     effect: { type: 'chips', value: 5 },
   },
 
@@ -188,13 +188,13 @@ export const POTION_POOL = [
   {
     id: 'emberVial', name: 'Ember Vial', rarity: 'rare', price: 55,
     tint: 0xff6028, use: 'combat', target: 'enemy',
-    desc: 'Throw: 100 fire damage to an enemy. Burns hotter in later acts.',
+    desc: 'Throw: 100 damage to one enemy, scaled up in later acts.',
     effect: { type: 'damage', value: 100, actTable: [1, 3, 10, 30] },
   },
   {
     id: 'venomFlask', name: 'Venom Flask', rarity: 'rare', price: 50,
     tint: 0x60d040, use: 'combat', target: 'enemy',
-    desc: 'Throw: poison an enemy. The bigger the brute, the more it takes.',
+    desc: 'Throw: Poison one enemy, scaled to its max HP.',
     effect: { type: 'poison', hpFrac: 0.08 },
   },
   {
@@ -206,7 +206,7 @@ export const POTION_POOL = [
   {
     id: 'bloodWax', name: 'Blood Wax', rarity: 'rare', price: 55,
     tint: 0x8a1830, use: 'combat',
-    desc: 'Pour: 2 cards in your hand are BLOOD SEALED forever. They heal 2 HP whenever they score, and keep whatever they already were.',
+    desc: `Pour: 2 cards in your hand take the BLOOD SEAL forever: heal ${SEAL_HEAL} HP whenever they score.`,
     // `stamp` rather than `mod`: the wax is its own LAYER and stacks on top of
     // a card's existing mod instead of replacing it (see scoring.js).
     effect: { type: 'modCards', stamp: 'blood', count: 2 },
@@ -216,7 +216,7 @@ export const POTION_POOL = [
     // in the slot it was already sitting in.
     id: 'potionPotion', name: 'Potion-Flavored Potion', rarity: 'rare', price: 50,
     tint: 0xd070e8, use: 'combat',
-    desc: 'Drink: this bottle becomes a different random potion in the same slot. You still have to drink that one.',
+    desc: 'Drink: this bottle becomes a different random potion in the same slot, undrunk.',
     effect: { type: 'transform' },
   },
   {
@@ -225,7 +225,7 @@ export const POTION_POOL = [
     // so a flat bottle bought a much smaller share than it was priced for.
     id: 'liquidIce', name: 'Liquid Ice', rarity: 'rare', price: 55,
     tint: 0x9fe8ff, use: 'combat',
-    desc: `Drink: your next played hand is worth +${LIQUID_ICE_VALUE} value. Hydrates.`,
+    desc: `Drink: your next played hand is worth +${LIQUID_ICE_VALUE} value.`,
     effect: { type: 'handValue', value: LIQUID_ICE_VALUE },
   },
   {
@@ -271,7 +271,7 @@ export const POTION_POOL = [
     // of the ones it fills. Never overwrites a potion you are still holding.
     id: 'potionWithinAPotion', name: 'Potion Within a Potion', rarity: 'veryRare', price: 95,
     tint: 0xb060e8, use: 'anywhere',
-    desc: 'Drink: every EMPTY slot on your belt fills with a random potion, its own slot included.',
+    desc: 'Drink: every EMPTY slot on your belt fills with a random potion, its own slot included. Usable anywhere.',
     effect: { type: 'refillBelt', value: MAX_POTIONS },
   },
   {
@@ -280,7 +280,7 @@ export const POTION_POOL = [
     // which is the whole point — buy, drink, buy again.
     id: 'paydayBrine', name: 'Payday Brine', rarity: 'veryRare', price: 100,
     tint: 0xf0c030, use: 'anywhere',
-    desc: 'Drink: +200 chips. Tastes like a payday and costs less than one.',
+    desc: 'Drink: +200 chips. Usable anywhere.',
     effect: { type: 'chips', value: 200 },
   },
 
@@ -307,7 +307,7 @@ export const POTION_POOL = [
      */
     id: 'potionOfNothing', name: 'Potion of Nothing', rarity: 'legendary', price: 155,
     tint: 0xdedede, use: 'combat',
-    desc: 'Drink: nothing happens. Why would you buy this?',
+    desc: 'Drink: nothing happens. On purpose.',
     effect: { type: 'nothing' },
   },
 
@@ -316,7 +316,7 @@ export const POTION_POOL = [
   {
     id: 'fairyBottle', name: 'Fairy in a Bottle', rarity: 'mythical', price: 255,
     tint: 0xffd0f0, use: 'passive',
-    desc: 'She waits. When you die she brings you back at half HP, then she is gone.',
+    desc: 'Passive: the first time you would die, revive at half Max HP. The bottle is then spent.',
     effect: { type: 'revive', frac: 0.5 },
   },
   {
@@ -339,7 +339,7 @@ export const POTION_POOL = [
      */
     id: 'bankErrorStew', name: 'Bank Error Stew', rarity: 'mythical', price: 240,
     tint: 0x7ad8a0, use: 'anywhere',
-    desc: 'Drink: your chips DOUBLE. The bank swallows no more than 1000 of the loss.',
+    desc: 'Drink: your chips DOUBLE, gaining at most 1000. Usable anywhere.',
     effect: { type: 'doubleChips', cap: 1000 },
   },
 ];

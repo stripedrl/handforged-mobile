@@ -1,4 +1,5 @@
-import { GAME_W, GAME_H, DEPTH, PARCH, MOBILE } from '../config.js';
+import { GAME_W, GAME_H, DEPTH, PARCH, MOBILE, SAFE } from '../config.js';
+import { tapBind } from './touch.js';
 import { settings, saveSettings, DEV_SLIDER_STEPS, settingsPanelHeight } from '../core/settings.js';
 import { refreshMusicVolume } from '../core/music.js';
 import { sfx, refreshSfxVolume } from '../core/sfx.js';
@@ -8,6 +9,7 @@ import { writeSave, clearSave } from '../core/save.js';
 import { popMessage } from './juice.js';
 import { viewDeckButton } from './rewards.js';
 import { openAchievements } from './achievements.js';
+import { openIndex } from './glossary.js';
 // ENDLESS (2026-08-05): FORFEIT is the only way out of an endless run, so it is
 // an ENDING and has to bank the depth. See the forfeit handler below.
 import { foldRunIntoRecords } from '../core/progress.js';
@@ -59,15 +61,35 @@ function stepperBtn(scene, ov, bx, cy, glyph, onTap, { d = 44, fs = 28 } = {}) {
  * them — present, visible-ish, and unclickable. MapScene passes a depth above
  * its whole overlay stack so the gear stays live in every room.
  */
-export function addSettingsButton(scene, x = GAME_W - 44, y = 42, depth = DEPTH.overlay - 1) {
-  // MOBILE (v2): same top-right corner (GAME_W is the phone width now),
-  // half again as big — a thumb target.
+/**
+ * THE GEAR, AND THE CORNER IT WAS LOSING (JC, 2026-08-10, on an iPhone as a
+ * home-screen app: "the settings cog is basically clipped").
+ *
+ * It was not the EDGE that ate it — the potion mat sits 9pt from the same glass
+ * and reads fine. It was the CORNER. A phone's corners are cut by a ~55pt radius
+ * and the cut bites hardest on the diagonal, which is the one direction a
+ * corner-pinned icon lives in. So the default home is now pulled in on BOTH axes
+ * by config's SAFE frame — 96 game px across, 24 down, which puts the whole
+ * icon comfortably inside the arc (verified by config.clearsCorners, which the
+ * mobile driver asserts on this button by name).
+ *
+ * On desktop SAFE is {0,0} and this is the coordinate it has always been.
+ *
+ * `size` is a parameter now rather than a ternary because the two scenes that
+ * hang a gear have different neighbours: combat's shares the top-right strip
+ * with the potion mat, the map's has the whole corner to itself.
+ */
+export function addSettingsButton(scene, x = GAME_W - 44 - SAFE.x, y = 42 + SAFE.y,
+  depth = DEPTH.overlay - 1, { size = MOBILE ? 76 : 44 } = {}) {
   const btn = scene.add.image(x, y, 'icon_setting')
     .setDepth(depth).setInteractive({ useHandCursor: true }).setAlpha(0.85);
-  btn.setScale((MOBILE ? 66 : 44) / Math.max(btn.width, btn.height));
+  btn.setScale(size / Math.max(btn.width, btn.height));
+  btn.setData('hfLabel', 'SETTINGS');
   btn.on('pointerover', () => scene.tweens.add({ targets: btn, angle: 30, alpha: 1, duration: 150 }));
   btn.on('pointerout', () => scene.tweens.add({ targets: btn, angle: 0, alpha: 0.85, duration: 150 }));
-  btn.on('pointerdown', () => openSettings(scene));
+  // ON RELEASE on touch (see ui/pointer.js): a panel that opens on the PRESS
+  // hands the rest of its own gesture to whatever it lands on top of.
+  tapBind(scene, btn, () => openSettings(scene));
   return btn;
 }
 
@@ -354,7 +376,7 @@ export function openSettings(scene) {
   const unlockY = BOT - (inRun ? 225 : 143);
 
   // =========================================================================
-  // ACHIEVEMENTS, from the pause menu (patch §6)
+  // ACHIEVEMENTS · INDEX · UNLOCK ALL, from the pause menu (patch §6)
   // -------------------------------------------------------------------------
   // The trophy shelf used to live on the title screen only, which meant the one
   // place you actually WANT it — three fights into a run, wondering what the
@@ -363,11 +385,18 @@ export function openSettings(scene) {
   // door, and putting it here costs the panel no height (see
   // settingsPanelHeight). Same shelf, same overlay: it opens ON TOP of the
   // settings panel and closing it puts you back here, run untouched.
+  //
+  // THE INDEX joined the row on 2026-08-10 (the COPY CLARITY WAVE) on exactly
+  // that arithmetic. The panel is a 680px frame on a canvas that has already had
+  // the RESUME button under the bezel once, so a THIRD full-width row was never
+  // an option: the row splits into three 206px buttons instead and
+  // settingsPanelHeight does not move by a pixel. Keep it that way.
   // =========================================================================
-  const achBtn = scene.add.image(GAME_W / 2 - 160, unlockY, 'btn_blue')
-    .setDisplaySize(300, 60).setInteractive({ useHandCursor: true });
-  const achTxt = scene.add.text(GAME_W / 2 - 160, unlockY - 3, 'ACHIEVEMENTS', {
-    fontFamily: 'Lilita One', resolution: 2, fontSize: '23px', color: '#0a2a4a',
+  const ROW_W = 206, ROW_DX = 213;
+  const achBtn = scene.add.image(GAME_W / 2 - ROW_DX, unlockY, 'btn_blue')
+    .setDisplaySize(ROW_W, 60).setInteractive({ useHandCursor: true });
+  const achTxt = scene.add.text(GAME_W / 2 - ROW_DX, unlockY - 3, 'ACHIEVEMENTS', {
+    fontFamily: 'Lilita One', resolution: 2, fontSize: '19px', color: '#0a2a4a',
   }).setOrigin(0.5);
   ov.add(achBtn); ov.add(achTxt);
   achBtn.on('pointerdown', () => {
@@ -375,10 +404,23 @@ export function openSettings(scene) {
     openAchievements(scene);
   });
 
-  const unlockBtn = scene.add.image(GAME_W / 2 + 160, unlockY, 'btn_gray')
-    .setDisplaySize(300, 60).setInteractive({ useHandCursor: true });
-  const unlockTxt = scene.add.text(GAME_W / 2 + 160, unlockY - 3, 'UNLOCK ALL (TESTERS)', {
-    fontFamily: 'Lilita One', resolution: 2, fontSize: '21px', color: '#3a3a44',
+  // THE INDEX: the glossary. Same door rules as the shelf beside it, and it
+  // renders above this panel (DEPTH.overlay + 34 against our + 30).
+  const idxBtn = scene.add.image(GAME_W / 2, unlockY, 'btn_blue')
+    .setDisplaySize(ROW_W, 60).setInteractive({ useHandCursor: true });
+  const idxTxt = scene.add.text(GAME_W / 2, unlockY - 3, 'INDEX', {
+    fontFamily: 'Lilita One', resolution: 2, fontSize: '23px', color: '#0a2a4a',
+  }).setOrigin(0.5);
+  ov.add(idxBtn); ov.add(idxTxt);
+  idxBtn.on('pointerdown', () => {
+    sfx(scene, 'button', { volume: 0.8 });
+    openIndex(scene);
+  });
+
+  const unlockBtn = scene.add.image(GAME_W / 2 + ROW_DX, unlockY, 'btn_gray')
+    .setDisplaySize(ROW_W, 60).setInteractive({ useHandCursor: true });
+  const unlockTxt = scene.add.text(GAME_W / 2 + ROW_DX, unlockY - 3, 'UNLOCK ALL', {
+    fontFamily: 'Lilita One', resolution: 2, fontSize: '19px', color: '#3a3a44',
   }).setOrigin(0.5);
   ov.add(unlockBtn); ov.add(unlockTxt);
   unlockBtn.on('pointerdown', () => {
@@ -566,7 +608,9 @@ export function openSettings(scene) {
     // published as its own scalar rather than inferred.
     headroom: Math.round(titleText.getTopLeft().y - (GAME_H / 2 - PANEL_H / 2)),
     bottom: Math.round(BOT),
-    achievements: { x: Math.round(GAME_W / 2 - 160), y: Math.round(unlockY) },
+    achievements: { x: Math.round(GAME_W / 2 - ROW_DX), y: Math.round(unlockY) },
+    index: { x: Math.round(GAME_W / 2), y: Math.round(unlockY) },
+    unlockAll: { x: Math.round(GAME_W / 2 + ROW_DX), y: Math.round(unlockY) },
     resume: { x: Math.round(GAME_W / 2), y: Math.round(BOT - 57) },
     close,
   };

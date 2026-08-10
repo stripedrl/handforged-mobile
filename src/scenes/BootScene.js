@@ -1,4 +1,5 @@
 import { GAME_W, GAME_H, COLORS, CARD, applyMobileCamera } from '../config.js';
+import { installPointerPolicy } from '../ui/pointer.js';
 import { wrapImageLoader } from '../core/imgload.js';
 import { WEB_FONTS } from './PrebootScene.js';
 import { bootMark } from '../core/boottime.js';
@@ -351,6 +352,7 @@ export class BootScene extends Phaser.Scene {
   create() {
     bootMark('bootCreate');
     applyMobileCamera(this);   // no-op on desktop
+    installPointerPolicy(this);   // right-click never acts, anywhere
     // Generated opaque card face (the pack frame's center is transparent).
     const g = this.make.graphics({ x: 0, y: 0 }, false);
     g.fillStyle(0xf8f4ec, 1);

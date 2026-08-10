@@ -6,10 +6,17 @@
  * DEPTH.overlay+5 so it floats over either scene.
  */
 
-import { GAME_W, GAME_H, DEPTH, PARCH, COLORS, SUIT_COLORS, SUIT_PIP_KEY, SUIT_GLYPH, CARD } from '../config.js';
+import { GAME_W, GAME_H, DEPTH, PARCH, COLORS, SUIT_COLORS, SUIT_PIP_KEY, SUIT_GLYPH, CARD, TOUCH } from '../config.js';
 import { woodPanel } from './panels.js';
+// THE TWO-TAP MODEL (ui/choicebox.js, JC 2026-08-10). Every shelf in this file
+// whose information is hidden behind an icon or a painted card now opens a
+// persistent description box on the FIRST tap and commits only from a labelled
+// button inside it. `twoTap` throws on desktop by design, so every call site
+// below keeps its own `else obj.on('pointerdown', commit)` branch and the two
+// paths run the SAME named closure — they cannot drift.
+import { twoTap } from './choicebox.js';
 import { sfx, suspense } from '../core/sfx.js';
-import { popMessage, rainbowText, legible } from './juice.js';
+import { popMessage, rainbowText, legible, glitchText } from './juice.js';
 import { CardSprite } from './CardSprite.js';
 import { ARTIFACT_RARITY, acquireArtifact, getProp, artifactLiveLine } from '../core/artifacts.js';
 import { openPack, PACK_TYPES, rollBountyRewards, bountyRewardsById, optionArtSlug, rollCuratorRelics, CURATOR_RELICS, previewLabel } from '../core/packs.js';
@@ -28,8 +35,74 @@ import { addPotionIcon } from './potionIcon.js';
 // screen — see packCovers/packCards for how the two halves are split.
 import { ensure, missingKeys, packCovers, packCards } from '../core/lazyload.js';
 import { gateOn } from './loadingVeil.js';
+// THE ROAD AHEAD, read-only, from any overlay. mapPeek imports config + core
+// only, so this edge never closes a cycle back through MapScene.
+import { viewMapButton, hasMapToPeek } from './mapPeek.js';
 
 const OV_DEPTH = DEPTH.overlay + 5;
+
+/**
+ * THE ONE COPY FORK. A build with no mouse must never be told to hover, and a
+ * build with no finger must never be told to tap — but the two strings belong
+ * side by side in the source, where a reviewer can see both at once, rather
+ * than in two files that drift.
+ *
+ * The DESKTOP string is always the first argument and is returned unchanged, so
+ * `say(...)` can be dropped in front of any existing line without touching it.
+ */
+const say = (mouse, touch) => (TOUCH ? touch : mouse);
+
+/**
+ * THE ANCHOR A CHOICE BOX HANGS OFF: the hit object's OWN world rectangle,
+ * measured at open time rather than reconstructed from the layout constants.
+ *
+ * Every shelf in this file draws its hit rect inside a container that is
+ * positioned, scaled and tweened, and three of the pack-option render styles
+ * use three different rect sizes at two different offsets. Reading getBounds()
+ * means the box sits beside whatever is ACTUALLY on screen — including a cell
+ * still holding its 1.08 hover scale — and no call site has to keep a second
+ * copy of its own geometry in sync. Returned as a thunk because choicebox
+ * evaluates `anchor` at open time, which is the only moment the answer is true.
+ */
+function hitAnchor(obj) {
+  return () => {
+    const b = obj.getBounds();
+    return { x: b.centerX, y: b.centerY, w: b.width, h: b.height };
+  };
+}
+
+/**
+ * THE SHELF, AS COORDINATES (2026-08-10, for the two-tap verification driver).
+ *
+ * The mistake-first sections of tools/verify_mobile.py have to tap options the
+ * way a thumb does — at a real screen point, through the real hit rect — and
+ * then assert that NOTHING happened except a box opening. Reconstructing
+ * `xs[i]` in Python would be a second copy of this file's layout arithmetic and
+ * would drift the first time a gap changed, so the shelf publishes its own hit
+ * rectangles instead. Reading only: there is no `choose` on this hook, because
+ * a driver that could commit without touching the screen would prove nothing.
+ */
+function publishShelf(scene, ov, kind, entries) {
+  const hook = {
+    kind,
+    open: true,
+    // A FUNCTION, not a snapshot. Every shelf in this file tweens in from
+    // scale 0 with a per-option delay and then holds a 1.08 hover scale, so a
+    // rectangle measured at build time is a rectangle that was never on screen.
+    options: () => entries.map((e, i) => {
+      const b = e.obj.getBounds();
+      return {
+        i, id: e.id ?? null, label: e.label ?? null,
+        x: b.centerX, y: b.centerY, w: b.width, h: b.height,
+      };
+    }),
+  };
+  window.__hfShelf = hook;
+  ov.once('destroy', () => {
+    if (window.__hfShelf === hook) window.__hfShelf = { open: false, kind, options: [] };
+  });
+  return hook;
+}
 
 /**
  * Display size of a painted option card. The whole packcard family was
@@ -273,10 +346,44 @@ export function contactPool(scene, x, y, w, { tint = 0x2a1808, alpha = 0.34, h =
 }
 
 /**
+ * THE TYPE RIBBON (JC, 2026-08-10): "at mixed selection shelves players can't
+ * tell which is an artifact and which is a potion."
+ *
+ * Rarity colouring was carrying the whole load and rarity is the one thing the
+ * two share — a RARE relic and a RARE bottle are painted the same amber, sit on
+ * the same pedestal and are lit by the same spotlight, and the only word that
+ * separated them was a "POTION" suffix on the rarity caption below the name,
+ * which is a long way from the icon your eye actually lands on.
+ *
+ * So the type is now a small wooden plaque nailed ABOVE the goods, where the
+ * eye arrives first: dark wood, cream letters, and a keyline in the item's own
+ * rarity colour so the ribbon carries BOTH facts at once instead of competing
+ * with the one already there. Returns a container; the caller places it.
+ */
+export function typeRibbon(scene, x, y, kind, accent = 0x8a6a3c) {
+  const wrap = scene.add.container(x, y);
+  const label = kind === 'potion' ? 'POTION' : 'ARTIFACT';
+  const txt = scene.add.text(0, -1, label, {
+    fontFamily: 'Lilita One', resolution: 2, fontSize: '18px', color: '#f6e8c8',
+  }).setOrigin(0.5);
+  const w = txt.width + 30;
+  const plate = scene.add.rectangle(0, 0, w, 30, PARCH.woodDark).setStrokeStyle(3, accent);
+  const shadow = scene.add.rectangle(3, 4, w, 30, 0x000000, 0.35);
+  wrap.add([shadow, plate, txt]);
+  wrap.plateW = w;
+  return wrap;
+}
+
+/**
  * "VIEW DECK" — the informed-decision escape hatch. Opens deckInfoOverlay ABOVE
  * the overlay it was launched from; closing it leaves the decision untouched.
- * Deliberately absent from the deck picker (you're already looking at cards)
- * and the merchant (he has his own full board of services).
+ *
+ * IT PLANTS THE "MAP" PLATE TOO (JC, 2026-08-10: "a MAP button available at all
+ * times"). Every overlay in the game that already knew to offer the deck is
+ * exactly the set that has to offer the road — so the pair is planted by ONE
+ * function rather than by eighteen call sites, none of which had to change and
+ * none of which can now forget. The map plate stands itself down when there is
+ * no board to look at (the title screen's settings panel, a finished run).
  */
 export function viewDeckButton(scene, ov, run, x = 150, y = GAME_H - 62) {
   const img = scene.add.image(x, y, 'btn_dark').setDisplaySize(170, 50).setInteractive({ useHandCursor: true });
@@ -284,11 +391,13 @@ export function viewDeckButton(scene, ov, run, x = 150, y = GAME_H - 62) {
     fontFamily: 'Lilita One', resolution: 2, fontSize: '19px', color: '#cfc8e8',
   }).setOrigin(0.5);
   ov.add([img, txt]);
+  img.setData('hfLabel', 'VIEW DECK');
   img.on('pointerover', () => sfx(scene, 'menu_select', { volume: 0.25, jitter: 0.06 }));
   img.on('pointerdown', () => {
     sfx(scene, 'button', { volume: 0.7 });
     deckInfoOverlay(scene, run, { depth: (ov.depth ?? OV_DEPTH) + 6 });
   });
+  if (hasMapToPeek()) viewMapButton(scene, ov, x + 182, y);
   return img;
 }
 
@@ -314,27 +423,75 @@ export function deckPickerOverlay(scene, run, { count = 1, optional = false, tit
   }
   // ONE ORDER, EVERY MENU (deck.compareCards): suit then rank ascending.
   const deck = sortCards(pool);
-  // ≤10 cards = a dealt HAND: big cards fanned across the screen (Balatro-style).
-  // More than that (the deck viewer) falls back to the compact grid.
-  const big = deck.length <= 10;
+
+  /**
+   * TWO PICTURES, AND WHICH ONE YOU GET IS DECIDED BY `sample` (JC, 2026-08-10).
+   *
+   * A picker that DEALS you ten of your cards is a hand — the randomness is the
+   * point, and a fanned hand is the honest way to say so. A picker that opens
+   * your WHOLE DECK (sample: 0 — CLEAN SWEEP's remove-2, WILD PAPERS, FORGED
+   * PAPERS, the Summoner's Ink) is a filing cabinet, and the old continuous
+   * 13-wide grid sheared the moment the deck stopped being a virgin 52: your
+   * clubs started halfway along a row of diamonds and counting them was the
+   * player's job. So the full-deck case is now the same picture the deck
+   * VIEWER draws — four suit shelves under a thirteen-slot rank strip, per-suit
+   * tallies at each shelf head — and it is drawn by the same helpers, so the
+   * two panels cannot drift.
+   *
+   * Ranks run ASCENDING here, which is deck.compareCards' own order.
+   */
+  const organized = sample === 0;
+  const big = !organized && deck.length <= 10;
+
+  // The fanned-hand geometry (unchanged), and the shelf geometry beside it.
   const cols = big ? deck.length : 13;
-  const rows = big ? 1 : Math.ceil(deck.length / cols);
-  const scale = big ? 1.16 : rows <= 4 ? 0.56 : rows <= 5 ? 0.5 : 0.44;
-  const cw = big ? Math.min(172, 1560 / Math.max(deck.length, 1)) : CARD.w * scale + 12;
-  const chh = CARD.h * scale + 14;
+  const gridScale = big ? 1.16 : deck.length / 13 <= 4 ? 0.56 : 0.44;
+  const cw = big ? Math.min(172, 1560 / Math.max(deck.length, 1)) : CARD.w * gridScale + 12;
+  const chh = CARD.h * gridScale + 14;
   const x0 = GAME_W / 2 - ((Math.min(cols, deck.length) - 1) / 2) * cw;
   const y0 = big ? 520 : 268;
+  const ROW_Y0 = 330;
+
+  // Where every card is going to sit, and at what size. Computed BEFORE any
+  // sprite exists so the shelf heads and the rank strip can be drawn first and
+  // sit underneath the cards.
+  const slots = new Map();
+  if (organized) {
+    drawRankStrip(scene, ov, deck, 206, RANKS_ASC);
+    const bySuit = Object.fromEntries(SUITS.map(su => [su, []]));
+    for (const c of deck) (bySuit[c.suit] ?? bySuit[SUITS[SUITS.length - 1]]).push(c);
+    SUITS.forEach((suit, r) => {
+      const list = bySuit[suit].slice().sort((a, b) => a.rank - b.rank);
+      const y = ROW_Y0 + r * SHELF.ROW_PITCH;
+      const { scale, pitch } = shelfRowFan(list.length);
+      drawShelfHead(scene, ov, suit, list.length, y);
+      const sx0 = SHELF.BX + SHELF.HEAD_W + (CARD.w * scale) / 2;
+      list.forEach((card, i) => slots.set(card, { x: sx0 + i * pitch, y, scale }));
+    });
+  } else {
+    deck.forEach((card, i) => {
+      const arc = big ? Math.abs(i - (deck.length - 1) / 2) : 0;
+      slots.set(card, {
+        x: x0 + (i % cols) * cw,
+        y: y0 + Math.floor(i / cols) * chh + (big ? arc * arc * 3.4 : 0),
+        scale: gridScale,
+        angle: big ? (i - (deck.length - 1) / 2) * 2.6 : 0,
+      });
+    });
+  }
+  // How far a card rises to say it is hovered, and to say it is picked. A shelf
+  // row is 180 apart, so the fan's 46px lift would put a picked club through
+  // the diamonds above it.
+  const HOVER_LIFT = organized ? 12 : big ? 30 : 10;
+  const PICK_LIFT = organized ? 16 : big ? 46 : 0;
 
   const picked = [];
   const sprites = [];
-  deck.forEach((card, i) => {
-    const arc = big ? Math.abs(i - (deck.length - 1) / 2) : 0;
-    const cs = new CardSprite(scene,
-      x0 + (i % cols) * cw,
-      y0 + Math.floor(i / cols) * chh + (big ? arc * arc * 3.4 : 0),
-      card);
-    cs.setScale(scale);
-    if (big) cs.setAngle((i - (deck.length - 1) / 2) * 2.6);
+  deck.forEach((card) => {
+    const slot = slots.get(card);
+    const cs = new CardSprite(scene, slot.x, slot.y, card);
+    cs.setScale(slot.scale);
+    if (slot.angle) cs.setAngle(slot.angle);
     cs.setDepth(OV_DEPTH + 3);
     cs.setData('picker', true);
     ov.add(cs);
@@ -342,18 +499,22 @@ export function deckPickerOverlay(scene, run, { count = 1, optional = false, tit
     cs.removeInteractive();
     cs.setInteractive({ useHandCursor: true });
     const baseY = cs.y;
-    cs.on('pointerover', () => { if (!picked.includes(card)) { sfx(scene, 'card_hover', { volume: 0.36, jitter: 0.08 }); scene.tweens.add({ targets: cs, y: baseY - (big ? 30 : 10), duration: 100 }); } });
+    cs.on('pointerover', () => { if (!picked.includes(card)) { sfx(scene, 'card_hover', { volume: 0.36, jitter: 0.08 }); scene.tweens.add({ targets: cs, y: baseY - HOVER_LIFT, duration: 100 }); } });
     cs.on('pointerout', () => { if (!picked.includes(card)) scene.tweens.add({ targets: cs, y: baseY, duration: 100 }); });
     cs.on('pointerdown', () => {
       const idx = picked.indexOf(card);
       if (idx >= 0) {
         picked.splice(idx, 1);
         cs.glow.setAlpha(0);
-        scene.tweens.add({ targets: cs, scale, y: baseY, duration: 110 });
+        scene.tweens.add({ targets: cs, scale: slot.scale, y: baseY, duration: 110 });
       } else if (picked.length < count) {
         picked.push(card);
         cs.glow.setTint(0xffc542).setAlpha(0.85);
-        scene.tweens.add({ targets: cs, scale: scale * 1.1, y: baseY - (big ? 46 : 0), duration: 110 });
+        // On a shelf the picked card also comes to the FRONT of its row: at a
+        // 0.42-card pitch a duplicated suit overlaps, and a gold halo behind
+        // the neighbour it is tucked under is not a selection state.
+        ov.bringToTop(cs);
+        scene.tweens.add({ targets: cs, scale: slot.scale * 1.1, y: baseY - PICK_LIFT, duration: 110 });
         sfx(scene, 'card_select', { volume: 0.25 });
       }
       confirmBtn.label.setText(optional || picked.length >= count ? 'CONFIRM' : `PICK ${count - picked.length} MORE`);
@@ -366,6 +527,25 @@ export function deckPickerOverlay(scene, run, { count = 1, optional = false, tit
     ov.destroy(true);
     cb(picked);
   });
+  // THE DECK AND THE ROAD, on the one overlay that used to refuse them (JC,
+  // 2026-08-10: "during ANY card-choosing overlay the DECK button must be
+  // present"). The old argument — you are already looking at cards — only ever
+  // held for the full-deck case; a picker that deals you TEN of fifty-two is
+  // exactly where you need to see the other forty-two before you burn one.
+  viewDeckButton(scene, ov, run);
+
+  // The picker publishes what it is showing, so a driver can assert the shape
+  // rather than count sprites on a canvas.
+  const hook = {
+    organized, sampled, count, optional,
+    total: deck.length,
+    suits: SUITS.map(su => ({ suit: su, count: deck.filter(c => c.suit === su).length })),
+    ranksAscending: organized,
+    picked: () => picked.length,
+    close: () => ov.destroy(true),
+  };
+  window.__hfDeckPicker = hook;
+  ov.once('destroy', () => { if (window.__hfDeckPicker === hook) window.__hfDeckPicker = null; });
   return ov;
 }
 
@@ -375,6 +555,103 @@ export function deckPickerOverlay(scene, run, { count = 1, optional = false, tit
 
 /** Ranks, high to low: the order SORT: RANK puts a hand in. */
 const RANKS_DESC = [14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2];
+/** ...and low to high, which is `deck.compareCards`' own order. */
+const RANKS_ASC = [...RANKS_DESC].slice().reverse();
+/**
+ * HOW MANY SLOTS THE RANK STRIP HAS, named once. Both orders are the same
+ * thirteen ranks, so a geometry constant that reads one of them by name is a
+ * lie waiting to happen the day a panel switches direction (which is exactly
+ * what the viewer did on 2026-08-10). The strip's own width still reads the
+ * order it was HANDED — that one is genuinely per-call.
+ */
+const RANK_SLOTS = RANKS_ASC.length;   // 13, whichever way you count them
+
+/**
+ * THE SHELF GEOMETRY, hoisted (2026-08-10). The deck VIEWER and the full-deck
+ * PICKER are now the same picture — four suit shelves under a thirteen-slot
+ * rank strip — and the picker sizing itself from a second copy of these numbers
+ * is how the two panels drift apart. One block, both readers.
+ *
+ * The block is sized so a THIRTEEN-card row exactly fills its band: that is the
+ * reference deck, so a normal suit looks natural and only a duplicated one has
+ * to tighten. Everything is centred on the frame, so the same numbers hold on
+ * the 2340-wide mobile canvas.
+ */
+const SHELF = {
+  SCALE: 0.62,
+  HEAD_W: 132,          // pip + tally at the row's head
+  ROW_PITCH: 180,
+  SLOT: 64,             // rank-strip slot pitch
+};
+SHELF.CW = CARD.w * SHELF.SCALE;
+SHELF.PITCH = SHELF.CW + 13;
+SHELF.BAND_W = 13 * SHELF.PITCH;
+SHELF.BX = Math.round((GAME_W - (SHELF.HEAD_W + SHELF.BAND_W)) / 2);
+SHELF.STRIP_X0 = GAME_W / 2 - ((RANK_SLOTS - 1) / 2) * SHELF.SLOT;
+
+/**
+ * One row's card scale and pitch. Under thirteen cards nothing moves; over it
+ * the fan tightens, and if the fan would tighten past the rank cluster (the
+ * left 42% of a card) the cards shrink so the cluster survives.
+ */
+function shelfRowFan(n) {
+  if (n <= 13) return { scale: SHELF.SCALE, pitch: SHELF.PITCH };
+  const visible = 0.42;
+  let scale = SHELF.SCALE;
+  let pitch = (SHELF.BAND_W - CARD.w * scale) / (n - 1);
+  if (pitch < CARD.w * scale * visible) {
+    scale = Math.max(0.28, SHELF.BAND_W / (CARD.w * (visible * (n - 1) + 1)));
+    pitch = (SHELF.BAND_W - CARD.w * scale) / (n - 1);
+  }
+  return { scale, pitch };
+}
+
+/**
+ * The rank strip: thirteen fixed slots so the SHAPE of the strip is the shape
+ * of the deck at a glance, and a rank you hold none of is dimmed rather than
+ * absent. Returns the slot report both panels publish to their dev hooks.
+ */
+function drawRankStrip(scene, parent, cards, y, order = RANKS_DESC) {
+  const rankCount = {};
+  for (const c of cards) rankCount[c.rank] = (rankCount[c.rank] ?? 0) + 1;
+  parent.add(scene.add.rectangle(GAME_W / 2, y, order.length * SHELF.SLOT + 20, 84, 0x241d33, 0.55)
+    .setStrokeStyle(2, 0x4a4060, 0.9));
+  parent.add(scene.add.text(SHELF.STRIP_X0 - SHELF.SLOT / 2 - 28, y, 'RANKS', {
+    fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: '#8a8078',
+  }).setOrigin(1, 0.5));
+  const slots = order.map((rank, i) => {
+    const n = rankCount[rank] ?? 0;
+    const x = SHELF.STRIP_X0 + i * SHELF.SLOT;
+    parent.add(scene.add.text(x, y - 17, rankLabel(rank), {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: '21px',
+      color: n ? '#d8c9a8' : '#6a6058',
+    }).setOrigin(0.5));
+    parent.add(scene.add.text(x, y + 15, `${n}`, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: '25px',
+      color: n ? '#f0e6cc' : '#5a5250',
+    }).setOrigin(0.5));
+    return { rank, label: rankLabel(rank), count: n, dim: n === 0, x };
+  });
+  parent.add(scene.add.text(SHELF.STRIP_X0 + 12 * SHELF.SLOT + SHELF.SLOT / 2 + 28, y, `${cards.length} cards`, {
+    fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: '#d8c9a8',
+  }).setOrigin(0, 0.5));
+  return slots;
+}
+
+/** One suit's shelf: the lane, its pip and its tally. The cards are the caller's. */
+function drawShelfHead(scene, parent, suit, n, y) {
+  parent.add(scene.add.rectangle(SHELF.BX + (SHELF.HEAD_W + SHELF.BAND_W) / 2, y,
+    SHELF.HEAD_W + SHELF.BAND_W + 20, 156, 0x241d33, 0.4)
+    .setStrokeStyle(2, SUIT_COLORS[suit], n ? 0.42 : 0.16));
+  const pip = scene.add.image(SHELF.BX + 40, y, SUIT_PIP_KEY[suit]).setTint(SUIT_COLORS[suit]);
+  pip.setScale(42 / Math.max(pip.width, pip.height));
+  pip.setAlpha(n ? 1 : 0.38);
+  parent.add(pip);
+  parent.add(scene.add.text(SHELF.BX + 70, y, `${n}`, {
+    fontFamily: 'Lilita One', resolution: 2, fontSize: '32px',
+    color: n ? '#f0e6cc' : '#6a6058',
+  }).setOrigin(0, 0.5));
+}
 
 /**
  * THE DECK VIEWER, LAID OUT LIKE A DECK (JC, 2026-08-05).
@@ -388,9 +665,21 @@ const RANKS_DESC = [14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2];
  *
  * So the rows are DECLARED rather than emergent. Each suit gets its own labelled
  * row with its pip and its tally at the head, holds its own cards rank-
- * descending (A K Q ... 2, the order the SORT: RANK button puts a hand in), and
- * an empty suit still draws its head with a 0 — "you have no gems" is
- * information, and a missing row is not.
+ * ASCENDING (2 ... Q K A), and an empty suit still draws its head with a 0 —
+ * "you have no gems" is information, and a missing row is not.
+ *
+ * THE VIEWER READS ASCENDING (JC, 2026-08-10), and so does its rank strip. It
+ * used to read DESCENDING because that is the order the SORT: RANK button puts
+ * a HAND in — but a hand and a deck are two different objects looked at for two
+ * different reasons, and every OTHER place the game shows you your cards laid
+ * out (deck.compareCards, the full-deck picker, the sampled picker, the shelf
+ * geometry they all share) counts up. One panel counting down was the odd one
+ * out, so browsing your deck and then picking from it meant re-reading the same
+ * four rows backwards.
+ *
+ * SORT: RANK IN COMBAT IS A SEPARATE THING and is deliberately untouched: it
+ * sorts the eight cards in your hand highest-first because that is how you read
+ * a hand for a play, and nothing about this panel's direction reaches it.
  *
  * A ROW FANS, IT NEVER WRAPS. A suit can hold far more than thirteen (duplicates
  * from the Artisan, from a Dealer's copy, from a dozen other places), so past
@@ -426,18 +715,9 @@ export function deckInfoOverlay(scene, run, { remaining = null, spent = null, de
   // the reference deck, so a normal suit looks natural and only a duplicated
   // one has to tighten. Everything is centred on the frame, so the same numbers
   // hold on the 2340-wide mobile canvas.
-  const SCALE = 0.62;
-  const CW = CARD.w * SCALE;
-  const PITCH = CW + 13;
-  const HEAD_W = 132;                       // pip + tally at the row's head
-  const BAND_W = 13 * PITCH;
-  const BX = Math.round((GAME_W - (HEAD_W + BAND_W)) / 2);
-  const CARD_X0 = BX + HEAD_W + CW / 2;
-  const ROW_Y0 = 352, ROW_PITCH = 180;
-  // ...and the rank strip above them.
-  const SLOT = 64;
-  const STRIP_X0 = GAME_W / 2 - ((RANKS_DESC.length - 1) / 2) * SLOT;
-  const STRIP_Y = 210;
+  const { HEAD_W, BAND_W, BX, ROW_PITCH } = SHELF;
+  const ROW_Y0 = 352;
+  const STRIP_Y = 210;   // the rank strip, above the shelves
 
   const content = scene.add.container(0, 0);
   ov.add(content);
@@ -445,52 +725,13 @@ export function deckInfoOverlay(scene, run, { remaining = null, spent = null, de
   let live = null;              // what the open tab currently shows (dev hook)
   let activeTab = 0;            // ...and WHICH tab that is (index into `tabs`)
 
-  /**
-   * One row's card scale and pitch. Under thirteen cards nothing moves; over it
-   * the fan tightens, and if the fan would tighten past the rank cluster (the
-   * left 42% of a card) the cards shrink so the cluster survives.
-   */
-  const rowFan = (n) => {
-    if (n <= 13) return { scale: SCALE, pitch: PITCH };
-    const visible = 0.42;
-    let scale = SCALE;
-    let pitch = (BAND_W - CARD.w * scale) / (n - 1);
-    if (pitch < CARD.w * scale * visible) {
-      scale = Math.max(0.28, BAND_W / (CARD.w * (visible * (n - 1) + 1)));
-      pitch = (BAND_W - CARD.w * scale) / (n - 1);
-    }
-    return { scale, pitch };
-  };
-
   const render = (cards) => {
     content.removeAll(true);
 
-    // THE RANK STRIP (JC, 2026-08-05: "how many of each rank"). Thirteen fixed
-    // slots so the shape of the strip IS the shape of the deck at a glance, and
-    // a rank you hold none of is dimmed rather than absent.
-    const rankCount = {};
-    for (const c of cards) rankCount[c.rank] = (rankCount[c.rank] ?? 0) + 1;
-    content.add(scene.add.rectangle(GAME_W / 2, STRIP_Y, RANKS_DESC.length * SLOT + 20, 84, 0x241d33, 0.55)
-      .setStrokeStyle(2, 0x4a4060, 0.9));
-    content.add(scene.add.text(STRIP_X0 - SLOT / 2 - 28, STRIP_Y, 'RANKS', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: '#8a8078',
-    }).setOrigin(1, 0.5));
-    const rankSlots = RANKS_DESC.map((rank, i) => {
-      const n = rankCount[rank] ?? 0;
-      const x = STRIP_X0 + i * SLOT;
-      content.add(scene.add.text(x, STRIP_Y - 17, rankLabel(rank), {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '21px',
-        color: n ? '#d8c9a8' : '#6a6058',
-      }).setOrigin(0.5));
-      content.add(scene.add.text(x, STRIP_Y + 15, `${n}`, {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '25px',
-        color: n ? '#f0e6cc' : '#5a5250',
-      }).setOrigin(0.5));
-      return { rank, label: rankLabel(rank), count: n, dim: n === 0, x };
-    });
-    content.add(scene.add.text(STRIP_X0 + 12 * SLOT + SLOT / 2 + 28, STRIP_Y, `${cards.length} cards`, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: '#d8c9a8',
-    }).setOrigin(0, 0.5));
+    // THE RANK STRIP (JC, 2026-08-05: "how many of each rank"), drawn by the
+    // shared helper the full-deck picker also uses — and now in the SAME
+    // direction it uses, ascending. See this function's header.
+    const rankSlots = drawRankStrip(scene, content, cards, STRIP_Y, RANKS_ASC);
 
     // THE FOUR ROWS. A stray suit (nothing in the shipped game makes one) files
     // under the LAST row, which is where deck.compareCards already sorts an
@@ -499,29 +740,27 @@ export function deckInfoOverlay(scene, run, { remaining = null, spent = null, de
     const bySuit = Object.fromEntries(SUITS.map(s => [s, []]));
     for (const c of cards) (bySuit[c.suit] ?? bySuit[SUITS[SUITS.length - 1]]).push(c);
     const rows = SUITS.map((suit, r) => {
-      const list = bySuit[suit].slice().sort((a, b) => b.rank - a.rank);
+      // ASCENDING, the same direction deck.compareCards and both pickers use.
+      const list = bySuit[suit].slice().sort((a, b) => a.rank - b.rank);
       const y = ROW_Y0 + r * ROW_PITCH;
       const n = list.length;
-      const { scale, pitch } = rowFan(n);
+      const { scale, pitch } = shelfRowFan(n);
       const cw = CARD.w * scale;
       // The row's own lane: it makes an empty suit read as an empty SHELF
       // rather than as a rendering failure.
-      content.add(scene.add.rectangle(BX + (HEAD_W + BAND_W) / 2, y, HEAD_W + BAND_W + 20, 156, 0x241d33, 0.4)
-        .setStrokeStyle(2, SUIT_COLORS[suit], n ? 0.42 : 0.16));
-      const pip = scene.add.image(BX + 40, y, SUIT_PIP_KEY[suit]).setTint(SUIT_COLORS[suit]);
-      pip.setScale(42 / Math.max(pip.width, pip.height));
-      pip.setAlpha(n ? 1 : 0.38);
-      content.add(pip);
-      content.add(scene.add.text(BX + 70, y, `${n}`, {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '32px',
-        color: n ? '#f0e6cc' : '#6a6058',
-      }).setOrigin(0, 0.5));
+      drawShelfHead(scene, content, suit, n, y);
 
       const x0 = BX + HEAD_W + cw / 2;
       list.forEach((cardData, i) => {
         const cs = new CardSprite(scene, x0 + i * pitch, y, cardData);
         cs.setScale(scale);
+        // Interactive but ACTIONLESS: nothing here is pickable, and the flag is
+        // what lets the scene's inspect gesture (ui/inspect.js) answer a hold
+        // or a right-click on a card in the viewer. No hand cursor — there is
+        // nothing to click.
         cs.removeInteractive();
+        cs.setInteractive();
+        cs.setData('picker', true);
         content.add(cs);
       });
       const x1 = n ? x0 + (n - 1) * pitch + cw / 2 : x0;
@@ -529,7 +768,7 @@ export function deckInfoOverlay(scene, run, { remaining = null, spent = null, de
         suit, count: n, drawn: n, headShown: true,
         x0: Math.round(x0 - cw / 2), x1: Math.round(x1),
         inside: x1 <= BX + HEAD_W + BAND_W + 1,
-        ranksDescending: list.every((c, i) => i === 0 || list[i - 1].rank >= c.rank),
+        ranksAscending: list.every((c, i) => i === 0 || list[i - 1].rank <= c.rank),
         scale: Number(scale.toFixed(3)), pitch: Math.round(pitch),
       };
     });
@@ -571,6 +810,10 @@ export function deckInfoOverlay(scene, run, { remaining = null, spent = null, de
   tabBtns[defaultTab].pick(true);
 
   button(scene, ov, GAME_W / 2, GAME_H - 56, 'CLOSE', () => ov.destroy(true), { w: 240, h: 60 });
+  // The viewer has no VIEW DECK plate (it IS the deck) but it still gets the
+  // road: this panel opens over shops, shelves and fights, and "what is ahead"
+  // is half of every decision taken while it is up.
+  if (hasMapToPeek()) viewMapButton(scene, ov, 150, GAME_H - 62, { depth: (ov.depth ?? OV_DEPTH) + 6 });
   dim.on('pointerdown', () => ov.destroy(true));
 
   // Autonomous-playtest hook: the two sums that make this panel honest (every
@@ -619,11 +862,35 @@ export function suitPickerOverlay(scene, { title = 'Choose a suit', exclude = nu
     parts.panel.setInteractive({ useHandCursor: true });
     parts.panel.on('pointerover', () => scene.tweens.add({ targets: card, scale: 1.08, duration: 110 }));
     parts.panel.on('pointerout', () => scene.tweens.add({ targets: card, scale: 1, duration: 110 }));
-    parts.panel.on('pointerdown', () => {
+    const commit = () => {
       sfx(scene, 'take', { volume: 0.8 });
       ov.destroy(true);
       cb(suit);
-    });
+    };
+    // TWO TAPS. A suit plate is the mildest case on the shelf — the glyph and
+    // the word are both already printed on it — but naming a suit is what the
+    // Prism, the transmuters and half the Witch's pack turn on, and a stray
+    // thumb on a four-across row of 210px plates is exactly the accident the
+    // model exists to prevent. The box says the suit and what it pays; CHOOSE
+    // is the only thing that acts.
+    if (TOUCH) {
+      twoTap(scene, parts.panel, {
+        key: `suit:${suit}`,
+        anchor: hitAnchor(parts.panel),
+        title: SUIT_GLYPH[suit],
+        // The hero's own sheet, which is the only reason a suit is worth more
+        // to one player than another (chr().suitNotes — the Bull's Diamonds hit
+        // twice, Zelus's Hearts bank as Zeal). Falls back to nothing at all
+        // rather than to a guess.
+        body: () => chr().suitNotes?.find(n => n.suit === suit)?.text ?? '',
+        accent: SUIT_COLORS[suit],
+        depth: (ov.depth ?? OV_DEPTH) + 10,
+        owner: ov,
+        buttons: [{ label: 'CHOOSE', kind: 'take', onClick: commit }],
+      });
+    } else {
+      parts.panel.on('pointerdown', commit);
+    }
   });
   // Which suit to name is a question about the deck you are holding, so the
   // deck is one press away (PATCH 0803-B §4.3).
@@ -722,9 +989,24 @@ export function handChartOverlay(scene, run) {
     const now = mult + bonus;
     const played = Number(counts[def.name]) || 0;
     const y = TOP + i * PITCH;
-    ov.add(scene.add.text(X_NAME, y, def.name, {
+    const nameText = scene.add.text(X_NAME, y, def.name, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '25px', color: PARCH.text,
-    }).setOrigin(0, 0.5));
+    }).setOrigin(0, 0.5);
+    ov.add(nameText);
+    /**
+     * THE GLITCH ROW (JC, 2026-08-10). A discovered SIX OF A KIND does not sit
+     * on this chart like the other twelve: it jitters and cycles, in the same
+     * visual family as the INFINITY payoff its square exists to produce. One
+     * flag on the def (`glitch`) and one shared helper, so the chart never
+     * learns which hand it is — the day a second glitchy hand ships it wears
+     * the treatment for free.
+     *
+     * The timer is parented to the TEXT, so closing the overlay kills it.
+     * Origin is (0, 0.5) here rather than the payoff's centred glyph, and
+     * glitchText jitters around wherever the object already is, so nothing
+     * about the column layout has to change.
+     */
+    if (def.glitch) glitchText(scene, nameText, { step: 90, strength: 1, corrupt: true });
     // HISTORY, NOT ARITHMETIC: quiet, and only when there is any.
     if (played > 0) {
       ov.add(scene.add.text(X_PLAYS, y + 1, `×${played} played`, {
@@ -742,7 +1024,15 @@ export function handChartOverlay(scene, run) {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '26px',
       color: base > def.base ? '#1d7a56' : PARCH.textDim,
     }).setOrigin(1, 0.5));
-    ov.add(scene.add.text(X_MULT, y, `×${now}`, {
+    /**
+     * A SQUARING HAND'S MULT COLUMN (2026-08-10). SIX OF A KIND brings mult 1
+     * and SQUARES the finished mult instead, so the plain reading printed "×1"
+     * under the best hand in the game — arithmetically true before the square,
+     * and a lie about what the hand does. `(×N)²` is the whole rule in four
+     * glyphs, and it still shows the live N so a relic's bonus is visible
+     * exactly as it is on every other row.
+     */
+    ov.add(scene.add.text(X_MULT, y, def.squaresMult ? `(×${now})²` : `×${now}`, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '27px',
       color: now > def.mult ? '#1d7a56' : PARCH.textDim,
     }).setOrigin(1, 0.5));
@@ -952,7 +1242,9 @@ export function artifactCeremony(scene, run, def, done, opts = {}) {
       ov.add(legible(scene.add.text(GAME_W / 2, GAME_H / 2 + 205, 'Your artifact slots are FULL. Replace one?', {
         fontFamily: '"Baloo 2"', resolution: 2, fontSize: '23px', color: '#ffd23e', fontStyle: 'bold',
       })).setOrigin(0.5));
-      ov.add(legible(scene.add.text(GAME_W / 2, GAME_H / 2 + 236, 'hover a relic to read it, click to swap it out', {
+      ov.add(legible(scene.add.text(GAME_W / 2, GAME_H / 2 + 236,
+        say('hover a relic to read it, click to swap it out',
+          'tap a relic to read it, then REPLACE IT'), {
         fontFamily: '"Baloo 2"', resolution: 2, fontSize: '19px', color: '#d8c9a8', fontStyle: 'bold',
       })).setOrigin(0.5));
       // Only the ROW can be swapped out: a nook relic (the Sixth Finger's
@@ -985,19 +1277,50 @@ export function artifactCeremony(scene, run, def, done, opts = {}) {
           tip.setDepth((ov.depth ?? OV_DEPTH) + 4);
         });
         box.on('pointerout', () => { box.setFillStyle(0xdcc492); killTip(); });
-        box.on('pointerdown', () => {
+        const commit = () => {
           // A relic swapped OUT leaves with its grants, exactly as if it had
           // been sold: onSell is what revokes a discard, a slot or a granted
           // card. Without it the Overstuffed Satchel could take a slot away and
           // then be replaced, and the slot would never come back.
+          //
+          // RESOLVED BY IDENTITY, never by the captured `i`. On desktop the
+          // click and the splice are the same instant so the two agree; on
+          // touch a description box stands between them, and anything that
+          // touches the belt while it is open (a bottle drunk, a scene restart)
+          // would make `i` name the wrong relic. indexOf cannot be wrong, and
+          // a relic that is already gone is a no-op rather than a mis-splice.
+          const at = run.artifacts.indexOf(owned);
+          if (at < 0) return;
           owned.onSell?.(run, owned);
-          run.artifacts.splice(run.artifacts.indexOf(owned), 1);
+          run.artifacts.splice(at, 1);
           sfx(scene, 'take', { volume: 0.9 });
           killTip();
           ov.destroy(true);
           beltChanged(scene);   // the old relic is gone from the mat this instant
           finalize();
-        });
+        };
+        // TWO TAPS, and this is the most destructive one in the file: the
+        // press DELETES a relic you already own, with its grants. The box has
+        // to say which relic, what it does, and what leaving costs, before
+        // REPLACE IT is anywhere near a thumb.
+        if (TOUCH) {
+          twoTap(scene, box, {
+            // A belt can legitimately carry two of the same relic (the forge
+            // strikes copies), so the key carries the SLOT as well as the id.
+            key: `replaceRelic:${i}:${owned.id}`,
+            anchor: hitAnchor(box),
+            title: `${owned.name}  ·  ${ARTIFACT_RARITY[owned.rarity].label}`,
+            body: () => artifactTipBody(owned),
+            note: 'Replacing it takes its gift with it.',
+            accent: ARTIFACT_RARITY[owned.rarity].color,
+            depth: (ov.depth ?? OV_DEPTH) + 10,
+            owner: ov,
+            buttons: [{ label: 'REPLACE IT', kind: 'danger', onClick: commit }],
+            onOpen: killTip,
+          });
+        } else {
+          box.on('pointerdown', commit);
+        }
       });
       // Decline outright: nothing is taken, nothing is lost from the belt.
       button(scene, ov, GAME_W / 2, GAME_H / 2 + 406, 'NEVER MIND', () => { killTip(); ov.destroy(true); done(false); },
@@ -1073,8 +1396,10 @@ export function bestRarity(defs) {
 }
 
 /**
- * `defs` on pedestals; hover reads them; a click takes ONE and the rest fade.
- * Declining is always allowed (the Bounty Hunter's TAKE NOTHING precedent).
+ * `defs` on pedestals. On desktop a hover reads them and a click takes ONE; on
+ * touch the first tap opens the description box and its TAKE IT is the click.
+ * Either way the rest fade. Declining is always allowed (the Bounty Hunter's
+ * TAKE NOTHING precedent).
  *
  * theatre: { title, subtitle, accent, skipLabel, pedestal, curtain, openSfx,
  *            settleSfx, stagger }
@@ -1132,6 +1457,7 @@ export function relicChoiceOverlay(scene, run, defs, theatre, done) {
   ov.once('destroy', killTip);
 
   const cells = [];
+  const shelfEntries = [];
   let taken = false;
 
   items.forEach((item, i) => {
@@ -1163,6 +1489,10 @@ export function relicChoiceOverlay(scene, run, defs, theatre, done) {
     }
     cell.add(icon);
     scene.tweens.add({ targets: icon, y: -50, duration: 1500 + i * 170, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    // WHICH KIND OF THING THIS IS, above the goods. The shelf can hold either.
+    // Clear of the icon at the TOP of its float (icon centre -50, half-height
+    // iconSize/2), not merely clear of it at rest.
+    cell.add(typeRibbon(scene, 0, -(iconSize * 0.5 + 68), item.kind, rar.color));
 
     const nameText = scene.add.text(0, iconSize * 0.46 + 26, def.name, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: defs.length <= 3 ? '26px' : '22px',
@@ -1197,7 +1527,7 @@ export function relicChoiceOverlay(scene, run, defs, theatre, done) {
       scene.tweens.add({ targets: cell, scale: 1, duration: 110 });
       killTip();
     });
-    hit.on('pointerdown', () => {
+    const commit = () => {
       if (taken) return;
       // A FULL belt no longer refuses the pick here (JC, 2026-08-04): the
       // ceremony downstream stages the trade-a-bottle-or-never-mind flow.
@@ -1216,15 +1546,40 @@ export function relicChoiceOverlay(scene, run, defs, theatre, done) {
         if (isPotion) potionCeremony(scene, run, def, done);
         else artifactCeremony(scene, run, def, done, { noRiser: true });
       });
-    });
+    };
+    // TWO TAPS. The pick-1-of-3 shelf is the archetype: three unfamiliar
+    // silhouettes on pedestals, every word of what they do behind a hover, and
+    // the pick is final. The box carries the same body the tooltip does, and
+    // TAKE IT is the only thing on the shelf that commits. TAKE NOTHING /
+    // TOUCH NOTHING keep their single tap — they already say what they do.
+    if (TOUCH) {
+      twoTap(scene, hit, {
+        key: `shelf:${i}`,
+        anchor: hitAnchor(hit),
+        title: `${def.name}  ·  ${rar.label}`,
+        body: () => (isPotion ? potionTipBody(def, beltFull) : artifactTipBody(def, { own: false })),
+        accent: rar.color,
+        depth: (ov.depth ?? OV_DEPTH) + 10,
+        owner: ov,
+        buttons: [{ label: 'TAKE IT', kind: 'take', onClick: commit }],
+        // Once something IS taken the shelf is mid-ceremony: the other two are
+        // already fading and there is nothing left to read.
+        guard: () => !taken,
+        onOpen: killTip,
+      });
+    } else {
+      hit.on('pointerdown', commit);
+    }
 
     stage.add(cell);
     cells.push(cell);
+    shelfEntries.push({ obj: hit, id: def.id ?? null, label: def.name ?? null });
     scene.tweens.add({
       targets: cell, alpha: 1, y: shelfY, duration: 380, delay: 240 + i * stagger, ease: 'Back.easeOut',
       onStart: () => sfx(scene, 'card_deal', { volume: 0.5, rate: 1 + i * 0.06 }),
     });
   });
+  publishShelf(scene, ov, 'relicShelf', shelfEntries);
 
   // Declining is a real option (TAKE NOTHING, the Bounty Hunter's precedent).
   button(scene, ov, GAME_W / 2, GAME_H - 62, skipLabel, () => {
@@ -1341,12 +1696,15 @@ export function potionCeremony(scene, run, def, done) {
     // should be takeable even if your belt is full and work like taking an
     // artifact where it just lets you choose what to sub out or nevermind").
     // The replace-a-relic flow, restaged for the belt: your bottles in a row,
-    // hover to read, click the one that leaves. It is DISCARDED, not drunk —
-    // trading a bottle away must never fire its effect.
+    // read one (hover on desktop, a first tap on touch), then say which leaves.
+    // It is DISCARDED, not drunk — trading a bottle away must never fire its
+    // effect.
     ov.add(legible(scene.add.text(GAME_W / 2, GAME_H / 2 + 205, 'Your belt is FULL. Trade a bottle for it?', {
       fontFamily: '"Baloo 2"', resolution: 2, fontSize: '23px', color: '#ffd23e', fontStyle: 'bold',
     })).setOrigin(0.5));
-    ov.add(legible(scene.add.text(GAME_W / 2, GAME_H / 2 + 236, 'hover a bottle to read it, click to swap it out', {
+    ov.add(legible(scene.add.text(GAME_W / 2, GAME_H / 2 + 236,
+      say('hover a bottle to read it, click to swap it out',
+        'tap a bottle to read it, then TRADE IT'), {
       fontFamily: '"Baloo 2"', resolution: 2, fontSize: '19px', color: '#d8c9a8', fontStyle: 'bold',
     })).setOrigin(0.5));
     const xs0 = GAME_W / 2 - ((run.potions.length - 1) / 2) * 96;
@@ -1370,14 +1728,41 @@ export function potionCeremony(scene, run, def, done) {
         tip.setDepth((ov.depth ?? OV_DEPTH) + 4);
       });
       box.on('pointerout', () => { box.setFillStyle(0xdcc492); killTip(); });
-      box.on('pointerdown', () => {
-        run.potions.splice(i, 1);
+      const commit = () => {
+        // BY IDENTITY, not by the captured `i` — the same trap the relic
+        // replace flow carries, and here it was live even on desktop: a bottle
+        // drunk from the belt while this overlay is up (or a two-tap box
+        // standing between the read and the trade) reindexes run.potions under
+        // a closure that still remembers slot 3. A bottle already gone is a
+        // no-op; a bottle still there is spliced out by its own position.
+        const at = run.potions.indexOf(owned);
+        if (at < 0) return;
+        run.potions.splice(at, 1);
         run.potions.push({ ...def });
         sfx(scene, 'take', { volume: 0.9 });
         killTip();
         ov.destroy(true);
         done();
-      });
+      };
+      // TWO TAPS. Trading a bottle DISCARDS it — it is not drunk, its effect
+      // never fires — so the box names the bottle, prints its rules, and says
+      // out loud that the trade spends it for nothing.
+      if (TOUCH) {
+        twoTap(scene, box, {
+          key: `tradeBottle:${i}:${owned.id}`,
+          anchor: hitAnchor(box),
+          title: `${owned.name}  ·  ${oRar.label}`,
+          body: () => potionTipBody(owned),
+          note: 'Trading it pours it out. It is not drunk.',
+          accent: oRar.color,
+          depth: (ov.depth ?? OV_DEPTH) + 10,
+          owner: ov,
+          buttons: [{ label: 'TRADE IT', kind: 'danger', onClick: commit }],
+          onOpen: killTip,
+        });
+      } else {
+        box.on('pointerdown', commit);
+      }
     });
     // Decline outright: nothing taken, nothing lost off the belt.
     button(scene, ov, GAME_W / 2, GAME_H / 2 + 406, 'NEVER MIND', () => { killTip(); ov.destroy(true); done(); },
@@ -1463,6 +1848,7 @@ function buildPackOffer(scene, run, offer, done) {
 
   const xs = offer.map((_, i) => GAME_W / 2 + (i - (offer.length - 1) / 2) * 400);
   const boxes = [];
+  const shelfEntries = [];
   offer.forEach((pack, i) => {
     const box = scene.add.container(xs[i], 540);
     const isForge = pack.kind === 'forge';
@@ -1500,7 +1886,7 @@ function buildPackOffer(scene, run, offer, done) {
       scene.tweens.add({ targets: box, scale: 1.06, angle: isRare ? 1.5 : 0.8, duration: 120 });
     });
     cover.on('pointerout', () => scene.tweens.add({ targets: box, scale: 1, angle: 0, duration: 120 }));
-    cover.on('pointerdown', () => {
+    const commit = () => {
       cover.disableInteractive();
       // THE OPEN IS THE LOAD WINDOW. From here to packOpenOverlay is 280ms of
       // slide, a burst, and a 420ms hold — comfortably enough for this ONE
@@ -1529,9 +1915,30 @@ function buildPackOffer(scene, run, offer, done) {
           });
         },
       });
-    });
+    };
+    // TWO TAPS. The label and the blurb are already printed under the wrap, so
+    // the box mostly restates them — but it is the CHOOSE button that matters
+    // here: this shelf's covers are 330px of painted paper on a three-across
+    // row, tearing one open is irreversible, and it is the very first thing a
+    // thumb meets after a fight. SKIP PACKS keeps its single tap.
+    if (TOUCH) {
+      twoTap(scene, cover, {
+        key: `pack:${pack.kind}`,
+        anchor: hitAnchor(cover),
+        title: pack.label,
+        body: pack.blurb,
+        accent: pack.color,
+        depth: (ov.depth ?? OV_DEPTH) + 10,
+        owner: ov,
+        buttons: [{ label: 'CHOOSE', kind: 'take', onClick: commit }],
+      });
+    } else {
+      cover.on('pointerdown', commit);
+    }
     boxes.push(box);
+    shelfEntries.push({ obj: cover, id: pack.kind, label: pack.label });
   });
+  publishShelf(scene, ov, 'packOffer', shelfEntries);
 
   // Not feeling any of them? Walk away.
   button(scene, ov, GAME_W / 2, GAME_H - 62, 'SKIP PACKS', () => { ov.destroy(true); done(); },
@@ -1845,6 +2252,7 @@ export function artifactPickerOverlay(scene, run, { title = 'RE-FORGE', skipLabe
   const arts = run.artifacts;
   const gap = Math.min(230, 1500 / Math.max(arts.length, 1));
   const xs = arts.map((_, i) => GAME_W / 2 + (i - (arts.length - 1) / 2) * gap);
+  const shelfEntries = [];
   arts.forEach((art, i) => {
     const cell = scene.add.container(xs[i], 560).setScale(0);
     const shadow = addArtifactIcon(scene, 5, 8, art, 132).setTint(0x120a06).setAlpha(0.45);
@@ -1862,14 +2270,35 @@ export function artifactPickerOverlay(scene, run, { title = 'RE-FORGE', skipLabe
     cell.add(hit);
     hit.on('pointerover', () => { sfx(scene, 'card_hover', { volume: 0.42 }); scene.tweens.add({ targets: cell, scale: 1.12, duration: 110 }); });
     hit.on('pointerout', () => scene.tweens.add({ targets: cell, scale: 1, duration: 110 }));
-    hit.on('pointerdown', () => {
+    const commit = () => {
       sfx(scene, 'pack_open_forge', { volume: 0.85 });
       ov.destroy(true);
       cb(art);
-    });
+    };
+    // TWO TAPS, and here the box is a STRICT UPGRADE: this picker has never had
+    // a tooltip at all. It draws your belt as icons and names, and asks you to
+    // pick the one worth duplicating — a question you cannot answer from a name
+    // if the relic is a scaler whose whole value is the number it has banked.
+    // artifactTipBody carries that running total. NEVER MIND keeps its one tap.
+    if (TOUCH) {
+      twoTap(scene, hit, {
+        key: `reforge:${i}:${art.id}`,
+        anchor: hitAnchor(hit),
+        title: rar ? `${art.name}  ·  ${rar.label}` : art.name,
+        body: () => artifactTipBody(art),
+        accent: rar?.color,
+        depth: (ov.depth ?? OV_DEPTH) + 10,
+        owner: ov,
+        buttons: [{ label: 'CHOOSE', kind: 'take', onClick: commit }],
+      });
+    } else {
+      hit.on('pointerdown', commit);
+    }
     ov.add(cell);
+    shelfEntries.push({ obj: hit, id: art.id, label: art.name });
     scene.tweens.add({ targets: cell, scale: 1, duration: 260, delay: i * 70, ease: 'Back.easeOut' });
   });
+  publishShelf(scene, ov, 'reforge', shelfEntries);
 
   // Declining is allowed here too — cb(null) is the "I picked nothing" answer,
   // and every caller handles it (the Forge option already printed "the forge
@@ -1967,7 +2396,8 @@ function buildPackOpen(scene, run, pack, options, done, opts = {}) {
   // Painted shelves only: an icon-panel option prints its own rules on itself.
   // ------------------------------------------------------------------
   if (anyArt) {
-    ov.add(scene.add.text(GAME_W / 2, 246, 'hover a card to read what it does', {
+    ov.add(scene.add.text(GAME_W / 2, 246,
+      say('hover a card to read what it does', 'tap a card to read what it does'), {
       fontFamily: '"Baloo 2"', resolution: 2, fontSize: '20px', color: '#a3947a', fontStyle: 'bold',
     }).setOrigin(0.5));
   }
@@ -2057,11 +2487,16 @@ function buildPackOpen(scene, run, pack, options, done, opts = {}) {
     }
   };
 
-  // ONE tooltip at a time, owned by the overlay so no hover can outlive it.
-  let cardTip = null;
-  const killCardTip = () => { if (cardTip) { cardTip.destroy(true); cardTip = null; } };
-  const showCardTip = (opt, x, yTop) => {
-    killCardTip();
+  /**
+   * WHAT AN OPTION SAYS ABOUT ITSELF — written ONCE, read by both surfaces.
+   *
+   * The desktop hover tip and the touch build's description box describe the
+   * same painted card, and the moment they build their own version of this
+   * string they start disagreeing about whether the Worn Anvil line is there or
+   * whether the shelf admits you cannot pay. So the string has one author and
+   * the two surfaces are both readers.
+   */
+  const optionTipBody = (opt) => {
     const affordable = !opt.available || opt.available(run);
     // WHAT WILL THIS TOUCH? A fixed preview draws the actual cards; the other
     // two modes say so in one line and draw nothing (core/packs.previewFor).
@@ -2071,12 +2506,22 @@ function buildPackOpen(scene, run, pack, options, done, opts = {}) {
     // Hunter's "Remove 2 cards", "Turn 3 cards WILD") need telling.
     const pvLine = pv?.mode === 'choose' && /choose|chosen/i.test(opt.desc ?? '')
       ? null : previewLabel(pv);
-    cardTip = miniTip(scene, x, yTop, opt.name.toUpperCase(),
-      personalize(opt.desc)
+    return personalize(opt.desc)
       + (pvLine ? `\n${pvLine}` : '')
       + (opt.anvil ? '\nWORN ANVIL: your most-played hand is always offered.' : '')
-      + (affordable ? '' : "\nYou can't pay for this one."),
-      opt.anvil ? 0xff8c28 : opt.mythic ? 0xe03040 : pack.color, false,
+      + (affordable ? '' : "\nYou can't pay for this one.");
+  };
+  /** ...and the colour it is framed in, on both surfaces, for the same reason. */
+  const optionAccent = (opt) => (opt.anvil ? 0xff8c28 : opt.mythic ? 0xe03040 : pack.color);
+
+  // ONE tooltip at a time, owned by the overlay so no hover can outlive it.
+  let cardTip = null;
+  const killCardTip = () => { if (cardTip) { cardTip.destroy(true); cardTip = null; } };
+  const showCardTip = (opt, x, yTop) => {
+    killCardTip();
+    const pv = opt.preview;
+    cardTip = miniTip(scene, x, yTop, opt.name.toUpperCase(),
+      optionTipBody(opt), optionAccent(opt), false,
       pv?.mode === 'fixed' ? pv.cards : null);
     cardTip.setDepth((ov.depth ?? OV_DEPTH) + 8);
     // miniTip hangs UP from its anchor, which would land on the pack's title.
@@ -2087,6 +2532,7 @@ function buildPackOpen(scene, run, pack, options, done, opts = {}) {
   };
   ov.once('destroy', killCardTip);
 
+  const shelfEntries = [];
   options.forEach((opt, i) => {
     let hit;
     let topY = -190;               // where a badge would hang, per render style
@@ -2166,8 +2612,54 @@ function buildPackOpen(scene, run, pack, options, done, opts = {}) {
       killCardTip();
       if (affordable) scene.tweens.add({ targets: box, scale: 1, duration: 110 });
     });
-    // The Dealer greys out deals you can't cover.
-    if (!affordable) {
+    /**
+     * TWO TAPS, AND THIS IS THE FLAGSHIP (JC, 2026-08-10).
+     *
+     * THE ORACLE routes through here with `mandatory: true`: three unfamiliar
+     * futures, dealt before the first fight of the first run, one of them about
+     * to be permanent, and no TAKE NOTHING to retreat to. Under the old model
+     * the first thing a thumb landed on WAS the answer. Now the first tap opens
+     * a box carrying the option's name, the exact string the desktop tooltip
+     * prints, and a single CHOOSE — and browsing the other two costs one tap
+     * each, because a press that lands on a different card swaps the box.
+     *
+     * AN UNAFFORDABLE DEAL STILL OPENS ITS BOX, with CHOOSE drawn dead. "This
+     * is what you cannot afford" is the information the shelf owes you; the
+     * shake and the CAN'T PAY pop are what the dead button plays when pressed
+     * (choicebox does that itself), so the desktop refusal is not duplicated.
+     *
+     * THE ARTISAN'S CARD IS NAMELESS (`name: ''`) and hides nothing — its face
+     * and its mod blurb are both drawn full size on the shelf, which is why it
+     * has never had a tooltip. It still gets the box, because the rule JC wrote
+     * is about the COMMIT and not about the reading: taking it pushes a card
+     * into your deck for the rest of the run. It borrows its own face for a
+     * title, so the box names the thing it is about.
+     */
+    if (TOUCH) {
+      twoTap(scene, hit, {
+        key: `pack:${i}:${opt.id ?? opt.name}`,
+        anchor: hitAnchor(hit),
+        title: opt.name
+          ? opt.name.toUpperCase()
+          : (opt.card ? `${rankLabel(opt.card.rank)} OF ${SUIT_GLYPH[opt.card.suit]}` : pack.label),
+        body: () => optionTipBody(opt),
+        accent: optionAccent(opt),
+        depth: (ov.depth ?? OV_DEPTH) + 10,
+        owner: ov,
+        buttons: () => [{
+          label: 'CHOOSE', kind: 'take',
+          onClick: () => choose(opt),
+          // Re-asked at OPEN time, not at build time: a Dealer deal you could
+          // not cover when the shelf dealt may be affordable by the time you
+          // read it (a relic paid out, a bottle was drunk).
+          enabled: !opt.available || opt.available(run),
+        }],
+        onOpen: killCardTip,
+      });
+    } else if (!affordable) {
+      // The Dealer greys out deals you can't cover. Desktop only: on touch the
+      // box's own dead CHOOSE button is the refusal, and it shakes and sounds
+      // exactly the same way (choicebox.js).
       hit.on('pointerdown', () => {
         sfx(scene, 'card_deselect', { volume: 0.42 });
         scene.tweens.add({ targets: box, x: xs[i] + 8, duration: 50, yoyo: true, repeat: 2 });
@@ -2176,7 +2668,9 @@ function buildPackOpen(scene, run, pack, options, done, opts = {}) {
     } else {
       hit.on('pointerdown', () => choose(opt));
     }
+    shelfEntries.push({ obj: hit, id: opt.id ?? null, label: opt.name ?? null });
   });
+  publishShelf(scene, ov, `pack:${pack.kind}`, shelfEntries);
 
   // A polite skip for hoarders who want nothing. THE ORACLE has no such door.
   if (!mandatory) {

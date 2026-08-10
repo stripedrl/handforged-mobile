@@ -187,8 +187,7 @@ export const ORACLE_OPTIONS = [
   {
     id: 'greedy', name: 'Greedy',
     desc: `GAIN: ${GREEDY_CHIPS} chips, before the first fight.\n`
-      + `PRICE: ${GREEDY_MAX_HP} Max HP, forever.\n`
-      + 'Rich and brittle. It is a way to live.',
+      + `PRICE: ${GREEDY_MAX_HP} Max HP, forever.`,
     apply(r) {
       const paid = gainGold(GREEDY_CHIPS, r);
       r.player.maxHp = Math.max(1, r.player.maxHp - GREEDY_MAX_HP);
@@ -199,8 +198,7 @@ export const ORACLE_OPTIONS = [
   {
     id: 'sacrificial', name: 'Sacrificial',
     desc: 'GAIN: a random relic, free.\n'
-      + `PRICE: ${SACRIFICIAL_HANDS} hand fewer in every fight, for the rest of the run.\n`
-      + 'Something always pays for a gift like that.',
+      + `PRICE: ${SACRIFICIAL_HANDS} hand fewer in every fight, for the rest of the run.`,
     apply(r, _, rng = Math.random) {
       r.oracleMods.handsPerFight -= SACRIFICIAL_HANDS;
       const def = rollEliteDrop(r.artifacts.map(a => a.id), 0, rng, r.chrId, r.actIndex);
@@ -226,8 +224,7 @@ export const ORACLE_OPTIONS = [
   {
     id: 'gamblingAddict', name: 'Gambling Addict',
     desc: `GAIN: ${ROULETTE_CARDS} random cards become ROULETTE, spinning again every activation for chips, mult, value or nothing.\n`
-      + 'PRICE: 1 less discard every fight.\n'
-      + 'He can stop whenever he likes.',
+      + 'PRICE: 1 less discard every fight.',
     apply(r, _, rng = Math.random) {
       const picks = freshCards(r.runDeck, ROULETTE_CARDS, rng);
       for (const c of picks) c.mod = 'roulette';
@@ -237,9 +234,8 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'spiritual', name: 'Spiritual',
-    desc: `GAIN: ETHEREAL cards never vanish. That x${MOD_MULT_FACTOR.ethereal} is finally free.\n`
-      + 'PRICE: every Ace leaves your deck.\n'
-      + 'You keep the ghosts. The aces keep walking.',
+    desc: `GAIN: ETHEREAL cards never vanish. Their x${MOD_MULT_FACTOR.ethereal} mult costs nothing.\n`
+      + 'PRICE: every Ace leaves your deck.',
     apply(r) {
       r.oracleMods.etherealNeverVanishes = 1;
       const gone = stripRanks(r, [14]);
@@ -248,8 +244,7 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'anarchist', name: 'Anarchist',
-    desc: 'Every JACK, QUEEN and KING leaves your deck. Nothing replaces them.\n'
-      + 'A thinner deck draws better. That is the only argument for it.',
+    desc: 'Every JACK, QUEEN and KING leaves your deck. Nothing replaces them.',
     apply(r) {
       const gone = stripRanks(r, [11, 12, 13]);
       return { text: `${gone} face cards deposed. ${r.runDeck.length} cards left.` };
@@ -257,8 +252,7 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'chaotic', name: 'Chaotic',
-    desc: 'Every card in your deck is re-rolled right now: new rank, new suit.\n'
-      + 'Mods, seals and foil stay exactly where they are.',
+    desc: 'Every card in your deck is re-rolled right now: new rank, new suit. Mods, seals and foil are untouched.',
     apply(r, _, rng = Math.random) {
       // ONCE, at pick time, on the run deck (per spec). Only rank and suit are
       // touched: a card's mod, stamp and wrap are what the card IS, and the
@@ -283,8 +277,7 @@ export const ORACLE_OPTIONS = [
   {
     id: 'handy', name: 'Handy',
     desc: `GAIN: ${HANDY_HANDS} more hands in every fight.\n`
-      + 'PRICE: 1 less discard every fight.\n'
-      + 'Play it out. Do not tidy it up.',
+      + 'PRICE: 1 less discard every fight.',
     apply(r) {
       r.oracleMods.handsPerFight += HANDY_HANDS;
       r.discardsPerFightBonus -= 1;
@@ -293,8 +286,7 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'alchemist', name: 'Alchemist',
-    desc: `GAIN: ${ALCHEMIST_POTIONS} random potions, straight onto your belt.\n`
-      + 'He measures nothing and it works anyway.',
+    desc: `GAIN: ${ALCHEMIST_POTIONS} random potions, straight onto your belt.`,
     apply(r, _, rng = Math.random) {
       const room = Math.max(0, MAX_POTIONS - (r.potions?.length ?? 0));
       const bottles = rollDistinctPotions(Math.min(ALCHEMIST_POTIONS, room), rng);
@@ -304,8 +296,7 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'simple', name: 'Simple',
-    desc: 'GAIN: a COMMON relic, free.\n'
-      + 'It is not much. It is early, and it is yours.',
+    desc: 'GAIN: a COMMON relic, free.',
     apply(r, _, rng = Math.random) {
       const def = rollOfRarity('common', r.artifacts.map(a => a.id), rng, r.chrId);
       return def ? { artifact: def } : { text: 'Every simple thing is already yours.' };
@@ -313,8 +304,7 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'cultured', name: 'Cultured',
-    desc: "Other heroes' EXCLUSIVE relics can now roll for you, everywhere a relic is rolled: the shop, an elite, the Curator's case, the fire.\n"
-      + 'You were never meant to hold any of these.',
+    desc: "Other heroes' EXCLUSIVE relics can roll for you everywhere a relic is rolled: the shop, an elite, the Curator's case, the fire.",
     apply(r) {
       r.oracleMods.culturedRelics = 1;
       return { text: 'Other people\'s heirlooms are on the table.' };
@@ -322,8 +312,7 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'negotiator', name: 'Negotiator',
-    desc: `Everything on the merchant's table costs ${pct(NEGOTIATOR_FACTOR)} less: relics, bottles, removals, boosters, restocks.\n`
-      + 'He hates you and he takes the deal.',
+    desc: `Everything on the merchant's table costs ${pct(NEGOTIATOR_FACTOR)} less: relics, bottles, removals, boosters, restocks.`,
     apply(r) {
       r.oracleMods.shopPriceFactor *= NEGOTIATOR_FACTOR;
       return { text: `Every price on his mat, ${pct(NEGOTIATOR_FACTOR)} lighter.` };
@@ -332,8 +321,7 @@ export const ORACLE_OPTIONS = [
   {
     id: 'collector', name: 'Collector',
     desc: `GAIN: ${COLLECTOR_STOCK} more relic on the merchant's mat, every visit.\n`
-      + `PRICE: everything he sells costs ${pct(COLLECTOR_FACTOR)} more.\n`
-      + 'More to want, and less to want it with.',
+      + `PRICE: everything he sells costs ${pct(COLLECTOR_FACTOR)} more.`,
     apply(r) {
       r.oracleMods.shopExtraStock += COLLECTOR_STOCK;
       r.oracleMods.shopPriceFactor *= COLLECTOR_FACTOR;
@@ -352,8 +340,7 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'recycler', name: 'Recycler',
-    desc: 'Cards you PLAY shuffle back into your draw pile instead of the discard.\n'
-      + 'A card destroyed as it plays is still gone.',
+    desc: 'Cards you PLAY shuffle back into your draw pile instead of the discard. A card destroyed as it plays is still gone.',
     apply(r) {
       r.oracleMods.recyclePlayed = 1;
       return { text: 'Nothing you play is ever really spent.' };
@@ -361,16 +348,14 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'modest', name: 'Modest',
-    desc: `GAIN: ${MODEST_CHIPS} chips.\n`
-      + `She did not ask what you wanted. She had ${MODEST_CHIPS} chips.`,
+    desc: `GAIN: ${MODEST_CHIPS} chips, before the first fight.`,
     apply(r) {
       return { text: `+${gainGold(MODEST_CHIPS, r)} chips.` };
     },
   },
   {
     id: 'blacksmith', name: 'Blacksmith',
-    desc: 'THE CRIMSON FORGE is guaranteed to stand on your map, in some act, before this run is out.\n'
-      + 'Mythicals live in that fire.',
+    desc: "THE CRIMSON FORGE is guaranteed to stand on your map, in some act, before this run is out. It is the map's only source of MYTHICAL relics.",
     apply(r) {
       r.oracleMods.forgeOwed = 1;
       // Pay it against the board that is ALREADY standing if that board can host
@@ -382,8 +367,7 @@ export const ORACLE_OPTIONS = [
   },
   {
     id: 'colorful', name: 'Colorful',
-    desc: `${COLORFUL_WILDS} cards in your deck turn WILD: every suit at once, scoring as your suit ({SUIT}).\n`
-      + 'Paint enough of them and every hand is a flush.',
+    desc: `${COLORFUL_WILDS} cards in your deck turn WILD: every suit at once, scoring as your suit ({SUIT}).`,
     apply(r, _, rng = Math.random) {
       const picks = freshCards(r.runDeck, COLORFUL_WILDS, rng);
       for (const c of picks) c.mod = 'wild';
@@ -395,8 +379,7 @@ export const ORACLE_OPTIONS = [
     // THE ONLY NO-OP IN THE PACK, and therefore the one that has to earn its
     // seat on writing alone. It must read as a decision the Oracle MADE, not as
     // a card whose effect failed to load.
-    desc: 'Nothing. No gift, no price, no catch.\n'
-      + 'She looks at your future, sets the card face down, and says nothing. Not every run gets advice.',
+    desc: 'Nothing at all. No gift, no price, no catch.',
     apply() {
       return { text: 'She says nothing. The road is exactly as long as it was.' };
     },

@@ -33,14 +33,88 @@ export const IMG_EXT = '.webp';
  * iPhone's 19.5:9 (2340) and the SIDEBAR thickens to 420, so every layout
  * that derives from the two constants — the arena centre, the hand fan, the
  * marquee, the backgrounds (which cover-fit GAME_W and therefore ZOOM) —
- * spreads to fill the phone naturally. Elements that need to be finger-
- * sized carry their own `MOBILE ?` bumps at their definitions.
+ * spreads to fill the phone naturally.
+ *
+ * ===========================================================================
+ * V3, 2026-08-10 — TWO SWITCHES, NOT ONE (JC wants to play on an iPad Pro)
+ * ===========================================================================
+ * `MOBILE` used to decide two completely different questions at once:
+ *
+ *   1. IS THE PLAYER USING A FINGER?  — thumb-sized targets, hold-to-hover,
+ *      the two-tap commit model, bigger type, a thicker sidebar.
+ *   2. HOW WIDE IS THE CANVAS?        — 2340 (19.5:9) versus 1920 (16:9).
+ *
+ * On a phone the two answers happen to coincide. On a TABLET they do not: an
+ * iPad Pro is 4:3 (1.333) and wants every one of the touch affordances while
+ * a 2340x1080 canvas stretched onto it would be a 60% vertical squash. So the
+ * questions are now asked separately:
+ *
+ *   TOUCH  the touch model. Driven by the FLAG, exactly as MOBILE always was,
+ *          so the desktop package cannot flip into it by owning a touchscreen.
+ *   WIDE   the canvas shape, chosen AT BOOT from the device's own aspect —
+ *          whichever of the two canvases is closer to the screen it must fill.
+ *          Everything downstream is already GAME_W-derived (the mobile-v2 wave
+ *          proved it), so this one boolean re-lays the whole game out.
+ *
+ * `MOBILE` survives as an alias for TOUCH because that is what all ~76 of its
+ * call sites were actually asking (they are finger-size bumps to a man). The
+ * two places that genuinely meant "the wide canvas" — the wide map boards in
+ * core/lazyload.js and MapScene's BOARD_W — read WIDE.
  */
-export const MOBILE = (typeof window !== 'undefined')
-  && (window.__HF_MOBILE === true
-    || new URLSearchParams(window.location?.search ?? '').has('mobile'));
+const HF_QS = (typeof window !== 'undefined')
+  ? new URLSearchParams(window.location?.search ?? '')
+  : new URLSearchParams('');
 
-export const GAME_W = MOBILE ? 2340 : 1920;
+export const TOUCH = (typeof window !== 'undefined')
+  && (window.__HF_MOBILE === true || HF_QS.has('mobile'));
+
+/** The two canvases this game knows how to be, as aspect ratios. */
+export const CANVAS_ASPECT_WIDE = 2340 / 1080;    // 2.1667 — a 19.5:9 phone
+export const CANVAS_ASPECT_NARROW = 1920 / 1080;  // 1.7778 — 16:9, and the desktop
+
+/**
+ * The line between them: the midpoint of the two aspects. A screen is handed
+ * whichever canvas it is CLOSER to, which is the same rule as "letterbox the
+ * least" and needs no device list to maintain.
+ *
+ *   iPhone 16 Pro landscape  874x402   2.174  -> WIDE   (fills, 0.3% warp)
+ *   Galaxy 20:9              2.222            -> WIDE
+ *   iPad Pro 13"            1376x1032  1.333  -> narrow (1920, letterboxed)
+ *   iPad Pro 11"            1210x834   1.451  -> narrow (1920, letterboxed)
+ *   a 16:9 tablet            1.778            -> narrow (1920, exact fit)
+ */
+export const WIDE_PICK_ASPECT = (CANVAS_ASPECT_WIDE + CANVAS_ASPECT_NARROW) / 2;  // 1.9722
+
+/**
+ * Chosen ONCE, here, at module evaluation — which is before main.js builds the
+ * Phaser config, because config.js is the first thing every scene imports.
+ *
+ * `window.__HF_WIDE` is the override the PWA shell writes: the shell has to
+ * know the canvas aspect anyway (it is what decides fill-vs-letterbox), so it
+ * decides first and tells us, and the two can never disagree about which
+ * canvas is on screen. `?wide=0` / `?wide=1` is the dev-server equivalent.
+ */
+function chooseWide() {
+  if (!TOUCH) return false;                     // the desktop game is 1920, always
+  if (typeof window === 'undefined') return false;
+  if (window.__HF_WIDE === true) return true;
+  if (window.__HF_WIDE === false) return false;
+  if (HF_QS.has('wide')) return HF_QS.get('wide') !== '0';
+  const w = window.innerWidth || window.screen?.width || 0;
+  const h = window.innerHeight || window.screen?.height || 0;
+  if (!(w > 0 && h > 0)) return true;           // unmeasurable: the phone is the default
+  // Orientation-agnostic on purpose. The game is landscape-locked but the page
+  // can very easily be evaluated while the device is still held upright, and a
+  // boot-time decision that flips with the wrist is not a decision.
+  return (Math.max(w, h) / Math.min(w, h)) >= WIDE_PICK_ASPECT;
+}
+
+export const WIDE = chooseWide();
+
+/** Legacy name. Every existing `MOBILE ?` in the tree is a finger-size bump. */
+export const MOBILE = TOUCH;
+
+export const GAME_W = WIDE ? 2340 : 1920;
 export const GAME_H = 1080;
 export const VIEW_W = GAME_W;   // the canvas IS the world now, both builds
 
@@ -48,7 +122,74 @@ export const VIEW_W = GAME_W;   // the canvas IS the world now, both builds
  *  so the scenes' create() calls stay harmless. */
 export function applyMobileCamera() {}
 
-export const SIDEBAR_W = MOBILE ? 420 : 340;
+/**
+ * THE SIDEBAR follows the FINGER, not the canvas: its extra 80px pays for
+ * thumb-sized relic sockets, which a tablet wants every bit as much as a phone
+ * does. On the 1920 tablet canvas it is 80px out of the arena, and the arena
+ * derives from these two constants, so nothing else has to be told.
+ */
+export const SIDEBAR_W = TOUCH ? 420 : 340;
+
+/** The arena's width — everything between the sidebar and the right edge. */
+export const PLAY_W = GAME_W - SIDEBAR_W;   // 1920 phone / 1500 tablet / 1580 desktop
+
+/**
+ * THE SAFE FRAME (JC, 2026-08-10: "the settings cog is basically clipped; the
+ * DISCARD and SORT plates are slightly clipped").
+ *
+ * A phone's glass is not a rectangle. In LANDSCAPE, iOS reports a 62pt inset on
+ * both long edges (the Dynamic Island lives on one of them and swaps sides with
+ * the wrist) and the four corners are cut by a ~55pt radius, which bites hardest
+ * on the DIAGONAL — which is exactly why the cog, alone in a corner, read as
+ * clipped while the potion mat 9pt from the same edge read fine.
+ *
+ * The shell deliberately does NOT letterbox the phone away from all of that
+ * (JC: "I'm okay if things are slightly distorted... I want it to fill the whole
+ * screen"), so the clearance is bought in GAME coordinates instead:
+ *
+ *   x / y   how far in from each edge anything corner-pinned is pulled. 96 game
+ *           px is ~36pt on the phone — a real margin against the 7-9pt the
+ *           plates were shipping — without spending the 166px a full 62pt
+ *           inset would cost on a 2340-wide canvas that has to hold a fan.
+ *   corner  the radius of the CORNER BITE: no interactive element may have a
+ *           bounding box inside the quarter-disc this cuts out of each corner.
+ *           The verification driver asserts exactly that.
+ */
+export const SAFE = {
+  x: TOUCH ? 96 : 0,
+  y: TOUCH ? 24 : 0,
+  corner: TOUCH ? 150 : 0,
+};
+
+/**
+ * Is `box` ({left,right,top,bottom}) wholly clear of all four corner bites?
+ *
+ * THIS TEST IS STRICT, AND THE FIRST DRAFT OF IT WAS NOT. The first version
+ * measured the box's point NEAREST each arc centre, which answers "is any of
+ * this box on the glass" — a question every box on a 2340x1080 canvas answers
+ * yes to. The shipped settings cog PASSED it while being visibly clipped on
+ * JC's phone, which is the exact failure the whole check exists to catch.
+ *
+ * So it asks about the box's own four CORNERS, because the corner is the point
+ * that sticks furthest into the arc, and a rectangle is clipped exactly when
+ * one of its corners falls outside the quarter-circle. `outX && outY` is what
+ * confines the test to the quadrant actually cut away: a box directly below an
+ * arc centre is in the safe vertical band and is never bitten.
+ */
+export function clearsCorners(box, r = SAFE.corner) {
+  if (!(r > 0)) return true;
+  const pts = [[box.left, box.top], [box.right, box.top],
+    [box.left, box.bottom], [box.right, box.bottom]];
+  for (const [cx, cy] of [[r, r], [GAME_W - r, r], [r, GAME_H - r], [GAME_W - r, GAME_H - r]]) {
+    for (const [px, py] of pts) {
+      // Only the quarter that faces the actual screen corner is cut away.
+      const outX = cx <= r ? px < cx : px > cx;
+      const outY = cy <= r ? py < cy : py > cy;
+      if (outX && outY && Math.hypot(px - cx, py - cy) > r) return false;
+    }
+  }
+  return true;
+}
 
 export const SUIT_COLORS = {
   swords:  0x4a5a7a,
@@ -120,49 +261,70 @@ export const PARTICLE_VARIANTS = {
 
 /**
  * THE PHONE'S BIGGER CARD (JC, 2026-08-06: "bigger hand cards with more
- * vertical room"). V2 widened the WORLD and left the card at its desktop
- * 140x210, so the fan read as a strip of postage stamps across a screen with
- * 420 more pixels than it needed. ONE scalar grows the whole card — face,
- * corner cluster, pip, banner, and the lifts that move it — because every
- * number printed on a card is an inset from its own edge (see ui/CardSprite.js)
- * and scaling the frame without its insets is how you get a rank floating in
- * the middle of painted filigree.
+ * vertical room"; 2026-08-10: "bigger still"). V2 widened the WORLD and left
+ * the card at its desktop 140x210, so the fan read as a strip of postage stamps
+ * across a screen with 420 more pixels than it needed. ONE scalar grows the
+ * whole card — face, corner cluster, pip, banner, and the lifts that move it —
+ * because every number printed on a card is an inset from its own edge (see
+ * ui/CardSprite.js) and scaling the frame without its insets is how you get a
+ * rank floating in the middle of painted filigree.
  *
- * 1.171 and not 1.2: 140x210 -> 164x246 is EXACTLY 2:3 on both builds (a
- * fractional card is a blurry card), and 246 is the tallest card that clears
- * the played row above it (CARD.playedY 668 + 123 = 791, the fan's ceiling at
- * 918 - 123 = 795) without moving the score equation into the enemy plates.
+ * 180x270, up from 164x246. Both are EXACTLY 2:3 (a fractional card is a blurry
+ * card), and 180 is the honest maximum: the budget is VERTICAL, and it was paid
+ * for by moving the two things above the fan rather than by shaving the card.
+ *
+ *   fan bottom   912 + 135 + 26 arc = 1073, against a 1080 canvas
+ *   fan top      912 - 135          =  777
+ *   played row   630 + 135          =  765, four px of daylight under the fan
+ *   equation     playedY - 200 = 430, and its caption at 474, which clears the
+ *                played row's own ceiling (495) by four
+ *
+ * The band the equation vacated was dead air: the enemy stack bottoms out around
+ * y 250 even on a tall body, so 430 is nowhere near a health bar.
  */
-const CARD_SCALE = MOBILE ? 1.171 : 1;
+const CARD_SCALE = TOUCH ? 180 / 140 : 1;
 const cs = (n) => Math.round(n * CARD_SCALE);
 
 export const CARD = {
   w: cs(140), h: cs(210), // display size — true 2:3, matches Caleb's painted card faces
-  // MOBILE sits 20px higher than desktop's 938: the card grew 36px taller and
+  // TOUCH sits 26px higher than desktop's 938: the card grew 60px taller and
   // the arc still has to land inside 1080. See fanArcMax.
-  fanY: MOBILE ? 918 : 938,
+  fanY: TOUCH ? 912 : 938,
   fanCenterX: (SIDEBAR_W + GAME_W) / 2,
-  fanSpread: MOBILE ? 131 : 96,   // px between card centers (wider fan on the wide screen)
+  /**
+   * PX BETWEEN CARD CENTRES — how much of each card you can actually see.
+   *
+   * Derived from the ARENA'S width rather than hard-coded, because the touch
+   * build now has two of them (a 1920 phone arena, a 1500 tablet arena) and a
+   * spacing tuned for one is a fan that overruns the button lanes on the other.
+   * 0.0682 reproduces the shipped phone number (1920 -> 131) exactly.
+   *
+   * Note it did NOT grow with the card: a wider card at the same spacing is
+   * more overlap, not a wider fan, so the bigger card costs the lanes nothing.
+   */
+  fanSpread: TOUCH ? Math.round(PLAY_W * 0.0682) : 96,
   /**
    * HOW WIDE THE FAN MAY EVER GET, centre to centre. This used to live as
    * fanSlots' own `maxWidth = 740` default and nothing passed it, so the phone
    * drew a 740px fan in the middle of a 2340px screen with 400px of dead air
-   * either side. 1180 is measured, not guessed: it is the widest fan that still
-   * leaves both button lanes (see BTN_LANE in CombatScene) above their minimum
-   * width at a twelve-card hand.
+   * either side. The 740 it reserves is measured, not guessed: it is what both
+   * button lanes (see BTN_LANE in CombatScene) need at their full size, so a
+   * twelve-card hand is the first one that makes a plate step aside.
    */
-  fanMaxWidth: MOBILE ? 1180 : 740,
+  fanMaxWidth: TOUCH ? PLAY_W - 740 : 740,
   /**
    * THE ARC'S CEILING. The fan bows by arc² — fine at eight cards (27px), off
-   * the bottom of the screen at twelve (67px, and the card is 246 tall). The
+   * the bottom of the screen at twelve (67px, and the card is 270 tall). The
    * cap is set ABOVE the nine-card bow (35.2) on desktop so nothing that reads
    * right today moves; it only ever bites on the ten-plus hands (Handy, the
    * Overstuffed Satchel) that put it there.
    */
-  fanArcMax: MOBILE ? 28 : 36,
+  fanArcMax: TOUCH ? 26 : 36,
   hoverLift: cs(34),
   selectLift: cs(56),
-  playedY: 668,
+  // The played row moved UP on touch to pay for the taller card. Desktop's 668
+  // is untouched, and every offset in the scene derives from this one number.
+  playedY: TOUCH ? 630 : 668,
   // Painted-face safe zone: the ornate frame eats ~9-13% per side, and the
   // corner filigree bites further in on the diagonal. Everything printed on
   // the card is anchored off these so a frame swap never needs a code change.
@@ -210,14 +372,14 @@ export const HOARD_UNLOCK_CHIPS = 2000;
 export const CHARACTERS = {
   highRoller: {
     id: 'highRoller', suit: 'swords', name: 'DEXTRA', title: 'The Shortblade',
-    kit: 'Fewer cards, bigger hits: 1-card hands ×4 mult, 2-card ×3, 3-card ×2.',
+    kit: '1-card hands ×4 mult, 2-card hands ×3, 3-card hands ×2.',
     status: 'bleed', statusLabel: 'Bleed',
     sprite: 'hero_duelist',
     suitNotes: [...SUIT_NOTES],
   },
   zealot: {
     id: 'zealot', suit: 'hearts', name: 'ZELUS', title: 'The Cleric',
-    kit: 'Overhealing charges ZEAL. Your next damaging hand spends every point of it, +2% damage each.',
+    kit: 'Overheal banks as ZEAL. Your next damaging hand spends all of it, +2% damage per point.',
     status: 'smite', statusLabel: 'Smite',
     sprite: 'hero_cleric',
     suitNotes: [
@@ -229,7 +391,7 @@ export const CHARACTERS = {
   },
   bulwark: {
     id: 'bulwark', suit: 'gems', name: 'THE BULL', title: 'Mighty Wall',
-    kit: 'Diamonds strike twice as hard: every Diamond card you play deals DOUBLE damage.',
+    kit: 'Every Diamond card you play deals DOUBLE damage.',
     status: 'brittle', statusLabel: 'Brittle',
     sprite: 'hero_diamond_knight',
     suitNotes: [

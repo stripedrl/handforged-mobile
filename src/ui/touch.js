@@ -20,9 +20,17 @@
  */
 
 import { MOBILE } from '../config.js';
+import { isRightPointer } from './pointer.js';
 
-const HOLD_MS = 400;      // finger-still time before a press becomes a hover
-const SLOP = 14;          // px of drift allowed before a tap/hold is a drag
+/**
+ * The gesture constants, exported since 2026-08-10: the CARD INSPECT panel is
+ * the same gesture on both builds (hold, still, 400ms) and reading them from
+ * here is what stops the desktop hold and the phone hold from drifting apart.
+ * SLOP is also Phaser's `dragDistanceThreshold` in CombatScene — a hold that
+ * tolerated more drift than a drag needs to start would eat drag-reorder.
+ */
+export const HOLD_MS = 400;      // finger-still time before a press becomes a hover
+export const SLOP = 14;          // px of drift allowed before a tap/hold is a drag
 
 /**
  * Arm the scene-wide long-press watcher. Call once in create() (safe to call
@@ -84,12 +92,20 @@ export function installLongPress(scene) {
  * a drag does neither.
  */
 export function tapBind(scene, obj, fn) {
-  if (!MOBILE) { obj.on('pointerdown', fn); return obj; }
+  // The right-button guards below are belt-and-braces: ui/pointer.js already
+  // stops a right press ever reaching a handler. They stay because tapBind is
+  // the one binder every future call site is meant to reach for, and a binder
+  // that says out loud "this never acts on a right-click" is cheaper than
+  // trusting that the patch is still installed.
+  if (!MOBILE) {
+    obj.on('pointerdown', (p, ...rest) => { if (!isRightPointer(p)) fn(p, ...rest); });
+    return obj;
+  }
   let downAt = null;
-  obj.on('pointerdown', (p) => { downAt = { x: p.x, y: p.y }; });
+  obj.on('pointerdown', (p) => { downAt = isRightPointer(p) ? null : { x: p.x, y: p.y }; });
   obj.on('pointerup', (p, lx, ly, ev) => {
     const was = downAt; downAt = null;
-    if (!was) return;
+    if (!was || isRightPointer(p)) return;
     if (scene._touchHoldFired) return;                       // it was a read
     if (Math.hypot(p.x - was.x, p.y - was.y) > SLOP) return; // it was a drag
     fn(p, lx, ly, ev);

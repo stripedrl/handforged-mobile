@@ -20,7 +20,9 @@ import { rollMythical, rollEliteDrop, rollLegendaryPlus, rollOfRarity, getProp }
 import { isAchievementUnlocked } from './progress.js';
 // The ETHEREAL numbers, so the Ethereal Rite quotes the engine and not a memory
 // of it. scoring.js reaches only config/deck/poker, so this edge cannot cycle.
-import { MOD_MULT_FACTOR, ETHEREAL_VANISH_CHANCE } from './scoring.js';
+import {
+  MOD_MULT_FACTOR, ETHEREAL_VANISH_CHANCE, SEAL_HEAL, STAMP_MULT, WRAP_MULT_FACTOR,
+} from './scoring.js';
 import { ORACLE_OPTIONS } from './oracle.js';
 // ENDLESS clamp only (the Smith's double-tempering ladder tops out at Act IV).
 // Safe edge: acts.js reaches enemies/map/progress and none of them reach back.
@@ -39,44 +41,44 @@ function ownedArtifacts(r) {
 export const PACK_TYPES = {
   witch: {
     kind: 'witch', label: 'THE WITCH', color: 0x8a5cd0, icon: 'icon_magic',
-    blurb: 'Strange magics for your deck. Some kind, some hungry.',
+    blurb: 'Card magic for your deck.',
   },
   smith: {
     kind: 'smith', label: 'THE SMITH', color: 0xd07028, icon: 'icon_anvil',
-    blurb: 'Hammer a hand type stronger. Permanent, this run.',
+    blurb: 'Level up one hand type. Permanent, this run.',
   },
   artisan: {
     kind: 'artisan', label: 'THE ARTISAN', color: 0x4aa8ff, icon: 'icon_star',
-    blurb: 'Fresh-crafted cards for your deck, some with a twist.',
+    blurb: 'New cards for your deck, some carrying a mod.',
   },
   dealer: {
     kind: 'dealer', label: 'THE DEALER', color: 0x2e8b57, icon: 'icon_dice',
-    blurb: 'Every prize has a price. Read the fine print.',
+    blurb: 'Every deal gives something and costs something.',
   },
   forge: {
     kind: 'forge', label: 'THE FORGE', color: 0xe03040, icon: 'icon_fire',
-    blurb: 'The old fire. Great boons, and sometimes the impossible.',
+    blurb: 'Deck-warping rites, and a chance at a MYTHICAL relic.',
   },
   // THE CURATOR (JC, 2026-07-31) — the rarest table. No cards, no deals: he
   // opens a case, and three relics are standing on it. Take one, free.
   curator: {
     kind: 'curator', label: 'THE CURATOR', color: 0xc9a24a, titleColor: 0xf0dfae,
     icon: 'icon_gem',
-    blurb: 'Three relics under glass. He lets you take exactly one.',
+    blurb: 'Three relics under glass. Take one, free.',
   },
   // Awarded, already open, for a dead act boss — and, if THE ORACLE'S HUNTER was
   // taken, a wrapper that can also turn up on the ordinary pack table.
   bounty: {
     kind: 'bounty', label: 'THE BOUNTY HUNTER', color: 0x3fae62, titleColor: 0xffd23e,
     icon: 'icon_coins',
-    blurb: 'A boss is worth something to somebody. Collect.',
+    blurb: 'The payoff for a dead act boss.',
   },
   // THE ORACLE — never at the pack table. It is opened ONCE, on arrival at the
   // first map, and it is the only pack in the game you cannot walk away from.
   oracle: {
     kind: 'oracle', label: 'THE ORACLE', color: 0x9a5cff, titleColor: 0xd8b0ff,
     icon: 'icon_magic',
-    blurb: 'She saw your run before you did. Three futures. Choose one.',
+    blurb: 'Three futures. You must take one.',
   },
 };
 
@@ -369,7 +371,7 @@ const WITCH_RITES = [
   },
   {
     id: 'death', name: 'Disintegrate', icon: 'icon_skull', tint: 0x8898b8,
-    desc: 'Destroy up to 2 chosen cards. A thinner deck draws better.',
+    desc: 'Destroy up to 2 chosen cards.',
     ui: 'pickCards', pick: 2, optional: true,
     apply(run, { cards }) {
       for (const c of cards) {
@@ -416,7 +418,7 @@ const WITCH_RITES = [
     id: 'judgement', name: 'Blood Seal', icon: 'icon_heart_small', tint: 0x8a1830,
     // The seal is a STAMP, not a mod (see scoring.js's three layers): it presses
     // onto a card that already carries something and takes nothing away from it.
-    desc: 'A chosen card is BLOOD SEALED: it heals you 2 HP every time it scores. The wax stacks. It keeps whatever the card already was.',
+    desc: `A chosen card takes the BLOOD SEAL: heal ${SEAL_HEAL} HP every time it scores.`,
     ui: 'pickCards', pick: 1,
     apply(run, { cards }) { if (cards[0]) cards[0].stamp = 'blood'; },
   },
@@ -426,13 +428,13 @@ const WITCH_RITES = [
     // the two compete with each other and with nothing else. Takes the Witch to
     // ELEVEN rites — deliberately, and at JC's request; nothing was cut for it.
     id: 'multSeal', name: 'Multiplicative Seal', icon: 'icon_star', tint: 0x7a3ab8,
-    desc: 'A chosen card takes the MULTIPLICATIVE SEAL: +3 mult every time it scores. The wax stacks. It keeps whatever the card already was.',
+    desc: `A chosen card takes the MULTIPLICATIVE SEAL: +${STAMP_MULT} mult every time it scores.`,
     ui: 'pickCards', pick: 1,
     apply(run, { cards }) { if (cards[0]) cards[0].stamp = 'mult'; },
   },
   {
     id: 'wheel', name: 'WHEEL OF FATE', icon: 'icon_dice', tint: 0xb45cff,
-    desc: 'Spin it. 30% wondrous · 45% fine · 25% the witch cackles.',
+    desc: 'Spin: 30% two cards turn WILD and +80 chips · 45% +40 chips · 25% nothing.',
     // The jackpot wedge turns two cards WILD, and which two is not decided until
     // the wheel stops. Honest label, no mini cards: see previewFor.
     ui: 'wheel', randomCards: 2,
@@ -451,7 +453,7 @@ const WITCH_RITES = [
         gainGold(40, run);
         return { wheel: 'mid', text: 'A fair spin. +40 chips.' };
       }
-      return { wheel: 'bust', text: 'The wheel wheezes to a stop. Nothing. The witch cackles.' };
+      return { wheel: 'bust', text: 'The wheel stops on nothing.' };
     },
   },
   {
@@ -459,7 +461,7 @@ const WITCH_RITES = [
     // route in one card. DESTRUCTION_COUNT is quoted by the copy, the resolve
     // and the apply, so the spell can never promise a number it does not cast.
     id: 'tower', name: 'Destruction Spell', icon: 'icon_shield', tint: 0xb87838,
-    desc: `Your ${DESTRUCTION_COUNT} lowest cards are destroyed. A word of unmaking, spent on the dregs.`,
+    desc: `Your ${DESTRUCTION_COUNT} lowest cards are destroyed.`,
     resolve(run) {
       const doomed = lowest(run.runDeck, DESTRUCTION_COUNT);
       return { desc: `Your ${cardList(doomed)} are destroyed.`, cards: doomed };
@@ -662,7 +664,7 @@ function artisanCard(run, rng) {
   if (mod) card[pick.layer ?? 'mod'] = mod;
   return {
     id: card.id, name: '', card,
-    desc: mod ? MOD_BLURB[mod] : 'a solid, honest card',
+    desc: mod ? MOD_BLURB[mod] : 'no mod',
     apply(r) { r.runDeck.push(card); },
   };
 }
@@ -822,7 +824,7 @@ export const DEALER_DEALS = [
   },
   {
     id: 'deal-favor', name: "Pit Boss's Favor", icon: 'icon_magic', tint: 0x8a5cd0,
-    desc: 'GAIN: a random artifact.\nPRICE: 150 chips. No refunds.',
+    desc: 'GAIN: a random artifact.\nPRICE: 150 chips.',
     available: r => r.chips >= 150,
     apply(r) {
       r.chips -= 150;
@@ -865,7 +867,7 @@ const REFORGE_CHANCE = 0.05;
 const FORGE_SPECIALS = {
   reforge: {
     id: 'forge-reforge', name: 'RE-FORGE', art: 'reforge', icon: 'icon_refresh', tint: 0xe03040, mythic: true,
-    desc: 'Choose a relic you own. It is HAND-FORGED ANEW: an exact copy, growth and all.',
+    desc: 'Choose a relic you own. Gain an exact copy of it, growth and all.',
     ui: 'pickArtifact',
     apply(r, { artifact }) {
       return artifact ? { reforge: artifact } : { text: 'The forge cools, unchosen.' };
@@ -873,7 +875,7 @@ const FORGE_SPECIALS = {
   },
   ember: {
     id: 'forge-ember', name: 'MYTHIC EMBER', icon: 'icon_fire', tint: 0xe03040, mythic: true,
-    desc: 'Summon a MYTHICAL relic. A coal that never cooled.',
+    desc: 'Summon a MYTHICAL relic.',
     apply(r) {
       const def = rollMythical(r.artifacts.map(a => a.id), Math.random, r.chrId);
       return def ? { mythical: def } : { text: 'The ember gutters. Every myth is already yours. +200 chips.', chips: gainGold(200, r) };
@@ -893,7 +895,7 @@ function forgePool(chrSuit) {
   return [
     {
       id: 'forge-triplicate', name: 'Triplicate', icon: 'icon_star', tint: 0xffc542,
-      desc: 'Choose a card. The forge hammers out TWO MORE of it, mods and all.',
+      desc: 'Choose a card. Gain TWO MORE copies of it, mods and all.',
       ui: 'pickCards', pick: 1,
       apply(r, { cards }) {
         const c = cards[0];
@@ -924,7 +926,7 @@ function forgePool(chrSuit) {
       id: 'forge-foil', name: 'Foil Press', icon: 'icon_star', tint: 0xbfd8ff,
       // SHINY is a WRAPPER now, not a mod — the press lays foil OVER whatever
       // the card already is, so a shiny stamped roulette card is legal.
-      desc: 'Choose a card. It becomes SHINY: ×1.25 mult every time it scores, on top of whatever it already is.',
+      desc: `Choose a card. It becomes SHINY: ×${WRAP_MULT_FACTOR.shiny} mult every time it scores.`,
       ui: 'pickCards', pick: 1,
       apply(r, { cards }) { if (cards[0]) cards[0].wrap = 'shiny'; },
     },
@@ -933,7 +935,7 @@ function forgePool(chrSuit) {
       // ECHO is a SEAL now (0803-B), pressed into the wax like blood and mult:
       // it takes nothing away from whatever the card already IS, and it competes
       // with the other two seals rather than with the card's mod.
-      desc: 'A chosen card takes the ECHO SEAL: it scores TWICE every time it plays, and its LEFTOVER-in-hand effects fire one extra time. It keeps whatever the card already was.',
+      desc: 'A chosen card takes the ECHO SEAL: it scores TWICE, and its LEFTOVER-in-hand effects fire one extra time.',
       ui: 'pickCards', pick: 1,
       apply(r, { cards }) { if (cards[0]) cards[0].stamp = 'echo'; },
     },
@@ -1074,23 +1076,23 @@ export function spinBountyWheel(run, rng = Math.random) {
   }
   if (roll < 0.45) {
     gainGold(100, run);
-    return { wheel: 'chips', text: 'The hunter counts it out. +100 chips.' };
+    return { wheel: 'chips', text: '+100 chips.' };
   }
   if (roll < 0.60) {
     const before = run.player.hp;
     run.player.hp = Math.min(run.player.maxHp, run.player.hp + 20);
-    return { wheel: 'heal', text: `Field dressing. +${run.player.hp - before} HP.` };
+    return { wheel: 'heal', text: `+${run.player.hp - before} HP.` };
   }
   if (roll < 0.75) {
     const def = randomCommonRelic(owned, rng, run.chrId);
     return def ? { wheel: 'relic', artifact: def }
       : { wheel: 'relic', text: 'Nothing left in the sack. +100 chips.', chips: gainGold(100, run) };
   }
-  if (roll < 0.85) return { wheel: 'nothing', text: 'The wheel stops on nothing. The hunter shrugs.' };
+  if (roll < 0.85) return { wheel: 'nothing', text: 'The wheel stops on nothing.' };
   if (roll < 0.95) {
     const lost = Math.min(25, run.chips);
     run.chips -= lost;
-    return { wheel: 'lose', text: `A finder's fee, apparently. −${lost} chips.` };
+    return { wheel: 'lose', text: `A finder's fee. −${lost} chips.` };
   }
   if (run.artifacts.length) return { wheel: 'reforge', pickReforge: true };
   const def = rollEliteDrop(owned, 1, rng, run.chrId);
@@ -1102,7 +1104,7 @@ export function spinBountyWheel(run, rng = Math.random) {
 export const BOUNTY_REWARDS = [
   {
     id: 'bounty-chips', name: 'BLOOD MONEY', icon: 'icon_coins', tint: 0xffd23e, w: 1,
-    desc: 'Gain 200 chips.\nThe board pays for a dead boss.',
+    desc: 'Gain 200 chips.',
     apply(r) { gainGold(200, r); },
   },
   {
@@ -1114,7 +1116,7 @@ export const BOUNTY_REWARDS = [
     // if the whole top of the pool is already yours. (The floor was a Legendary
     // until the 2026-08-02 nerf pass; three bosses a run made that most of a
     // build before Act III.)
-    desc: 'A VERY RARE or better relic.\nWhatever the last hunter died carrying.',
+    desc: 'A VERY RARE or better relic.',
     apply(r) {
       const def = rollLegendaryPlus(r.artifacts.map(a => a.id), Math.random, r.chrId);
       return def ? { artifact: def } : { text: 'The cache is empty. +150 chips.', chips: gainGold(150, r) };
@@ -1122,7 +1124,7 @@ export const BOUNTY_REWARDS = [
   },
   {
     id: 'bounty-wheel', name: 'THE FORGE WHEEL', icon: 'icon_dice', tint: 0xb45cff, w: 1,
-    desc: 'One spin.\n25% MYTHIC · 50% fair · 20% sour · 5% RE-FORGE.',
+    desc: 'One spin: 25% MYTHIC · 50% fair · 20% sour · 5% RE-FORGE.',
     ui: 'wheel', segments: BOUNTY_WHEEL_SEGMENTS, landPools: BOUNTY_WHEEL_LANDS, wheelFont: 15,
     apply(r, _, rng = Math.random) { return spinBountyWheel(r, rng); },
   },
@@ -1164,12 +1166,12 @@ export const BOUNTY_REWARDS = [
   },
   {
     id: 'bounty-merchant', name: 'THE MERCHANT', icon: 'icon_coins', tint: 0xd8b830, w: 1,
-    desc: 'Visit a shop right now.\nHe set up camp on the way down.',
+    desc: 'Visit a shop right now.',
     apply() { return { shop: true }; },
   },
   {
     id: 'bounty-maxhp', name: 'HOT MEAL', icon: 'icon_heart_small', tint: 0x50e090, w: 1,
-    desc: '+15 Max HP, and heal 15. Eat it while it is hot.',
+    desc: '+15 Max HP, and heal 15.',
     apply(r) {
       r.player.maxHp += 15;
       r.player.hp = Math.min(r.player.maxHp, r.player.hp + 15);
@@ -1177,7 +1179,7 @@ export const BOUNTY_REWARDS = [
   },
   {
     id: 'bounty-slot', name: 'SPARE HOOK', icon: 'icon_key', tint: 0xffd23e, w: 0.3, rare: true,
-    desc: '+1 Relic slot. It is a hook. It was going spare.',
+    desc: '+1 Relic slot.',
     apply(r) { r.artifactSlots += 1; },
   },
 ];

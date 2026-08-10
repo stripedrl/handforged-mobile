@@ -1952,19 +1952,19 @@ export function describeEffect(e) {
   switch (e.type) {
     case 'attack': return `Attacks for ${e.value}`;
     case 'buff': return `Powers up: its NEXT attack hits +${e.value} harder`;
-    case 'charge': return 'Charging something big...';
+    case 'charge': return 'Charging: a bigger attack next turn';
     case 'bleed': return `Bleed ${e.value}: each hand you play costs ${e.value} HP, fading by 1`;
     case 'freeze': return `Freeze ${e.value}: ${e.value} random card${e.value > 1 ? 's' : ''} in your hand frozen for a turn`;
-    case 'brittle': return 'Brittle: you take +50% damage from every attack next turn';
+    case 'brittle': return 'Brittle: you take +50% damage from attacks next turn';
     case 'poison': return `Poison ${e.value}: ${e.value} HP at the end of every round, fading by 1`;
     case 'fear': return `Fear ${e.value}: your next hand may use ${Math.max(1, 5 - e.value)} cards at most`;
     case 'hypnotize': return 'Hypnotize: a random card is forced into your next hand';
     case 'suitban': return 'Eternal Keep: the wheel spins and one suit becomes unplayable';
     // --- the 2026-08-02 mechanics wave ---
     case 'rooted': return `Rooted ${e.value}: your hand is dealt 1 card smaller for ${turnWord(e.value)}`;
-    case 'courtLock': return `Court Adjourned: face cards (J, Q, K) cannot be PLAYED for ${turnWord(e.value)}. You may still discard them`;
+    case 'courtLock': return `Court Adjourned: J, Q, K cannot be PLAYED for ${turnWord(e.value)}. You may still discard them`;
     case 'suitSeal': return `Sealed Suit: one suit becomes unplayable for ${turnWord(e.value)}. You may still discard it`;
-    case 'spikes': return `Spikes +${e.value}: every hand you play costs you HP equal to your Spikes. They never fade on their own`;
+    case 'spikes': return `Spikes +${e.value}: every hand you play costs HP equal to your Spikes. Spikes never fade`;
     case 'shield': return e.target === 'ally'
       ? `Wards an ALLY for ${e.value}% of its own health`
       : `Wards itself for ${e.value}% of its own health`;
@@ -1985,22 +1985,22 @@ export function describeEffect(e) {
     // Every one of these is a TELEGRAPH: the intent icon shows the glyph, this
     // sentence is what the hover says, and the signature blurb shouts the
     // headline at the opening bell. A mechanic with no telegraph does not ship.
-    case 'blind': return `Blind ${e.value}: for ${e.value} turn${e.value > 1 ? 's' : ''}, cards you DRAW arrive FACE DOWN. Still playable, just unread`;
-    case 'fade': return `Fade ${e.value}: ${e.value} card${e.value > 1 ? 's start' : ' starts'} FADING for this fight. Every time a fading card scores it has a ${Math.round(FADE_VANISH_CHANCE * 100)}% chance to fade away from your deck forever`;
-    case 'condemn': return `Condemned: ${e.value} card${e.value > 1 ? 's are' : ' is'} branded. PLAY ${e.value > 1 ? 'them' : 'it'} within ${turnWord(CONDEMN_TURNS)} or ${e.value > 1 ? 'they burn' : 'it burns'} out of your deck for good. Discarding does not save it`;
+    case 'blind': return `Blind ${e.value}: for ${e.value} turn${e.value > 1 ? 's' : ''}, cards you DRAW arrive FACE DOWN. Still playable`;
+    case 'fade': return `Fade ${e.value}: ${e.value} card${e.value > 1 ? 's start' : ' starts'} FADING for this fight. A fading card scores no bonus and has a ${Math.round(FADE_VANISH_CHANCE * 100)}% chance to leave your deck forever each time it scores`;
+    case 'condemn': return `Condemned: ${e.value} card${e.value > 1 ? 's are' : ' is'} branded. PLAY ${e.value > 1 ? 'them' : 'it'} within ${turnWord(CONDEMN_TURNS)} or ${e.value > 1 ? 'they leave' : 'it leaves'} your deck for good. Discarding does not save it`;
     case 'burnPlayed': return 'Struck From The Record: every card you play is BURNED and cannot be played again this fight, even after a reshuffle';
-    case 'handTypeOnce': return 'Double Jeopardy: each hand type may be played ONCE for the whole fight. Play a Pair and you have played your only Pair';
+    case 'handTypeOnce': return 'Double Jeopardy: each hand type may be played ONCE for the whole fight';
     case 'demandHand': return `Sentence: it names the hand type you must play this turn. Bring it anything else and it costs you ${DEMAND_HAND_DAMAGE} HP`;
     case 'hangRelic': return 'The Queue: one of your relics is hanged and does nothing for the rest of the fight, chosen LEFT TO RIGHT';
     case 'wall': return 'Scaffold: it raises a wall and shows the ONE hand type that breaks it. Your damage does not reach it until the wall is down';
-    case 'unusedOnly': return 'Nothing Twice: she only takes damage from hand types you have NOT played yet this fight';
-    case 'forgetSuit': return 'Silkbound: she names a suit, and that suit deals her NOTHING. She names a new one every turn';
+    case 'unusedOnly': return 'Nothing Twice: she takes damage only from hand types you have NOT played yet this fight';
+    case 'forgetSuit': return 'Silkbound: she names a suit and that suit deals her NOTHING, until she names a new one';
     case 'mirrorHand': return `As You Did: it plays your last hand back at you, for ${MIRROR_HAND_PCT}% of what it dealt`;
     case 'shrinkHand': return `Reweave: your HAND SIZE drops by ${SHRINK_HAND_STEP} for the rest of the fight`;
     case 'dropHand': return 'Weightless: cards left in your hand at the end of the turn drift away and are gone for this fight';
     case 'healMirror': return 'Reflection: every point of HP you heal, it heals too';
     case 'cardTax': return `Pyre Tax: every hand you play costs ${CARD_TAX_PER_CARD} HP per card in it`;
-    case 'markCard': return 'He Sees It Coming: he marks your highest-VALUE card. Play the marked card and your whole hand deals him nothing';
+    case 'markCard': return 'He Sees It Coming: he marks your highest-VALUE card. Play it and your whole hand deals him nothing';
     default: return e.type;
   }
 }
@@ -2167,7 +2167,7 @@ export const SIGNATURES = {
   shatterguard: {
     tier: 'elite', name: 'SHATTERGUARD', ink: '#9adcff', icon: 'icon_shield',
     blurb: 'SHATTERGUARD: you gain NO Shield this fight',
-    rule: 'SHATTERGUARD: you gain NO Shield at all for the WHOLE fight, and killing it does not lift that. Every hand, relic and potion that would plate you is shattered to ◆0.',
+    rule: 'SHATTERGUARD: you gain NO Shield for the whole fight, from any source. Killing it does not lift that.',
   },
   feast: {
     tier: 'elite', name: 'FEAST', ink: '#ff6a76', icon: 'icon_drop',
@@ -2189,12 +2189,12 @@ export const SIGNATURES = {
   dreadGrip: {
     tier: 'elite', name: 'DREAD GRIP', ink: '#c9a0ff', icon: 'fx_leaf',
     blurb: `DREAD GRIP: ${DREAD_GRIP_POWER} fewer cards in hand, all fight`,
-    rule: `DREAD GRIP: the dark holds your hand shut. You are dealt ${DREAD_GRIP_POWER} fewer cards for the whole fight.`,
+    rule: `DREAD GRIP: you are dealt ${DREAD_GRIP_POWER} fewer cards for the whole fight.`,
   },
   rimeThorns: {
     tier: 'elite', name: 'RIME THORNS', ink: '#9adcff', icon: 'fx_star',
     blurb: `RIME THORNS: +${RIME_THORNS_ELITE} SPIKES every single turn`,
-    rule: `RIME THORNS: it drives ${RIME_THORNS_ELITE} more SPIKES into you every turn, on top of whatever else it does. Spikes never fade, and every hand you play costs HP equal to the stack.`,
+    rule: `RIME THORNS: +${RIME_THORNS_ELITE} SPIKES every turn, on top of whatever else it does. Spikes never fade, and every hand you play costs HP equal to the stack.`,
   },
   wakingWrath: {
     tier: 'elite', name: 'WAKING WRATH', ink: '#8fe098', icon: 'icon_hourglass',
@@ -2217,7 +2217,7 @@ export const SIGNATURES = {
   moonglare: {
     tier: 'elite', name: 'MOONGLARE', ink: '#bcd0ff', icon: 'icon_help',
     blurb: 'MOONGLARE: two cards go face down EVERY turn',
-    rule: 'MOONGLARE: it blinds two of your cards every turn, including its wind-up turns. Blinded cards are face down but still playable.',
+    rule: 'MOONGLARE: two of your cards go FACE DOWN every turn, wind-up turns included. They are still playable.',
   },
   silkbound: {
     tier: 'elite', name: 'SILKBOUND', ink: '#dfe4f0', icon: 'icon_refresh',
@@ -2234,12 +2234,12 @@ export const SIGNATURES = {
   reflection: {
     tier: 'elite', name: 'REFLECTION', ink: '#8fe098', icon: 'icon_heart_small',
     blurb: 'REFLECTION: every point you heal, it heals',
-    rule: 'REFLECTION: the pool gives back exactly what you take. Every point of HP you heal, it heals too. Shield is not healing, and it does not feed this.',
+    rule: 'REFLECTION: every point of HP you heal, it heals too. Shield is not healing and does not feed it.',
   },
   scaleDust: {
     tier: 'boss', name: 'SCALE DUST', ink: '#bcd0ff', icon: 'icon_help',
     blurb: 'SCALE DUST: your hand comes to you half unread',
-    rule: 'SCALE DUST: she sheds luminous dust every turn and two more of your cards turn FACE DOWN. Nothing is taken from you.',
+    rule: 'SCALE DUST: two more of your cards turn FACE DOWN every turn. They are still playable.',
   },
   courtSleeps: {
     tier: 'boss', name: 'THE COURT SLEEPS', ink: '#c9a2ff', icon: 'icon_lock',
@@ -2265,7 +2265,7 @@ export const SIGNATURES = {
   },
   stillness: {
     tier: 'elite', name: 'STILLNESS', ink: '#a8d8c8', icon: 'icon_hourglass',
-    blurb: `STILLNESS: untouchable while it sleeps, and it mends`,
+    blurb: 'STILLNESS: untouchable while it sleeps, and it mends',
     // The designed rule is "intangible every other turn, and heals while it
     // sleeps". The intangible half is EXACTLY the Frost Guardian's cadence, so
     // it borrows that machinery rather than growing a second copy of it; only
@@ -2311,17 +2311,17 @@ export const SIGNATURES = {
     tier: 'elite', name: 'CUT THEM DOWN', ink: '#ff9a50', icon: 'icon_skull',
     blurb: 'CUT THEM DOWN: it keeps cutting them loose',
     // Same correction as THE HUNT: the cut is on a fixed intent, not on a death.
-    rule: `CUT THEM DOWN: it opens with two of its dead already walking, and on each CUT turn it cuts the line back up to ${GALLOWS_CAP}. Clear them and they stay clear until the next cut.`,
+    rule: `CUT THEM DOWN: it opens with two of its dead already up, and each CUT turn refills the line to ${GALLOWS_CAP}. Nothing is replaced between cuts.`,
   },
   doubleJeopardy: {
     tier: 'boss', name: 'DOUBLE JEOPARDY', ink: '#ffc542', icon: 'icon_lock',
     blurb: 'DOUBLE JEOPARDY: each hand type may be played ONCE',
-    rule: 'DOUBLE JEOPARDY: every hand type may be played once for the whole fight. Play a Pair and you have played your only Pair. He also passes SENTENCE, naming the hand he expects next.',
+    rule: 'DOUBLE JEOPARDY: every hand type may be played once for the whole fight. He also passes SENTENCE, naming the hand he expects next.',
   },
   struckFromRecord: {
     tier: 'boss', name: 'STRUCK FROM THE RECORD', ink: '#ff7040', icon: 'icon_fire',
     blurb: 'STRUCK FROM THE RECORD: every card you play is BURNED',
-    rule: 'STRUCK FROM THE RECORD: every card you play is burned and can never be played again this fight, even after the discard pile reshuffles. A long fight eats your deck from the top down.',
+    rule: 'STRUCK FROM THE RECORD: every card you play is burned and cannot be played again this fight, reshuffles included.',
   },
   theQueue: {
     tier: 'boss', name: 'THE QUEUE', ink: '#ff9a50', icon: 'icon_gem',

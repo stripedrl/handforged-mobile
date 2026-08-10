@@ -81,6 +81,34 @@ export const HAND_DEFS = {
   fiveOfAKind: { name: 'Five of a Kind', base: 75, mult: 12, valueStep: 25, levelStep: 4, secret: true },
   flushHouse: { name: 'Flush House', base: 100, mult: 14, valueStep: 25, levelStep: 4, secret: true },
   flushFive: { name: 'Flush Five', base: 100, mult: 16, valueStep: 30, levelStep: 5, secret: true },
+  /**
+   * SIX OF A KIND (JC spec, 2026-08-10) — THE TOP OF THE LADDER.
+   *
+   * LAST IN THIS OBJECT ON PURPOSE. The ladder IS this object's key order
+   * (HAND_TYPES) and bestHandOf ranks by it, so the hand that outranks FLUSH
+   * FIVE has to sit after it. (The spec says "above flushFive"; above in POWER
+   * is after in key order, and the hands chart reads top-down in the same
+   * order, so it prints on the last row exactly where Flush Five prints today.)
+   *
+   * IT BRINGS NO MULT OF ITS OWN. `mult: 1` is the neutral element, not a
+   * number: what this hand does instead is SQUARE the finished mult, once, at
+   * the very end of the mult computation (scoring.js, step 8b — search
+   * squaresMult). A hand that also added mult would be paid twice.
+   *
+   * NO LEVELS. valueStep/levelStep are 0 and `noSmith` keeps it off every
+   * Smith path (offerableHandTypes, the Worn Anvil's forced offer, the
+   * Traveling Smith), so nothing can ever temper it. The Forge Eternal can
+   * still write a level onto it and it is inert by construction, which is the
+   * belt-and-braces version of the same rule.
+   *
+   * ONLY REACHABLE UNDER mods.ofAKindMinus1 (THE UNDERSTUDY, next wave): five
+   * of one rank counts as six. Flush Five routes here too — there is no
+   * FLUSH SIX, by design.
+   */
+  sixOfAKind: {
+    name: 'Six of a Kind', base: 100, mult: 1, valueStep: 0, levelStep: 0,
+    secret: true, noSmith: true, glitch: true, squaresMult: true,
+  },
 };
 
 /**
@@ -136,11 +164,27 @@ export function handPlayedThisRun(run, type) {
 }
 
 /**
+ * MAY THE SMITH TOUCH THIS HAND AT ALL?
+ *
+ * A separate question from "is it secret". SIX OF A KIND is a hand with no
+ * levels — no valueStep, no levelStep, nothing to sell — so it must never
+ * appear on the shelf even after the player has made one, and it must never be
+ * the Worn Anvil's forced offer or the Traveling Smith's free level. One
+ * predicate, read by all three, so a future levelless hand needs nothing but
+ * `noSmith: true` in its def.
+ */
+export function isSmithable(type) {
+  return !HAND_DEFS[type]?.noSmith;
+}
+
+/**
  * The hand types the SMITH may temper this run: every printed hand, plus any
- * secret this run has actually made. Ladder order.
+ * secret this run has actually made, minus anything that has no levels to sell.
+ * Ladder order.
  */
 export function offerableHandTypes(run) {
-  return HAND_TYPES.filter(t => !HAND_DEFS[t].secret || handPlayedThisRun(run, t));
+  return HAND_TYPES.filter(t => isSmithable(t)
+    && (!HAND_DEFS[t].secret || handPlayedThisRun(run, t)));
 }
 
 /** Card mods whose suit is "all of them" for hand evaluation. */
@@ -189,19 +233,45 @@ function isStraightRanks(ranks) {
 }
 
 /**
+ * THE UNDERSTUDY'S RULE (JC spec, 2026-08-10) — `mods.ofAKindMinus1`.
+ *
+ * Every RANK GROUP counts as one card larger, so an of-a-kind hand forms with
+ * one fewer card than it needs: 1 card = Pair, 2 = Three of a Kind, 3 = Four of
+ * a Kind, 4 = Five of a Kind, 5 of a rank = SIX OF A KIND. The card-count gates
+ * that guard the five-card-only types relax by the same one (`n + shift >= 5`),
+ * which is what lets a FOUR-card hand of one rank be a Five of a Kind at all.
+ *
+ * It changes CLASSIFICATION, never selection: hands are still played from up to
+ * five cards.
+ *
+ * WITHOUT THE FLAG shift is 0, `n + 0 >= 5` is `n === 5` (five is the maximum),
+ * and `maxCount >= 6` is unreachable — so evaluation is byte-identical to what
+ * it has always been. The existing suites are the proof.
+ */
+const shiftOf = (opts) => (opts?.ofAKindMinus1 ? 1 : 0);
+
+/**
  * Evaluate a played hand of 1-5 cards and return the highest qualifying
  * hand type with its display name and base scoring multiplier.
  * @param {Card[]} cards
+ * @param {{ofAKindMinus1?: boolean}} [opts]
  * @returns {HandResult}
  */
-export function evaluateHand(cards) {
+export function evaluateHand(cards, opts = {}) {
   if (!Array.isArray(cards) || cards.length < 1 || cards.length > 5) {
     throw new RangeError('evaluateHand: cards must be an array of 1-5 cards');
   }
 
   const n = cards.length;
-  const counts = Array.from(rankCounts(cards).values()).sort((a, b) => b - a);
+  const shift = shiftOf(opts);
+  // Every rank group counts as `shift` larger. Sorted BEFORE the shift, which
+  // is the same order after it (a constant added to every element).
+  const counts = Array.from(rankCounts(cards).values())
+    .sort((a, b) => b - a).map(c => c + shift);
   const maxCount = counts[0];
+  // "Does this hand have enough cards for a five-card type?" — one card fewer
+  // under the flag, so a four-card hand of one rank really is a Five of a Kind.
+  const hasFive = n + shift >= 5;
 
   // Wilds count as any suit: the non-wild cards must agree on one.
   const solid = cards.filter(c => !isWild(c));
@@ -214,7 +284,12 @@ export function evaluateHand(cards) {
   // maxCount is a count of REAL ranks, so a wild never donates a fifth King:
   // wilds are suit-wild only, which is what makes FLUSH FIVE the reachable one
   // (four dupes + a wild share a suit, five dupes share a rank).
-  if (n === 5 && maxCount === 5) return result(isFlush ? 'flushFive' : 'fiveOfAKind');
+  //
+  // SIX OF A KIND sits above both, and there is NO FLUSH SIX: five of one rank
+  // in one suit is a SIX OF A KIND and nothing else (JC, explicit). Asked
+  // first, so the flush variant below can never claim it.
+  if (maxCount >= 6) return result('sixOfAKind');
+  if (hasFive && maxCount === 5) return result(isFlush ? 'flushFive' : 'fiveOfAKind');
   if (isStraight && isFlush) return result('straightFlush');
   // FLUSH HOUSE (2026-08-06): a full house whose five cards also agree on a
   // suit. It has to be asked BEFORE quads and before the plain full house, or
@@ -224,7 +299,7 @@ export function evaluateHand(cards) {
   // known to be < 5 here, so `3 and 2` is an honest trips+pair.
   if (isFlush && counts[0] === 3 && counts[1] === 2) return result('flushHouse');
   if (maxCount >= 4) return result('quads');
-  if (n === 5 && counts[0] === 3 && counts[1] === 2) return result('fullHouse');
+  if (hasFive && counts[0] === 3 && counts[1] === 2) return result('fullHouse');
   if (isFlush) return result('flush');
   if (isStraight) return result('straight');
   if (maxCount === 3) return result('trips');
@@ -248,19 +323,20 @@ export function evaluateHand(cards) {
  * combination, which is 56 of them for a full eight-card hand.
  *
  * @param {Card[]} cards
+ * @param {{ofAKindMinus1?: boolean}} [opts] passed straight through to evaluateHand
  * @returns {HandResult}
  */
-export function bestHandOf(cards) {
+export function bestHandOf(cards, opts = {}) {
   if (!Array.isArray(cards) || cards.length < 1) {
     throw new RangeError('bestHandOf: need at least one card');
   }
-  if (cards.length <= 5) return evaluateHand(cards);
+  if (cards.length <= 5) return evaluateHand(cards, opts);
   let best = null;
   let bestRank = -1;
   const pick = [];
   const walk = (start) => {
     if (pick.length === 5) {
-      const hand = evaluateHand(pick);
+      const hand = evaluateHand(pick, opts);
       const rank = HAND_TYPES.indexOf(hand.type);
       if (rank > bestRank) { bestRank = rank; best = hand; }
       return;
@@ -309,9 +385,10 @@ export function mostPlayedHandType(run) {
  * matched ranks; high card uses only the single highest-ranked card.
  * @param {Card[]} cards
  * @param {HandResult} hand - result of evaluateHand(cards)
+ * @param {{ofAKindMinus1?: boolean}} [opts] the SAME flag evaluateHand was given
  * @returns {Set<string>}
  */
-export function scoringIds(cards, hand) {
+export function scoringIds(cards, hand, opts = {}) {
   const all = () => new Set(cards.map((c) => c.id));
   switch (hand.type) {
     case 'straight':
@@ -321,13 +398,18 @@ export function scoringIds(cards, hand) {
     case 'fiveOfAKind':
     case 'flushHouse':
     case 'flushFive':
+    case 'sixOfAKind':
       return all();
     case 'quads':
     case 'trips':
     case 'pair':
     case 'twoPair': {
       const counts = rankCounts(cards);
-      const need = hand.type === 'quads' ? 4 : hand.type === 'trips' ? 3 : 2;
+      // The SAME shift the classification used, or the hand would be named for
+      // one rule and scored by another: under the flag a Pair needs one card
+      // of a rank, so every card in the hand forms it.
+      const shift = shiftOf(opts);
+      const need = (hand.type === 'quads' ? 4 : hand.type === 'trips' ? 3 : 2) - shift;
       const ids = new Set();
       for (const c of cards) {
         if ((counts.get(c.rank) ?? 0) >= need) ids.add(c.id);

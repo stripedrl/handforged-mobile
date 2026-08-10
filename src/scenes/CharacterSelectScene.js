@@ -1,4 +1,5 @@
 import { GAME_W, GAME_H, DEPTH, CHARACTERS, SUIT_COLORS, SUIT_PIP_KEY, PARCH, applyMobileCamera } from '../config.js';
+import { installPointerPolicy } from '../ui/pointer.js';
 import { installLongPress } from '../ui/touch.js';
 import { woodPanel } from '../ui/panels.js';
 import { addTavernBackdrop } from '../ui/tavern.js';
@@ -55,6 +56,7 @@ export class CharacterSelectScene extends Phaser.Scene {
   create() {
     applyMobileCamera(this);   // no-op on desktop
     installLongPress(this);    // hold = hover on touch; no-op on desktop
+    installPointerPolicy(this);   // right-click never acts, anywhere
     // Phaser scenes are SINGLETONS: a second visit re-runs create() on the same
     // instance, so every flag the picker sets has to be cleared right here.
     this.picker = null;

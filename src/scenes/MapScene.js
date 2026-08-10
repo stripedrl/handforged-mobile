@@ -7,8 +7,19 @@
  * overlays right here. All persistent state lives in core/run.js.
  */
 
-import { GAME_W, GAME_H, DEPTH, PARCH, COLORS, CHARACTERS, SUIT_COLORS, PARTICLE_VARIANTS, applyMobileCamera, MOBILE } from '../config.js';
+import {
+  GAME_W, GAME_H, DEPTH, PARCH, COLORS, CHARACTERS, SUIT_COLORS, PARTICLE_VARIANTS, applyMobileCamera, MOBILE,
+  // THE TWO SWITCHES (config.js v3). MOBILE is the finger — every `MOBILE ?` in
+  // this file is a thumb-size bump and stays one. TOUCH is the same boolean read
+  // by its true name where the TWO-TAP MODEL is what is being asked about; WIDE
+  // is the 2340 canvas, which a tablet does NOT get even though it is all
+  // finger. SAFE / clearsCorners are the rounded-glass frame.
+  TOUCH, WIDE, SAFE, clearsCorners,
+} from '../config.js';
 import { woodPanel } from '../ui/panels.js';
+// THE SHARED DESCRIPTION BOX — the one idiom behind every icon on this screen
+// whose information is hidden. See ui/choicebox.js for why hold-to-hover died.
+import { twoTap, openChoiceBox } from '../ui/choicebox.js';
 import {
   run, chr, advanceAct, newActMap, effectiveArtifacts, removalPrice, boosterPrice, mirrorBlockedBy,
   sellValue, sellArtifact, beltArtifacts, nookArtifacts, slotsUsed, gainGold, enterMapNode,
@@ -55,6 +66,12 @@ import { getProp } from '../core/artifacts.js';
 import { stageForMap, fetchStage } from '../core/stages.js';
 import { kineticScroll } from '../ui/kinetic.js';
 import { installLongPress, tapBind } from '../ui/touch.js';
+import { installPointerPolicy } from '../ui/pointer.js';
+import { installCardInspect } from '../ui/inspect.js';
+import { CardSprite } from '../ui/CardSprite.js';
+// The node art tables, and the read-only chart that shares them. See mapPeek.js
+// for why they live over there.
+import { NODE_STYLE, FORGED_STYLE } from '../ui/mapPeek.js';
 // DEFERRED ART (core/lazyload.js). The board, the banner and the backdrop this
 // scene is made of are the biggest single bundle in the game and they belong to
 // ONE world, so they are fetched on arrival instead of at boot.
@@ -87,10 +104,85 @@ const ROW_GAP = 150;
  * COMBAT DOES NOT GET THIS. Its top-right corner is the potion mat, already
  * 200px in from the edge, and pushing it further would put it on the boss
  * marquee.
+ *
+ * 2026-08-10: the 92 above was this scene's private guess at the number, and the
+ * number is now SHARED — config.js SAFE.x is 96, measured the same way, and the
+ * settings cog and the DISCARD/SORT plates in combat are pinched by the same
+ * constant. Rebasing on it moves this HUD 4px. SAFE.y (24) is the VERTICAL half
+ * the old constant never had: a landscape phone rounds its corners on BOTH axes,
+ * so a plate 42px from the top edge and 96 from the side is still inside the arc.
  */
-const HUD_SAFE = MOBILE ? 92 : 0;
+const HUD_SAFE = SAFE.x;
 /** Left-column x, pinched. Every plate and glyph in the capsule reads through it. */
 const LX = (x) => x + HUD_SAFE;
+
+/**
+ * TAP, NOT CLICK (JC, 2026-08-10). Every player-facing verb on this screen forks
+ * through here rather than through a `MOBILE ?` at the call site, so the desktop
+ * string is provably the byte it always was and a straggler is a grep away.
+ */
+const say = (mouse, touch) => (TOUCH ? touch : mouse);
+
+/**
+ * THE MAP'S TYPE + PLATE SCALE, in ONE table (JC, 2026-08-10: "scale up text and
+ * icons wherever real estate allows" — and, explicitly, in a table rather than
+ * as thirty magic numbers, the way CombatScene's ENEMY_HUD and BOSS_BAR already
+ * work).
+ *
+ * The desktop column is the shipped number, to the pixel, in every row. The
+ * touch column is ~15-25% up, which is what a 2340-wide canvas held at arm's
+ * length actually needs, with the hit targets that carry them grown to a thumb.
+ * Anything NOT in here is either already thumb-sized (the service plates, the
+ * event choices, RESTOCK) or is a heading nobody has trouble reading.
+ */
+const MAP_TYPE = {
+  // ---- the left capsule ----
+  heroName: TOUCH ? 30 : 25,
+  heroHp: TOUCH ? 28 : 24,
+  heroChips: TOUCH ? 27 : 24,
+  heroDeck: TOUCH ? 23 : 20,
+  heroMode: TOUCH ? 21 : 18,
+  // ---- the right column + the mat ----
+  beltOrdinal: TOUCH ? 17 : 13,
+  gloveLabel: TOUCH ? 16 : 13,
+  potionsLabel: TOUCH ? 22 : 15,
+  potionIcon: TOUCH ? 72 : 52,
+  // ---- the two viewer plates under the capsule ----
+  viewerFont: TOUCH ? 23 : 20,
+  viewerH: TOUCH ? 60 : 54,
+  deckW: TOUCH ? 196 : 180,
+  handsW: TOUCH ? 134 : 120,
+  handsX: TOUCH ? 288 : 268,
+  // ---- the board's own furniture ----
+  scrollHint: TOUCH ? 23 : 19,
+  devHint: TOUCH ? 17 : 15,
+  // ---- the merchant's tent ----
+  shopPrice: TOUCH ? 36 : 30,
+  shopName: TOUCH ? 25 : 21,
+  shopRarity: TOUCH ? 18 : 15,
+  shopMatLabel: TOUCH ? 20 : 17,
+  // The SELL tab was 14px ink on a 20px plate — unreadable AND untappable. On
+  // touch it stops being a button at all (the potion's box carries SELL) and
+  // becomes a legible PRICE LABEL; desktop keeps the tab it always had.
+  sellTab: TOUCH ? 18 : 14,
+  sellTabH: TOUCH ? 30 : 20,
+  sellTabPad: TOUCH ? 26 : 14,
+};
+
+/**
+ * ONE LINE ABOUT EACH ROOM, for the two-tap box. The hover tip could get away
+ * with a bare noun ("Fight") because a mouse is already resting on the icon and
+ * a click is cheap; a box that exists specifically so nothing commits on first
+ * touch has to answer "what am I walking into" before it offers TRAVEL.
+ */
+const NODE_DESC = {
+  fight: 'A monster on the road. Beat it and the spoils are yours.',
+  elite: 'A harder fight than the road asks for. Its spoils always hold a relic.',
+  event: 'Something is waiting up here. It could go either way.',
+  rest: 'A fire to sleep by, a whetstone for one card, or a card to burn.',
+  shop: 'The merchant\'s tent: relics on the mat, bottles under them, a booster to buy.',
+};
+const MYTHIC_DESC = 'Whatever is up here is worse than the road deserves, and pays like it.';
 
 /**
  * THE LEFT CAPSULE — hero, HP, chips, deck, mode, and the chip column under
@@ -126,7 +218,12 @@ export const SHOP_RELIC_STOCK = 2;
  * spend the extra 420px on decorative wings, so the layout math is untouched
  * and the wings are where the pinched-in HUD (see HUD_SAFE) now sits.
  */
-const BOARD_W = MOBILE ? GAME_W : 1920;
+// WIDE, not MOBILE: Caleb's wide cuts are 2340-wide paintings and exist for the
+// 2340 canvas alone. A TABLET is every bit as much finger as a phone but takes
+// the 1920 canvas, and stretching a wide board across it would letterbox the
+// node band off its own frame. (One of the two lines in the tree that genuinely
+// meant "the wide canvas"; the other is core/lazyload.js's boardKeyFor.)
+const BOARD_W = WIDE ? GAME_W : 1920;
 const W_USE = 1500;        // band the nodes actually occupy (clear of frame art)
 
 /**
@@ -159,41 +256,10 @@ const BOARD_INK = {
 };
 const INK_DEFAULT = { trail: 1, ring: 1, dot: null };
 
-// Node icons are Caleb's painted set — big, disc-free, with cast shadows.
-const NODE_STYLE = {
-  fight: { icon: 'map_battle', ring: 0xffd23e, label: 'Fight', r: 40 },
-  elite: { icon: 'map_elite', ring: 0xff6a76, label: 'ELITE: the spoils always hold a relic', r: 50 },
-  event: { icon: 'map_event', ring: 0xc9a2ff, label: 'Unknown...', r: 40 },
-  rest: { icon: 'map_campfire', ring: 0xffb050, label: 'Rest Site', r: 42 },
-  shop: { icon: 'map_merchant', ring: 0xffd23e, label: 'Merchant', r: 42 },
-};
-
-/**
- * THE FORGED ELITE (JC, PATCH 0803 §2), dressed in the Crimson Forge's language.
- *
- * The brief was blunt: "the map must make it obvious BEFORE the player commits",
- * and routing toward or around one has to be a real decision made off the board
- * alone. So a Forged node gets FOUR separate tells, on the theory that a player
- * who misses one will not miss all four:
- *
- *   1. it is BIGGER than the elite beside it (FORGED_R against elite's 50)
- *   2. it burns — an ember aura pulsing at nearly twice the speed of the
- *      ordinary elite's dull menace, in the mythic's red rather than its maroon
- *   3. it wears an ANVIL sigil pinned to its shoulder, which no other node has
- *   4. it is LABELLED. The word FORGED is printed under it, permanently, in
- *      ember on cream. Nothing else on the board carries a caption.
- *
- * ...and the hover then spends the two sentences needed to say WHY you might
- * want to walk into it anyway, with the numbers read out of core/map.js so the
- * copy cannot drift away from the fight it is describing.
- */
-const FORGED_STYLE = {
-  icon: 'map_elite', ring: 0xff8a2a, r: 68,
-  label: 'FORGED ELITE',
-  tint: 0xffb070,
-  aura: 0xff3a10,
-  caption: '#ffb04a',
-};
+// THE NODE STYLE TABLES MOVED (2026-08-10) to ui/mapPeek.js, which draws the
+// same board READ-ONLY from inside a fight. They live there and not here
+// because MapScene already imports ui/rewards.js and rewards.js now wants the
+// MAP button, so a ui -> scene edge would close that cycle.
 const forgedPct = (m) => `${Math.round((m - 1) * 100)}%`;
 /** Named the danger first, then the payoff. Both are the reason it exists. */
 const FORGED_BLURB =
@@ -255,6 +321,14 @@ export class MapScene extends Phaser.Scene {
   buildScene() {
     applyMobileCamera(this);   // no-op on desktop
     installLongPress(this);    // hold = hover on touch; no-op on desktop
+    installPointerPolicy(this);   // right-click never acts, anywhere
+    // The map opens deck pickers (HONE, PURGE, the merchant's removal), pack
+    // tables and the deck viewer, and every card on all of them answers the
+    // same hold/right-click as a card in the fan does. Nothing on this scene is
+    // a HAND card, so the only inspectable sprites are the picker's own.
+    installCardInspect(this, (obj) => (obj instanceof CardSprite && obj.getData?.('picker')
+      ? { card: obj.card, sprite: obj, depth: obj.depth + 4 }
+      : null));
     this.busy = false;   // scenes are reused across restarts — always re-arm input
     // ...and so are these four: all died with the last create()'s display list,
     // and a kept handle would let a pointerout destroy an object that is gone.
@@ -278,7 +352,26 @@ export class MapScene extends Phaser.Scene {
     // it. The settings panel itself opens at +30, over this.
     // ...pinched in from the top-right corner on the phone, with the belt it
     // sits above (see HUD_SAFE). Desktop passes the shipped default.
-    addSettingsButton(this, GAME_W - 44 - HUD_SAFE, 42, DEPTH.overlay + 20);
+    //
+    // THE COG WAS THE WORST OFFENDER (JC, 2026-08-10: "basically clipped"), and
+    // the reason is that it is the only thing on this screen that lives in the
+    // corner ITSELF rather than along an edge — where the glass is cut on the
+    // DIAGONAL and an edge inset buys nothing. It is 66px on touch, so its box
+    // is 66x66 about the centre passed here; at (GAME_W-SAFE.x-52, SAFE.y+54)
+    // that box is 2159..2225 x 45..111 on the 2340 canvas, whose farthest point
+    // from the top-right arc's centre (2190,150) is 111px against a 150 radius
+    // — comfortably inside the glass. clearsCorners() below is the assertion,
+    // and __hf.safe() hands the driver the same numbers.
+    const cog = TOUCH
+      ? addSettingsButton(this, GAME_W - SAFE.x - 52, SAFE.y + 54, DEPTH.overlay + 20)
+      : addSettingsButton(this, GAME_W - 44 - HUD_SAFE, 42, DEPTH.overlay + 20);
+    // It names itself for the same reason VIEW DECK does: five drivers had its
+    // old coordinates typed into them (see __hf.buttons).
+    cog.setData('hfLabel', 'SETTINGS');
+    this._cogClear = clearsCorners({
+      left: cog.x - cog.displayWidth / 2, right: cog.x + cog.displayWidth / 2,
+      top: cog.y - cog.displayHeight / 2, bottom: cog.y + cog.displayHeight / 2,
+    });
 
     // Autonomous-playtest hooks.
     window.__hfScene = 'map';
@@ -513,14 +606,20 @@ export class MapScene extends Phaser.Scene {
       // into them broke at once. They carry a `label` now, so a driver can name
       // the button it wants instead of remembering where it used to be.
       // `label` is null for everything else, which is every overlay plate.
+      // ...and the same walk now reports the SETTINGS COG, which is not a
+      // `btn_` plate but IS the one control a corner-clearance driver has to be
+      // able to find by name. Every plate the two-tap box draws is a `btn_`
+      // image on the display list, so those come back for free.
       buttons: () => {
+        const NAMED = { icon_setting: 'SETTINGS' };
         const out = [];
         const walk = (o) => {
           if (!o) return;
-          if (o.texture && /^btn_/.test(o.texture.key ?? '') && o.input?.enabled) {
+          const key = o.texture?.key ?? '';
+          if (o.texture && (/^btn_/.test(key) || key in NAMED) && o.input?.enabled) {
             const m = o.getWorldTransformMatrix();
             out.push({
-              key: o.texture.key, label: o.getData?.('hfLabel') ?? null,
+              key, label: o.getData?.('hfLabel') ?? NAMED[key] ?? null,
               x: Math.round(m.tx), y: Math.round(m.ty),
               w: Math.round(o.displayWidth), h: Math.round(o.displayHeight),
             });
@@ -530,6 +629,35 @@ export class MapScene extends Phaser.Scene {
         this.children.list.forEach(walk);
         return out;
       },
+      /**
+       * THE TWO-TAP BOX, as the driver sees it. ui/choicebox.js publishes
+       * `window.__hfBox` whenever one is open (title, body, note, the plate
+       * rectangles and a `press(label)` that goes through the same path a
+       * finger does); this is just the stable door onto it, so a driver never
+       * has to know which module owns the global.
+       */
+      box: () => window.__hfBox ?? { open: false },
+      /**
+       * THE FIRST TAP ON A NODE, performed. The whole point of the model is
+       * that touching a room does NOT enter it, and a driver cannot prove a
+       * negative by clicking a coordinate and hoping. This opens exactly the
+       * box `twoTap` would have opened — same spec object, same guard — and
+       * travels nowhere, so the assertion is "the box is up AND run.map.currentId
+       * did not move".
+       *
+       * Touch builds only, by construction: on desktop no spec was ever
+       * registered, and it says so rather than pretending.
+       */
+      tapNode: (id) => {
+        const taps = this._nodeTaps ?? {};
+        const spec = taps[id];
+        if (!spec) return { ok: false, touch: TOUCH, ids: Object.keys(taps) };
+        if (spec.guard && spec.guard() === false) return { ok: false, id, refused: true };
+        openChoiceBox(this, spec);
+        return { ok: true, id, box: window.__hfBox };
+      },
+      /** The rounded-glass frame this scene laid itself out inside. */
+      safe: () => ({ ...SAFE, hudSafe: HUD_SAFE, cogClearsCorners: this._cogClear !== false }),
       music: () => musicDebug(),
       sounds: () => this.sound.sounds.map(s => ({ key: s.key, playing: s.isPlaying, volume: s.volume })),
       reforgeNow: () => artifactPickerOverlay(this, run, {}, (a) =>
@@ -823,6 +951,9 @@ export class MapScene extends Phaser.Scene {
 
   buildScrollingMap() {
     this.mapLayer = this.add.container(0, 0).setDepth(DEPTH.arena);
+    // The two-tap specs, by node id — rebuilt with the board, so __hf.tapNode
+    // can never hand a driver last restart's dead anchor. Empty on desktop.
+    this._nodeTaps = {};
 
     // Caleb's painted biome board IS the map surface (frame, texture and all).
     // One board per WORLD, keyed off its ambience (which is 1:1 with the world).
@@ -969,7 +1100,29 @@ export class MapScene extends Phaser.Scene {
       this.tweens.add({ targets: g, scale: 1.04, duration: 120 });
     });
     sprite.on('pointerout', () => { this.hideTip(); this.tweens.add({ targets: g, scale: 1, duration: 120 }); });
-    sprite.on('pointerdown', () => { if (canFight) this.tryEnter(map.bossId); });
+
+    // THE MEDALLION IS 240px OF BOSS HEAD and it committed on a RAW pointerdown
+    // — it never went through tapBind at all, so on the phone a thumb brushing
+    // the summit started the act boss. It gets the two-tap box like every other
+    // hidden-information icon: the first touch reads the mechanic, FIGHT is the
+    // only thing that walks in. Desktop keeps its raw pointerdown, untouched.
+    const commit = () => { if (canFight) this.tryEnter(map.bossId); };
+    if (TOUCH) {
+      const spec = {
+        key: 'node:boss',
+        anchor: () => ({ x: pos.x, y: pos.y + this.mapLayer.y, w: SIZE, h: SIZE }),
+        title: `${boss.name}  ·  ${this.act.mechanic}`,
+        body: boss.blurb,
+        accent: 0xc02030,
+        guard: () => canFight,
+        buttons: [{ label: 'FIGHT', kind: 'danger', onClick: commit }],
+      };
+      twoTap(this, sprite, spec);
+      (this._nodeTaps ??= {})[map.bossId] = spec;
+      this._nodeTaps.boss = spec;
+    } else {
+      sprite.on('pointerdown', commit);
+    }
   }
 
   buildNodes() {
@@ -1062,20 +1215,49 @@ export class MapScene extends Phaser.Scene {
 
       const clickable = () => isOpen || settings.dev;
       icon.setInteractive({ useHandCursor: isOpen });
+      const label = mythic ? 'Something glows RED out here...' : style.label;
       icon.on('pointerover', () => {
         if (!node.visited || isCurrent) {
-          const label = mythic ? 'Something glows RED out here...' : style.label;
           // A FORGED node is the one hover on the board that has to SELL a
           // decision, so it spends the body text on what it costs and what it
           // pays instead of on "click to travel".
-          const travel = isOpen ? 'Click to travel' : settings.dev ? 'DEV: click to teleport' : null;
+          const travel = isOpen ? say('Click to travel', 'Tap to travel')
+            : settings.dev ? say('DEV: click to teleport', 'DEV: tap to teleport') : null;
           const body = forged ? `${FORGED_BLURB}${travel ? `\n${travel}` : ''}` : travel;
           this.showTip(pos.x, pos.y + this.mapLayer.y - r - 18, label, body);
         }
         if (clickable()) this.tweens.add({ targets: g, scale: 1.14, duration: 110 });
       });
       icon.on('pointerout', () => { this.hideTip(); this.tweens.add({ targets: g, scale: 1, duration: 110 }); });
-      tapBind(this, icon, () => { if (clickable()) this.tryEnter(node.id); });
+
+      // TRAVEL IS THE MISCLICK JC NAMED FIRST. The board is a field of 80px
+      // icons with a scrolling drag living on top of them, and entering the
+      // wrong room is not undoable — so on touch the icon opens the box that
+      // says which room it is, and TRAVEL is the only thing that walks. Desktop
+      // keeps the exact tapBind it has always had.
+      const commit = () => { if (clickable()) this.tryEnter(node.id); };
+      if (TOUCH) {
+        // The anchor is read at OPEN time, not at build time: the board scrolls
+        // under a fixed box, so `pos` alone is a board coordinate and only
+        // `+ this.mapLayer.y` makes it the screen rectangle the box sits beside
+        // (the same idiom the hover tip above uses).
+        const spec = {
+          key: `node:${node.id}`,
+          anchor: () => ({ x: pos.x, y: pos.y + this.mapLayer.y, w: r * 2.2, h: r * 2.2 }),
+          title: label,
+          body: forged ? FORGED_BLURB
+            : mythic ? MYTHIC_DESC
+              : (NODE_DESC[node.type] ?? style.label),
+          note: isOpen ? null : settings.dev ? 'DEV: not on your road. Teleporting anyway.' : null,
+          accent: style.ring,
+          guard: () => clickable(),
+          buttons: [{ label: 'TRAVEL', kind: 'go', onClick: commit }],
+        };
+        twoTap(this, icon, spec);
+        this._nodeTaps[node.id] = spec;
+      } else {
+        tapBind(this, icon, commit);
+      }
     }
 
     // The hero always stands ON TOP of neighboring node discs.
@@ -1185,50 +1367,48 @@ export class MapScene extends Phaser.Scene {
    */
   /**
    * THE TWO-STEP TAP (JC, 2026-08-04, mobile): first tap reads the bottle and
-   * offers DRINK; tapping anywhere else lets go. The catcher spans the whole
-   * widened canvas, rails included.
+   * offers DRINK; tapping anywhere else lets go.
+   *
+   * 2026-08-10 — SAME STEP, SHARED BOX. This was the game's FIRST two-step, and
+   * it was right; what was wrong is that it was the ONLY one, hand-rolled, with
+   * its own panel, its own full-screen catcher and its own idea of where a
+   * confirm belongs. Now that every hidden-information icon on this screen wears
+   * the same box (ui/choicebox.js), the potion mat has no business wearing a
+   * different one — a player who learns "tap reads, the labelled plate acts"
+   * on the belt must not have to learn it again on the mat.
+   *
+   * Two behaviours quietly improve on the way across: the box places itself
+   * BESIDE the bottle instead of at a fixed right-edge x (so it never lands
+   * under the thumb that summoned it), and browsing bottle-to-bottle is one tap
+   * per bottle rather than two, because the shared box has no catcher to eat the
+   * press aimed at the next one.
+   *
+   * THE NAME AND `_potConfirm` SURVIVE ON PURPOSE: tools/verify_mobile.py reads
+   * the field and looks for text reading exactly DRINK / CANCEL / USE, and the
+   * box prints its labels uppercase, so the driver sees what it always saw.
    */
   confirmMapPotion(pot, x, y) {
     this.hideTip();
-    if (this._potConfirm) { this._potConfirm.destroy(true); this._potConfirm = null; }
-    const ov = this.add.container(0, 0).setDepth(DEPTH.overlay + 6);
-    this._potConfirm = ov;
-    const close = () => { if (this._potConfirm === ov) this._potConfirm = null; ov.destroy(true); };
-    const catcher = this.add.rectangle(GAME_W / 2, GAME_H / 2,
-      GAME_W + 20, GAME_H + 20, 0x14101c, 0.001).setInteractive();
-    catcher.on('pointerdown', close);
-    ov.add(catcher);
-    const w = 360, h = 300;
-    const tx = GAME_W - w / 2 - 26;
-    const ty = Phaser.Math.Clamp(y - 220, h / 2 + 12, GAME_H - h / 2 - 12);
-    const parts = woodPanel(this, tx, ty, w, h, { shadow: true, accent: POTION_RARITY[pot.rarity]?.color });
-    ov.add([parts.shadow, parts.panel, parts.line]);
-    ov.add(this.add.text(tx, ty - h / 2 + 28, pot.name, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: PARCH.text,
-    }).setOrigin(0.5));
-    ov.add(this.add.text(tx, ty - h / 2 + 50, pot.desc, {
-      fontFamily: '"Baloo 2"', resolution: 2, fontSize: '18px', color: PARCH.textDim, fontStyle: 'bold',
-      wordWrap: { width: w - 44 }, align: 'center',
-    }).setOrigin(0.5, 0));
-    const btn = this.add.image(tx, ty + h / 2 - 96, 'btn_green')
-      .setDisplaySize(220, 58).setInteractive({ useHandCursor: true });
-    const bt = this.add.text(tx, ty + h / 2 - 100, 'DRINK', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: '#0c3d18',
-    }).setOrigin(0.5);
-    ov.add(btn); ov.add(bt);
-    btn.on('pointerdown', () => {
-      sfx(this, 'button', { volume: 0.8 });
-      close();
-      this.drinkPotionHere(pot, x, y);
+    const usable = potionUsableIn(pot, 'map');
+    const ov = openChoiceBox(this, {
+      key: `potion:${pot.id ?? pot.name}`,
+      anchor: { x, y, w: MAP_TYPE.potionIcon, h: MAP_TYPE.potionIcon },
+      title: pot.name,
+      body: pot.desc,
+      note: usable ? null : pot.use === 'passive' ? 'Always working. Nothing to drink.' : 'Combat only.',
+      accent: POTION_RARITY[pot.rarity]?.color,
+      depth: DEPTH.overlay + 6,
+      buttons: [
+        { label: 'DRINK', kind: 'go', enabled: usable, onClick: () => this.drinkPotionHere(pot, x, y) },
+        // ...and a spelled-out way back (JC, 2026-08-05). Tapping the parchment
+        // or anywhere off the box does the same thing; the plate is for the
+        // player who wants to be told there IS a way back.
+        { label: 'CANCEL', kind: 'off', onClick: () => {} },
+      ],
+      onClose: () => { if (this._potConfirm === ov) this._potConfirm = null; },
     });
-    // ...and a spelled-out way back (JC, 2026-08-05).
-    const cbtn = this.add.image(tx, ty + h / 2 - 34, 'btn_dark')
-      .setDisplaySize(220, 52).setInteractive({ useHandCursor: true });
-    const cbt = this.add.text(tx, ty + h / 2 - 38, 'CANCEL', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '22px', color: '#cfc8e8',
-    }).setOrigin(0.5);
-    ov.add(cbtn); ov.add(cbt);
-    cbtn.on('pointerdown', () => { sfx(this, 'card_deselect', { volume: 0.5 }); close(); });
+    this._potConfirm = ov;
+    return ov;
   }
 
   drinkPotionHere(pot, x, y, { after = null } = {}) {
@@ -1349,27 +1529,29 @@ export class MapScene extends Phaser.Scene {
     hero.setScale(92 / Math.max(hero.width, hero.height));
     hud.add(hero);
     hud.add(this.add.text(LX(130), 52, chr().name, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '25px', color: PARCH.text,
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.heroName}px`, color: PARCH.text,
     }).setOrigin(0, 0.5));
     const p = run.player;
     hud.add(this.add.text(LX(130), 90, `♥ ${p.hp}/${p.maxHp}`, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: '#1d7a56',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.heroHp}px`, color: '#1d7a56',
     }).setOrigin(0, 0.5));
     // Kept on the scene: the BANKER'S VAULT's dividend lands while the map is
     // still standing, and a purse that pays you 100 chips in front of a counter
     // still reading the old number is a payout nobody believes.
     this.hudChips = this.add.text(LX(130), 126, `◉ ${run.chips} chips`, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: PARCH.accent,
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.heroChips}px`, color: PARCH.accent,
     }).setOrigin(0, 0.5);
     hud.add(this.hudChips);
     hud.add(this.add.text(LX(130), 162, `Deck: ${run.runDeck.length} cards`, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: PARCH.textDim,
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.heroDeck}px`, color: PARCH.textDim,
     }).setOrigin(0, 0.5));
     // The mode you chose, quiet and always there. Small on purpose: it is a
     // reminder, not a banner.
+    // The extra 4px of drop on touch is the price of the bigger deck row above
+    // it: 23px ink on a 26px pitch would have the two lines touching.
     const mode = difficultyOf(run);
-    hud.add(this.add.text(LX(130), 188, mode.name, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '18px', color: mode.ink,
+    hud.add(this.add.text(LX(130), TOUCH ? 192 : 188, mode.name, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.heroMode}px`, color: mode.ink,
     }).setOrigin(0, 0.5));
     // THE CHIP COLUMN, under the hero's face — the one box inside the capsule
     // that nothing in the hero block reaches: the portrait bottoms out at y
@@ -1394,8 +1576,14 @@ export class MapScene extends Phaser.Scene {
     // hang in their own pouch under the column.
     // MOBILE (v2): same right-edge column, a size up for thumbs.
     // ...and the RIGHT column pinches by the same inset, for the same corner.
+    // ...and DOWN by SAFE.y as well as in by SAFE.x (2026-08-10). The column was
+    // pinched horizontally only, which left the topmost 72px cell with its lid
+    // 96px from the top edge — fine along a flat edge, and 24px inside the arc
+    // in the corner it actually lives in. At (GAME_W-180, 156) on the 2340
+    // canvas the top cell's box is 2124..2196 x 120..192, whose farthest point
+    // from the corner centre (2190,150) is 31px against a 150 radius.
     const beltX = (MOBILE ? GAME_W - 84 : GAME_W - 68) - HUD_SAFE;
-    const beltY0 = 132;
+    const beltY0 = 132 + SAFE.y;
     const BELT_PITCH = MOBILE ? 84 : 64;
     const belt = beltArtifacts();
     const cells = Math.max(run.artifactSlots, belt.length);
@@ -1501,19 +1689,47 @@ export class MapScene extends Phaser.Scene {
         // Hover reads it, click sells it — the tip dies on the click so the two
         // never argue over the same corner of the screen.
         const artRar = ARTIFACT_RARITY[art.rarity];
+        const REORDER_HINT = 'Drag to reorder. The top of this column resolves first.';
         const showBeltTip = () => this.showTip(beltX - 40, icon.y, art.name,
           `${artRar?.label ?? ''}\n` + artifactTipBody(art)
-          + (art.onSell ? `\n\nClick to sell for ◉ ${sellValue(art)}. Its gift leaves with it.`
-            : `\n\nClick to sell for ◉ ${sellValue(art)}`)
-          + '\n\nDrag to reorder. The top of this column resolves first.', 1, !!artRar?.rainbow);
+          + (art.onSell ? `\n\n${say('Click', 'Tap')} to sell for ◉ ${sellValue(art)}. Its gift leaves with it.`
+            : `\n\n${say('Click', 'Tap')} to sell for ◉ ${sellValue(art)}`)
+          + `\n\n${REORDER_HINT}`, 1, !!artRar?.rainbow);
         // A carried relic sweeps over its neighbours; while something is in the
         // air the column holds still and says nothing.
         const quiet = () => !this._beltDragging;
         box.setInteractive({ useHandCursor: true });
         box.on('pointerover', () => quiet() && showBeltTip());
         box.on('pointerout', () => this.hideTip());
-        if (MOBILE) tapBind(this, box, () => { if (quiet()) { this.hideTip(); this.sellPrompt(art); } });
-        else box.on('pointerdown', () => { if (quiet()) { this.hideTip(); this.sellPrompt(art); } });
+
+        /**
+         * THE BELT'S ONE COMMIT, and its two triggers.
+         *
+         * The cell and the relic painting sitting on it are two hit areas over
+         * one object, and BOTH of them sold. On touch they now open the same
+         * box instead — one key, so tapping the icon and then the cell under it
+         * is not two boxes but one.
+         *
+         * THE BOX DOES NOT SELL. Its SELL plate opens `sellPrompt`, which is the
+         * full-screen "Relics never come back" confirm the shop shelf already
+         * uses, and that is deliberately NOT one step too many: on desktop the
+         * flow is hover-to-read → click → confirm, and here it is tap-to-read →
+         * SELL → confirm. The reading step replaces the hover; the number of
+         * DECISIONS is identical, and the thing being protected is a Legendary.
+         */
+        const beltSell = () => { this.hideTip(); this.sellPrompt(art); };
+        const beltSpec = {
+          key: `belt:${art.id}`,
+          anchor: () => ({ x: beltX, y: icon.y, w: MOBILE ? 72 : 54, h: MOBILE ? 72 : 54 }),
+          title: `${art.name}  ·  ${artRar?.label ?? ''}`,
+          body: artifactTipBody(art),
+          note: REORDER_HINT,
+          accent: artRar?.color,
+          guard: quiet,
+          buttons: [{ label: `SELL ◉${sellValue(art)}`, kind: 'buy', onClick: beltSell }],
+        };
+        if (TOUCH) twoTap(this, box, beltSpec);
+        else box.on('pointerdown', () => { if (quiet()) beltSell(); });
 
         // The icon sits ON the box, so it owns both gestures: a click through it
         // still sells, a drag reorders. `_justDragged` keeps the two apart.
@@ -1570,11 +1786,29 @@ export class MapScene extends Phaser.Scene {
             onComplete: () => { if (icon.scene) beltRedress(); },
           });
         });
-        icon.on('pointerup', () => {
-          if (icon._justDragged) { icon._justDragged = false; return; }
-          this.hideTip();
-          this.sellPrompt(art);
-        });
+        /**
+         * ...AND THE ICON'S OWN COMMIT.
+         *
+         * On DESKTOP this stays exactly as it shipped: a raw pointerup guarded
+         * only by `_justDragged`, because the icon is draggable and a plain
+         * `pointerdown` would sell on the first frame of every reorder.
+         *
+         * ON TOUCH IT HAD TO GO. It was a raw pointerup with NO
+         * `_touchHoldFired` check, so long-pressing a relic TO READ IT sold it
+         * on release — the one gesture the touch model tells you is safe was the
+         * one that emptied your belt. `tapBind` (inside `twoTap`) refuses both a
+         * hold and anything that drifted past SLOP, and SLOP is the same 14px as
+         * `dragDistanceThreshold` above, so drag-to-reorder is untouched: a
+         * gesture is either a drag or a tap and can never be read as both.
+         */
+        if (TOUCH) twoTap(this, icon, beltSpec);
+        else {
+          icon.on('pointerup', () => {
+            if (icon._justDragged) { icon._justDragged = false; return; }
+            this.hideTip();
+            this.sellPrompt(art);
+          });
+        }
       }
     }
     // The ordinals go on LAST, in the corner the mirror badge leaves free, so a
@@ -1582,7 +1816,7 @@ export class MapScene extends Phaser.Scene {
     // because a dragged relic can pass under one.
     for (let i = 0; i < cells; i++) {
       hud.add(this.add.text(beltX - 20, beltCellY(i) - 19, String(i + 1), {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '13px', color: '#a99cd0',
+        fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.beltOrdinal}px`, color: '#a99cd0',
         stroke: '#150e22', strokeThickness: 4,
       }).setOrigin(0.5).setAlpha(0.75));
     }
@@ -1593,12 +1827,16 @@ export class MapScene extends Phaser.Scene {
     // slot back, which is what onSell is for).
     const nook = nookArtifacts();
     if (nook.length) {
-      const strapY = beltY0 + cells * 64 - 12;
+      // BELT_PITCH, not a hard-coded 64 (fixed 2026-08-10). The two numbers were
+      // the same until the phone's cells went to 84, at which point the buckle
+      // strap was drawn 120px UP INSIDE the last relic instead of below it — the
+      // desktop board never showed it because 64 is still 64 there.
+      const strapY = beltY0 + cells * BELT_PITCH - 12;
       hud.add(this.add.rectangle(beltX, strapY, 44, 4, 0x5f4324, 0.8));
       nook.forEach((art, k) => {
         const y = strapY + 40 + k * 68;
         hud.add(this.add.text(beltX, y - 36, 'GLOVE', {
-          fontFamily: 'Lilita One', resolution: 2, fontSize: '13px', color: '#e8d3a4',
+          fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.gloveLabel}px`, color: '#e8d3a4',
           stroke: '#241505', strokeThickness: 4,
         }).setOrigin(0.5));
         const pouch = this.add.rectangle(beltX, y, 54, 54, 0x2f2416, 0.92)
@@ -1609,14 +1847,31 @@ export class MapScene extends Phaser.Scene {
         hud.add(pouch); hud.add(flap);
         hud.add(addArtifactIcon(this, beltX, y + 4, art, 40));
         const rar = ARTIFACT_RARITY[art.rarity];
+        const WORN = '(worn, not slotted. It costs you no slot.)';
         pouch.setInteractive({ useHandCursor: true });
         pouch.on('pointerover', () => this.showTip(beltX - 40, y, art.name,
           `${rar?.label ?? ''}\n` + artifactTipBody(art)
-          + '\n(worn, not slotted. It costs you no slot.)'
-          + `\n\nClick to sell for ◉ ${sellValue(art)}. Its gift leaves with it.`,
+          + `\n${WORN}`
+          + `\n\n${say('Click', 'Tap')} to sell for ◉ ${sellValue(art)}. Its gift leaves with it.`,
           1, !!rar?.rainbow));
         pouch.on('pointerout', () => this.hideTip());
-        pouch.on('pointerdown', () => { this.hideTip(); this.sellPrompt(art); });
+        // The pouch never had a MOBILE branch at all: it sold a Sixth Finger on
+        // a raw first touch, with no tapBind, no hold check and no confirm in
+        // front of it but sellPrompt's. Same box as the belt above it.
+        const nookSell = () => { this.hideTip(); this.sellPrompt(art); };
+        if (TOUCH) {
+          twoTap(this, pouch, {
+            key: `nook:${art.id}`,
+            anchor: { x: beltX, y, w: 54, h: 54 },
+            title: `${art.name}  ·  ${rar?.label ?? ''}`,
+            body: `${artifactTipBody(art)}\n${WORN}`,
+            note: 'Its gift leaves with it.',
+            accent: rar?.color,
+            buttons: [{ label: `SELL ◉${sellValue(art)}`, kind: 'buy', onClick: nookSell }],
+          });
+        } else {
+          pouch.on('pointerdown', nookSell);
+        }
       });
     }
 
@@ -1626,8 +1881,23 @@ export class MapScene extends Phaser.Scene {
     // planning; combat brews sit dim.
     // MOBILE (v2): same bottom-right home, just bigger. cx derives from the
     // right edge (1680 was GAME_W-240 all along).
-    const mat = MOBILE
-      ? { cx: GAME_W - 240, cy: 986, w: 350 }
+    //
+    // ...AND IT WAS THE ONE PIECE OF HUD THAT NEVER LEARNED ABOUT HUD_SAFE
+    // (2026-08-10). At cx = GAME_W-240 with w=350 the mat's right lip sat 65px
+    // from the glass and its rightmost potion's hit circle reached to 104 — both
+    // inside the 96 every other corner-bound thing on this screen respects.
+    //
+    // BEFORE (touch)  cx GAME_W-240, w 350: mat spans GAME_W-415 .. GAME_W-65
+    // AFTER  (touch)  cx GAME_W-306, w 400: mat spans GAME_W-506 .. GAME_W-106
+    //
+    // The 50px of growth is free: the belt column above it stops at y≈690 even
+    // with a full six slots and a glove, the mat's top lip is at 908, and the
+    // scroll hint is centred 800px to its left. The rightmost potion's hit
+    // circle now reaches x = GAME_W-151 and y = 1020 — clear of the bottom-right
+    // arc, whose centre is (GAME_W-150, 930) with a 150 radius. Desktop is the
+    // shipped rectangle to the pixel.
+    const mat = TOUCH
+      ? { cx: GAME_W - SAFE.x - 210, cy: 978, w: 400 }
       : { cx: GAME_W - 240, cy: 986, w: 290 };
     const matImg = this.add.image(mat.cx, mat.cy, 'potion_mat');
     matImg.setDisplaySize(mat.w, mat.w * POTION_MAT.aspect);
@@ -1635,7 +1905,7 @@ export class MapScene extends Phaser.Scene {
     hud.add(matImg);
     // Labelled like the ARTIFACTS mat (JC) — obvious at a glance.
     hud.add(this.add.text(mat.cx, mat.cy - (mat.w * POTION_MAT.aspect) / 2 - 11, 'POTIONS', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: MOBILE ? '18px' : '15px',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.potionsLabel}px`,
       color: '#e8d3a4', stroke: '#241505', strokeThickness: 4,
     }).setOrigin(0.5));
     // MAT CLEANUP (JC, 2026-08-01): the mat's PAINTED worn circles are the only
@@ -1644,14 +1914,15 @@ export class MapScene extends Phaser.Scene {
     const spots = potionSpots(mat.cx, mat.cy, mat.w);
     run.potions.slice(0, MAX_POTIONS).forEach((pot, i) => {
       const { x, y, r } = spots[i];
-      const icon = addPotionIcon(this, x, y, pot, MOBILE ? 64 : 52);
+      const icon = addPotionIcon(this, x, y, pot, MAP_TYPE.potionIcon);
       hud.add(icon);
       const usable = potionUsableIn(pot, 'map');
       if (!usable) icon.setAlpha(0.55);
       const hit = this.add.circle(x, y, r, 0xffffff, 0.001).setInteractive({ useHandCursor: usable });
       hud.add(hit);
       hit.on('pointerover', () => this.showTip(x, y - 56, pot.name,
-        pot.desc + (usable ? '\nClick to drink.' : pot.use === 'passive' ? '\n(always working)' : '\n(combat only)')));
+        pot.desc + (usable ? say('\nClick to drink.', '\nTap to drink.')
+          : pot.use === 'passive' ? '\n(always working)' : '\n(combat only)')));
       hit.on('pointerout', () => this.hideTip());
       if (usable) {
         // TWO STEPS ON TOUCH (JC): tap opens the description with a DRINK
@@ -1671,21 +1942,26 @@ export class MapScene extends Phaser.Scene {
     // drivers had these coordinates typed into them and all five broke on a
     // 56px move. A driver that asks for the button by name cannot break that
     // way again.
+    // ...and both plates grow on touch (MAP_TYPE.deckW / handsW / viewerH). HANDS
+    // slides 20px right with them, because the pair is laid out from two fixed
+    // centres and two wider plates about the same centres would overlap by 23px.
     const btnY = CAPSULE.floor + 42;
-    const deckBtn = this.add.image(LX(112), btnY + 3, 'btn_dark').setDisplaySize(180, 54).setInteractive({ useHandCursor: true });
+    const deckBtn = this.add.image(LX(112), btnY + 3, 'btn_dark')
+      .setDisplaySize(MAP_TYPE.deckW, MAP_TYPE.viewerH).setInteractive({ useHandCursor: true });
     hud.add(deckBtn);
     hud.add(this.add.text(LX(112), btnY, 'VIEW DECK', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: '#cfc8e8',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.viewerFont}px`, color: '#cfc8e8',
     }).setOrigin(0.5));
     deckBtn.setData('hfLabel', 'VIEW DECK');
     deckBtn.on('pointerdown', () => {
       sfx(this, 'button', { volume: 0.7 });
       deckInfoOverlay(this, run);
     });
-    const handsBtn = this.add.image(LX(268), btnY + 3, 'btn_dark').setDisplaySize(120, 54).setInteractive({ useHandCursor: true });
+    const handsBtn = this.add.image(LX(MAP_TYPE.handsX), btnY + 3, 'btn_dark')
+      .setDisplaySize(MAP_TYPE.handsW, MAP_TYPE.viewerH).setInteractive({ useHandCursor: true });
     hud.add(handsBtn);
-    hud.add(this.add.text(LX(268), btnY, 'HANDS', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '20px', color: '#cfc8e8',
+    hud.add(this.add.text(LX(MAP_TYPE.handsX), btnY, 'HANDS', {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.viewerFont}px`, color: '#cfc8e8',
     }).setOrigin(0.5));
     handsBtn.setData('hfLabel', 'HANDS');
     handsBtn.on('pointerdown', () => {
@@ -1695,8 +1971,10 @@ export class MapScene extends Phaser.Scene {
 
     // The scroll hint belongs to the BOARD, not to a room — an overlay that
     // reaches the bottom edge (the event canvas) hides it while it is open.
-    this.mapHint = this.add.text(GAME_W / 2, GAME_H - 22, 'scroll or drag to survey the path, then choose your next step', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '19px', color: '#d8c9a8', stroke: '#241505', strokeThickness: 4,
+    // ...lifted off the bottom glass by SAFE.y on touch, like everything else
+    // that was pinned flush to an edge.
+    this.mapHint = this.add.text(GAME_W / 2, GAME_H - 22 - SAFE.y, 'scroll or drag to survey the path, then choose your next step', {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.scrollHint}px`, color: '#d8c9a8', stroke: '#241505', strokeThickness: 4,
     }).setOrigin(0.5).setAlpha(0.85);
     hud.add(this.mapHint);
 
@@ -1731,8 +2009,11 @@ export class MapScene extends Phaser.Scene {
         advanceAct();
         this.scene.restart();
       });
-      hud.add(legible(this.add.text(112, devY + 102, 'dev: click ANY node to teleport', {
-        fontFamily: '"Baloo 2"', resolution: 2, fontSize: '15px', color: '#8fe098', fontStyle: 'bold',
+      // LX(), like every other x in this column. It was the one line in the
+      // capsule that missed the pinch, so on the phone the dev hint sat 96px
+      // left of the two buttons it belongs to.
+      hud.add(legible(this.add.text(LX(112), devY + 102, say('dev: click ANY node to teleport', 'dev: tap ANY node to teleport'), {
+        fontFamily: '"Baloo 2"', resolution: 2, fontSize: `${MAP_TYPE.devHint}px`, color: '#8fe098', fontStyle: 'bold',
       })).setOrigin(0.5));
     }
   }
@@ -2524,7 +2805,7 @@ export class MapScene extends Phaser.Scene {
     };
     const makePrice = (price) => {
       const t = this.add.text(0, 0, `◉ ${price}`, {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '30px',
+        fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.shopPrice}px`,
         color: priceColor(price),
         stroke: '#241505', strokeThickness: 6,
       }).setOrigin(0.5);
@@ -2532,8 +2813,18 @@ export class MapScene extends Phaser.Scene {
       return t;
     };
 
-    /** One spot on the mat — shared by relics (row 1) and potions (row 2). */
-    const makeSpot = (x, y, icon, price, name, rar, iconH, onBuy, tipTitle, tipBody) => {
+    /**
+     * One spot on the mat — shared by relics (row 1) and potions (row 2), and
+     * therefore THE ONE COMMIT POINT for everything the merchant sells. Both
+     * rows get their two-tap box from this single seam.
+     *
+     * `opts.key`     the box identity, so the two rows cannot collide.
+     * `opts.refuse`  why the BUY plate is dead right now, as a sentence, or null.
+     *                It is the caller's to answer because only the caller knows
+     *                whether a full potion belt is a thing (relics have slots,
+     *                and a full relic row is a SWAP, not a refusal).
+     */
+    const makeSpot = (x, y, icon, price, name, rar, iconH, onBuy, tipTitle, tipBody, opts = {}) => {
       const rarCss = '#' + rar.color.toString(16).padStart(6, '0');
       const spot = this.add.container(x, y);
       spot.add(this.add.image(0, iconH * 0.42, 'fx_glow').setTint(0x401010).setAlpha(0.45)
@@ -2546,11 +2837,11 @@ export class MapScene extends Phaser.Scene {
       const tag = { t: priceText, price, sold: false };
       priceTags.push(tag);
       spot.add(this.add.text(0, iconH / 2 + 16, name, {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '21px', color: '#fff2d8',
+        fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.shopName}px`, color: '#fff2d8',
         stroke: '#241505', strokeThickness: 5, wordWrap: { width: 240 }, align: 'center',
       }).setOrigin(0.5, 0));
       const rarText = this.add.text(0, iconH / 2 + 48 + (name.length > 18 ? 26 : 0), rar.label, {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '15px', color: rarCss, stroke: '#241505', strokeThickness: 4,
+        fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.shopRarity}px`, color: rarCss, stroke: '#241505', strokeThickness: 4,
       }).setOrigin(0.5, 0);
       // HERO EXCLUSIVE burns through the whole spectrum on the mat.
       if (rar.rainbow) rainbowText(this, rarText);
@@ -2566,7 +2857,7 @@ export class MapScene extends Phaser.Scene {
         this.showTip(x, y - iconH / 2 - 64, tipTitle, tipBody, 0.5, !!rar.rainbow);
       });
       icon.on('pointerout', () => { this.hideTip(); this.tweens.add({ targets: spot, scale: 1, duration: 110 }); });
-      icon.on('pointerdown', () => {
+      const commitBuy = () => {
         const fail = (msg) => {
           this.tweens.add({ targets: spot, x: x + 8, duration: 50, yoyo: true, repeat: 2 });
           popMessage(this, x, y - iconH / 2 - 20, msg, { color: '#ff6a76', size: 26 });
@@ -2597,7 +2888,39 @@ export class MapScene extends Phaser.Scene {
         const verdict = onBuy(fail, settle);
         if (verdict === 'defer' || !verdict) return;
         settle();
-      });
+      };
+      /**
+       * THE MERCHANT'S GOODS ARE ICONS WITH PRICES OVER THEM, which is exactly
+       * the shape the two-tap rule was written for: what a relic DOES is not on
+       * the mat, it is in a tooltip a finger cannot summon without covering it,
+       * and the tap that revealed it also spent the chips.
+       *
+       * The box's plate calls the SAME closure the pointerdown called, so the
+       * whole false/'defer'/truthy contract is untouched — a relic still defers
+       * to its ceremony and charges nothing until LEAVE IT is not pressed, and a
+       * potion still settles on the spot and lands on the belt to be drunk later
+       * by a separate tap. Nothing about the buy-then-drink loop moves.
+       */
+      if (TOUCH) {
+        twoTap(this, icon, {
+          key: opts.key ?? `spot:${x},${y}`,
+          anchor: { x, y, w: iconH, h: iconH },
+          title: tipTitle,
+          body: tipBody,
+          // A DEAD BUTTON STILL DRAWS (choicebox's rule): "you cannot pay for
+          // this" is information, and a missing plate is not.
+          note: () => opts.refuse?.() ?? `He wants ◉ ${price} for it.`,
+          accent: rar.color,
+          owner: ov,
+          guard: () => !tag.sold,
+          buttons: () => [{
+            label: `BUY ◉${price}`, kind: 'buy', onClick: commitBuy,
+            enabled: !tag.sold && !opts.refuse?.(),
+          }],
+        });
+      } else {
+        icon.on('pointerdown', commitBuy);
+      }
       return spot;
     };
 
@@ -2611,6 +2934,9 @@ export class MapScene extends Phaser.Scene {
     const SHOP_RELIC_GAP = 420;
     /** Widest the relic row may span, centre to centre, and still sit on the mat. */
     const SHOP_RELIC_ROW_W = 1100;
+    /** ...and the shelf it stands on, named so the verification driver can tap
+     *  the relic it means instead of keeping a copy of this number. */
+    const SHOP_RELIC_ROW_Y = 372;
     const renderStock = () => {
       goods.removeAll(true);
       priceTags.length = 0;   // those Text objects just died with the goods
@@ -2639,13 +2965,14 @@ export class MapScene extends Phaser.Scene {
       // click the relic it means instead of guessing a pitch that now moves.
       this._shopStockXs = [...axs];
       this._shopStockIconH = SHOP_RELIC_ICON;
+      this._shopRelicRowY = SHOP_RELIC_ROW_Y;
       stock.forEach((art, i) => {
         const rar = ARTIFACT_RARITY[art.rarity];
         // Through the till (run.shopPrice), so THE ORACLE'S NEGOTIATOR and
         // COLLECTOR move this number without the mat knowing either exists.
         const price = shopPrice(art.shopPrice ?? art.price);
         const icon = addArtifactIcon(this, 0, 0, art, SHOP_RELIC_ICON);
-        const spot = makeSpot(axs[i], 372, icon, price, art.name, rar, SHOP_RELIC_ICON, (fail, settle) => {
+        const spot = makeSpot(axs[i], SHOP_RELIC_ROW_Y, icon, price, art.name, rar, SHOP_RELIC_ICON, (fail, settle) => {
           if (run.chips < price) { fail('NOT ENOUGH CHIPS'); return false; }
           // PAID ON TAKE, NOT ON OPEN. LEAVE IT / NEVER MIND are real answers,
           // and a relic you did not take costs nothing and leaves the mat: the
@@ -2657,7 +2984,10 @@ export class MapScene extends Phaser.Scene {
             updateChips();
           }, { quiet: true });
           return 'defer';
-        }, `${art.name}  ·  ${rar.label}`, artifactTipBody(art, { own: false }));
+        }, `${art.name}  ·  ${rar.label}`, artifactTipBody(art, { own: false }), {
+          key: `shopbuy:relic:${art.id}`,
+          refuse: () => (run.chips < price ? `Not enough chips. He wants ◉ ${price}.` : null),
+        });
         if (art.rarity === 'mythical' || art.rarity === 'heroExclusive') {
           const aura = this.add.image(0, 0, 'fx_glow_circle').setTint(rar.color)
             .setScale(0.9).setAlpha(0.4).setBlendMode(Phaser.BlendModes.ADD);
@@ -2679,7 +3009,11 @@ export class MapScene extends Phaser.Scene {
           updateBelt();
           noteBuy();
           return true;
-        }, `${def.name}  ·  ${rar.label} Potion`, def.desc);
+        }, `${def.name}  ·  ${rar.label} Potion`, def.desc, {
+          key: `shopbuy:potion:${def.id}:${i}`,
+          refuse: () => (run.potions.length >= MAX_POTIONS ? `Your belt is full. ${MAX_POTIONS} bottles is the lot.`
+            : run.chips < price ? `Not enough chips. He wants ◉ ${price}.` : null),
+        });
         if (def.rarity === 'mythical') {
           // Same red-aura fanfare as a mythical relic — the label alone drowns
           // against the red mat (rarity agent's flag).
@@ -2703,7 +3037,7 @@ export class MapScene extends Phaser.Scene {
     ov.add(dropShadow(this, beltImg, MAT_SHADOW));
     ov.add(beltImg);
     const beltLabel = this.add.text(beltMat.cx, beltMat.cy - beltMatH / 2 - 13, '', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '17px', color: '#e8d3a4',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.shopMatLabel}px`, color: '#e8d3a4',
       stroke: '#241505', strokeThickness: 4,
     }).setOrigin(0.5);
     ov.add(beltLabel);
@@ -2731,35 +3065,71 @@ export class MapScene extends Phaser.Scene {
         // liquidates a Mythical brew by fumbling a drink.
         const sellFor = potionSellValue(pot);
         hit.on('pointerover', () => this.showTip(x, y + 70, pot.name,
-          pot.desc + (drinkable ? '\nClick to drink it right here.'
+          pot.desc + (drinkable ? say('\nClick to drink it right here.', '\nTap to drink it right here.')
             : pot.use === 'passive' ? '\n(always working)' : '\n(combat only)')
-          + `\nOr press SELL. He pays ◉ ${sellFor}.`));
+          + `\n${say('Or press SELL. He pays', 'He pays')} ◉ ${sellFor}.`));
         hit.on('pointerout', () => this.hideTip());
-        if (drinkable) {
-          hit.on('pointerdown', () => this.drinkPotionHere(pot, x, y, {
-            after: () => { updateBelt(); updateChips(); refreshPrices(); refreshServices(); },
-          }));
-        }
-        // The tab: small, plain, and it says the number out loud.
-        const tabTxt = this.add.text(x, y + 33, `SELL ◉${sellFor}`, {
-          fontFamily: 'Lilita One', resolution: 2, fontSize: '14px', color: '#ffd23e',
-          stroke: '#241505', strokeThickness: 4,
-        }).setOrigin(0.5);
-        const tab = this.add.rectangle(x, y + 34, tabTxt.width + 14, 20, 0x2a1a10, 0.92)
-          .setStrokeStyle(2, 0x8a6a3c).setInteractive({ useHandCursor: true });
-        beltSlots.add(tab); beltSlots.add(tabTxt);
-        tab.on('pointerover', () => { tab.setFillStyle(0x4a2f18, 0.96); sfx(this, 'menu_select', { volume: 0.22, jitter: 0.06 }); });
-        tab.on('pointerout', () => tab.setFillStyle(0x2a1a10, 0.92));
-        tab.on('pointerdown', () => {
-          const i = run.potions.indexOf(pot);
-          if (i < 0) return;
-          run.potions.splice(i, 1);
+        const drink = () => this.drinkPotionHere(pot, x, y, {
+          after: () => { updateBelt(); updateChips(); refreshPrices(); refreshServices(); },
+        });
+        const sell = () => {
+          const k = run.potions.indexOf(pot);
+          if (k < 0) return;
+          run.potions.splice(k, 1);
           run.chips += sellFor;      // a refund, not income — same rule as sellArtifact
           sfx(this, 'chips_stack', { volume: 0.85 });
           popMessage(this, x, y - 30, `+${sellFor} chips`, { color: '#ffc542', size: 30, rise: 50 });
           this.hideTip();
           updateBelt(); updateChips(); refreshPrices(); refreshServices();
-        });
+        };
+        // DESKTOP: a left click drinks, the tab under the bottle sells. Both
+        // exactly as they shipped.
+        if (drinkable && !TOUCH) hit.on('pointerdown', drink);
+        // The tab: small, plain, and it says the number out loud.
+        const tabTxt = this.add.text(x, y + 33, `SELL ◉${sellFor}`, {
+          fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.sellTab}px`, color: '#ffd23e',
+          stroke: '#241505', strokeThickness: 4,
+        }).setOrigin(0.5);
+        const tab = this.add.rectangle(x, y + 34, tabTxt.width + MAP_TYPE.sellTabPad, MAP_TYPE.sellTabH, 0x2a1a10, 0.92)
+          .setStrokeStyle(2, 0x8a6a3c);
+        if (!TOUCH) tab.setInteractive({ useHandCursor: true });
+        beltSlots.add(tab); beltSlots.add(tabTxt);
+        /**
+         * TWO HAZARDS, ONE BOX (2026-08-10).
+         *
+         * This mat had the worst pair of touch targets in the game. The bottle's
+         * hit circle DRANK on a bare `pointerdown` — no tapBind, no hold check,
+         * no confirm — which is the map mat's own two-step model contradicted on
+         * the very next screen. And the SELL tab under it was a 20px-tall plate
+         * carrying 14px ink: too small to read, too small to hit deliberately,
+         * and it liquidated a Mythical brew on first contact.
+         *
+         * On touch neither is a target any more. The bottle opens ONE box that
+         * spells the potion out and offers both verbs as full plates, and the tab
+         * becomes what it should always have been on a phone — a legible PRICE
+         * LABEL, not a button. Desktop keeps both handlers to the letter.
+         */
+        if (TOUCH) {
+          twoTap(this, hit, {
+            key: `shopbelt:${i}`,
+            anchor: { x, y, w: r * 2, h: r * 2 },
+            title: pot.name,
+            body: pot.desc,
+            note: drinkable ? `He pays ◉ ${sellFor} for it.`
+              : pot.use === 'passive' ? `Always working, nothing to drink. He pays ◉ ${sellFor}.`
+                : `Combat only. He pays ◉ ${sellFor}.`,
+            accent: POTION_RARITY[pot.rarity]?.color,
+            owner: ov,
+            buttons: [
+              { label: 'DRINK', kind: 'go', enabled: drinkable, onClick: drink },
+              { label: `SELL ◉${sellFor}`, kind: 'buy', onClick: sell },
+            ],
+          });
+        } else {
+          tab.on('pointerover', () => { tab.setFillStyle(0x4a2f18, 0.96); sfx(this, 'menu_select', { volume: 0.22, jitter: 0.06 }); });
+          tab.on('pointerout', () => tab.setFillStyle(0x2a1a10, 0.92));
+          tab.on('pointerdown', sell);
+        }
       });
     };
     updateBelt();
@@ -2776,7 +3146,7 @@ export class MapScene extends Phaser.Scene {
     const relicShelf = this.add.container(0, 0);
     ov.add(relicShelf);
     const relicLabel = this.add.text(beltMat.cx, beltMat.cy + beltMatH / 2 + 18, '', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '17px', color: '#e8d3a4',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.shopMatLabel}px`, color: '#e8d3a4',
       stroke: '#241505', strokeThickness: 4,
     }).setOrigin(0.5);
     ov.add(relicLabel);
@@ -2807,13 +3177,29 @@ export class MapScene extends Phaser.Scene {
         box.on('pointerover', () => {
           sfx(this, 'menu_select', { volume: 0.22, jitter: 0.06 });
           this.showTip(x, y - 40, art.name, `${rar?.label ?? ''}\n` + artifactTipBody(art)
-            + `\n\nClick to sell it for ◉ ${sellValue(art)}`, 0.5, !!rar?.rainbow);
+            + `\n\n${say('Click', 'Tap')} to sell it for ◉ ${sellValue(art)}`, 0.5, !!rar?.rainbow);
         });
         box.on('pointerout', () => this.hideTip());
-        box.on('pointerdown', () => {
+        // A grid of 58px squares whose only tell is a 46px painting, and the
+        // first touch on any of them opened a sell confirm. Same box, same
+        // rule: read first, then SELL, then the confirm.
+        const shelfSell = () => {
           this.hideTip();
           this.sellPrompt(art, { after: () => { renderRelicShelf(); updateChips(); refreshPrices(); refreshServices(); } });
-        });
+        };
+        if (TOUCH) {
+          twoTap(this, box, {
+            key: `shopsell:${art.id}`,
+            anchor: { x, y, w: 58, h: 58 },
+            title: `${art.name}  ·  ${rar?.label ?? ''}`,
+            body: artifactTipBody(art),
+            accent: rar?.color,
+            owner: ov,
+            buttons: [{ label: `SELL ◉${sellValue(art)}`, kind: 'buy', onClick: shelfSell }],
+          });
+        } else {
+          box.on('pointerdown', shelfSell);
+        }
       }
     };
     renderRelicShelf();

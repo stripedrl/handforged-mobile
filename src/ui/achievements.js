@@ -22,6 +22,7 @@ import { sfx, sfxCapped } from '../core/sfx.js';
 import {
   ACHIEVEMENTS, achievementTally, isAchievementUnlocked, noteEvent,
   achievementSections, achievementReward, gatesARelic,
+  visibleAchievements, isAchievementHidden,
 } from '../core/achievements.js';
 // The two trophies that open a BOOSTER PACK. The gate itself lives in packs.js
 // (PACK_GATES) and this is a UI module, so reading it here closes no cycle and
@@ -385,10 +386,17 @@ export function openAchievements(scene) {
 
   // Verification hook: the shelf as plain data (tools/verify_potions_0802.py).
   window.__hfAchievements = {
-    tiles: () => ACHIEVEMENTS.map(d => ({
+    // THE SHELF as the player sees it: a secret trophy is simply not on it
+    // until it is earned. `all` is the whole table beside it, so a driver can
+    // assert BOTH halves of the hidden treatment (it exists, and it is absent).
+    tiles: () => visibleAchievements().map(d => ({
       id: d.id, unlocked: isAchievementUnlocked(d.id),
       group: d.group ?? null, tier: d.tier ?? null,
       reward: achievementReward(d.id)?.id ?? null,
+    })),
+    all: () => ACHIEVEMENTS.map(d => ({
+      id: d.id, unlocked: isAchievementUnlocked(d.id),
+      secret: !!d.secret, hidden: isAchievementHidden(d.id),
     })),
     // The shelf's SHAPE, so a driver can prove the ladders really did collapse
     // into progression rows instead of loose tiles.

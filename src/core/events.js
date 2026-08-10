@@ -56,7 +56,7 @@ export const EVENTS = [
         },
       },
       {
-        label: 'Trade stories', hint: 'Free. He likes company.',
+        label: 'Trade stories', hint: 'Free. Nothing changes.',
         resolve() { return { text: 'He tells you of a red-glowing forge deep in the world. You feel wiser, not richer.' }; },
       },
       { label: 'Walk on by', resolve() { return { text: 'The clinking follows you for a while, then gives up.' }; } },

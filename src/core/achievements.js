@@ -16,6 +16,17 @@
  *   tier  — OPTIONAL. A LADDER's group key ('damage', 'mult', 'difficulty').
  *           Consecutive entries sharing one draws as a single progression row
  *           instead of four unrelated tiles. See ACHIEVEMENT_SECTIONS.
+ *   secret— OPTIONAL. HIDDEN UNTIL EARNED (2026-08-10). Not a '???' tile — the
+ *           shelf has no row for it at all, its section's `got / total` does
+ *           not count it, and neither does the case's own tally. The moment it
+ *           fires, the tile appears fully written and the totals move with it.
+ *           The name, desc and hint are still required (the tile has to be
+ *           complete the instant it exists), they are simply never shown to
+ *           anybody who has not done the thing. This is the achievement half of
+ *           the SECRET HAND pattern — see poker.HAND_DEFS `secret` and
+ *           rewards.handChartOverlay, which hides an undiscovered hand's row
+ *           entirely for exactly the same reason (JC, 2026-08-06: a '???' tease
+ *           reads as confusing rather than enticing).
  * Nothing else in the game needs touching.
  *
  * THE EVENTS (all fired by the scenes, ctx always carries `run`):
@@ -49,7 +60,7 @@ import { HAND_DEFS, HAND_TYPES } from './poker.js';
 import { ANIMAL_KIND, RELIC_GATE_BY_ACHIEVEMENT, artifactById } from './artifacts.js';
 // BATTERY FULL asks for the ceiling itself, so it reads the ceiling rather than
 // a copy of it. artifacts.js already imports this module, so the edge is free.
-import { ZEAL_CAP } from './scoring.js';
+import { ZEAL_CAP, INFINITY_CAP } from './scoring.js';
 // config.js is the bottom of the graph (it imports nothing), so this edge is
 // free. HOARD_UNLOCK_CHIPS is Drusky's gate, and CHARACTERS is how a trophy
 // finds out it opens a hero.
@@ -456,6 +467,32 @@ export const ACHIEVEMENTS = [
     on: 'hand', test: (c) => c.handType === 'flushFive',
   },
   {
+    /**
+     * SECRET. Absent from the shelf entirely until it is earned — see
+     * `secret` above ACHIEVEMENTS and visibleAchievements() below. The hands
+     * chart hides SIX OF A KIND the same way, and for the same reason: the
+     * patch notes only ever say "added new secret achievement".
+     */
+    id: 'sixOfAKind', name: 'Understudy No More',
+    desc: 'Play Six of a Kind. There are only four suits and thirteen ranks, and you found a sixth anyway.',
+    hint: 'A hand that does not exist.',
+    group: 'THE DECK', secret: true,
+    on: 'hand', test: (c) => c.handType === 'sixOfAKind',
+  },
+  {
+    /**
+     * SECRET, and the top of the game: a single hand at INFINITY_CAP. It reads
+     * `scored` rather than `damage` because a hand can reach the ceiling and
+     * still land nothing (an immune phase, a biome wall) — the trophy is for
+     * building the number, not for finding a body to spend it on.
+     */
+    id: 'infinity', name: 'Divide By Zero',
+    desc: 'Score infinite damage in one hand. The number ran out before you did.',
+    hint: 'Score a number the game cannot print.',
+    group: 'THE DECK', secret: true,
+    on: 'hand', test: (c) => Math.max(c.scored ?? 0, c.damage ?? 0) >= INFINITY_CAP,
+  },
+  {
     id: 'textbook', name: 'Textbook',
     desc: 'Play a Straight Flush.',
     hint: 'Play a hand that is a run and a suit at the same time.',
@@ -792,7 +829,12 @@ export const ACHIEVEMENT_IDS = ACHIEVEMENTS.map(a => a.id);
  */
 export function achievementSections() {
   const out = [];
-  for (const def of ACHIEVEMENTS) {
+  // THE VISIBLE list, not the whole one: a secret trophy has no row until it is
+  // earned. Filtering HERE rather than in the overlay means the section heads,
+  // the per-section counts, the ladder runs and the grid reflow all follow from
+  // one decision — the same shape rewards.handChartOverlay uses to make an
+  // undiscovered secret HAND leave no gap behind it.
+  for (const def of visibleAchievements()) {
     const name = def.group ?? 'ACHIEVEMENTS';
     let section = out[out.length - 1];
     if (!section || section.name !== name) { section = { name, runs: [] }; out.push(section); }
@@ -829,11 +871,38 @@ export function achievementHero(id) {
 
 export { isAchievementUnlocked };
 
-/** How full the case is: { unlocked, total }. */
+/**
+ * THE SHELF'S OWN LIST — every trophy a player is allowed to know exists.
+ *
+ * A `secret` one is absent until it is earned, at which point it is an ordinary
+ * tile forever. Everything that DISPLAYS achievements reads this; everything
+ * that FIRES them (noteEvent) reads ACHIEVEMENTS, because a hidden trophy still
+ * has to be winnable. That split is the whole mechanism.
+ */
+export function visibleAchievements() {
+  return ACHIEVEMENTS.filter(a => !a.secret || isAchievementUnlocked(a.id));
+}
+
+/** Is this trophy hidden from the shelf right now? */
+export function isAchievementHidden(id) {
+  const a = ACHIEVEMENTS.find(x => x.id === id);
+  return !!a?.secret && !isAchievementUnlocked(a.id);
+}
+
+/**
+ * How full the case is: { unlocked, total }.
+ *
+ * `total` counts the VISIBLE shelf, so an unearned secret does not sit in the
+ * denominator advertising itself as a gap — "48 of 62" with two tiles nobody
+ * can find is the tease the hidden treatment exists to avoid. Earning one moves
+ * both numbers at once, which reads as the case growing rather than as a hole
+ * being filled.
+ */
 export function achievementTally() {
+  const visible = visibleAchievements();
   return {
-    unlocked: ACHIEVEMENTS.filter(a => isAchievementUnlocked(a.id)).length,
-    total: ACHIEVEMENTS.length,
+    unlocked: visible.filter(a => isAchievementUnlocked(a.id)).length,
+    total: visible.length,
   };
 }
 

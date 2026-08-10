@@ -76,7 +76,7 @@
  * path in it resolves in the shipped tree.
  */
 
-import { IMG_EXT, CHARACTERS, PARTICLE_VARIANTS, MOBILE } from '../config.js';
+import { IMG_EXT, CHARACTERS, PARTICLE_VARIANTS, WIDE } from '../config.js';
 import { allActs, actEntry, bossRoster } from './acts.js';
 import { ENEMY_DEFS } from './enemies.js';
 import { SKINS, skinTexture } from './skins.js';
@@ -340,7 +340,7 @@ for (const [key, file] of Object.entries(WORLD_BG_FILE)) {
   defer('world bg', key, `${A}/bg/${file}.png`);
 }
 /**
- * THE SIX WIDE BOARDS (Caleb, 2026-08-06) — MOBILE ONLY.
+ * THE SIX WIDE BOARDS (Caleb, 2026-08-06) — THE 2340 CANVAS ONLY.
  *
  * The phone's canvas is 2340 and the painted boards are 1920, so the map has
  * been drawing a 1920 board centred in a 2340 window with 210px of empty dark
@@ -358,12 +358,17 @@ for (const [key, file] of Object.entries(WORLD_BG_FILE)) {
  * DERIVED, NOT TYPED. `<board>_wide` off the narrow table, so a seventh world
  * gets both boards from the one line it already had to add.
  *
- * REGISTERED ONLY ON MOBILE, deliberately. These are the six biggest single
- * files in the game (7.7-10.7 MB apiece, 56 MB of the tree) and the desktop
- * build must never fetch one — a manifest entry desktop cannot reach is a
- * manifest entry desktop cannot accidentally load. It also keeps the node
- * sweep honest: MOBILE is false under node, so tests/lazyload.test.js walks
- * exactly the desktop ledger it has always walked.
+ * REGISTERED ONLY ON THE WIDE CANVAS, deliberately. These are the six biggest
+ * single files in the game (7.7-10.7 MB apiece, 56 MB of the tree) and a build
+ * that cannot draw one must never fetch one — a manifest entry it cannot reach
+ * is a manifest entry it cannot accidentally load. It also keeps the node sweep
+ * honest: WIDE is false under node, so tests/lazyload.test.js walks exactly the
+ * ledger it has always walked.
+ *
+ * WIDE, NOT TOUCH (2026-08-10, the tablet wave). This is the one question in
+ * the game that is genuinely about the CANVAS and not about the finger: an iPad
+ * runs the full touch model on the 1920 canvas, and a 2340-wide board on it
+ * would be the 210px of empty dark this art exists to delete, mirrored.
  */
 export const BOARD_WIDE_BY_AMBIENCE = Object.fromEntries(
   Object.entries(BOARD_BY_AMBIENCE).map(([amb, key]) => [amb, `${key}_wide`]));
@@ -374,11 +379,11 @@ export const BOARD_WIDE_BY_AMBIENCE = Object.fromEntries(
  * scene paints the wide one is a loading veil that lifts on a blank map.
  */
 export function boardKeyFor(ambience) {
-  return (MOBILE ? BOARD_WIDE_BY_AMBIENCE[ambience] : null) ?? BOARD_BY_AMBIENCE[ambience];
+  return (WIDE ? BOARD_WIDE_BY_AMBIENCE[ambience] : null) ?? BOARD_BY_AMBIENCE[ambience];
 }
 
 for (const key of Object.values(BOARD_BY_AMBIENCE)) defer('map board', key, `${A}/bg/${key}.png`);
-if (MOBILE) {
+if (WIDE) {
   for (const key of Object.values(BOARD_WIDE_BY_AMBIENCE)) defer('map board', key, `${A}/bg/${key}.png`);
 }
 for (const key of Object.values(BANNER_BY_AMBIENCE)) defer('banner', key, `${A}/ui/${key}.png`);

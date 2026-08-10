@@ -1,4 +1,5 @@
 import { wrapImageLoader } from '../core/imgload.js';
+import { installPointerPolicy } from '../ui/pointer.js';
 import { bootMark } from '../core/boottime.js';
 
 /**
@@ -105,6 +106,7 @@ export class PrebootScene extends Phaser.Scene {
   }
 
   create() {
+    installPointerPolicy(this);   // right-click never acts, anywhere
     bootMark('prebootCreate');
     this.fontsReady.then(() => {
       bootMark('prebootHandoff');

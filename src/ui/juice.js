@@ -1,6 +1,10 @@
 import { DEPTH } from '../config.js';
 import { settings } from '../core/settings.js';
 import { sfx } from '../core/sfx.js';
+import { INFINITY_CAP } from '../core/scoring.js';
+
+/** The glyph a number at (or past) the cap is printed as, everywhere. */
+export const INFINITY_GLYPH = '∞';
 
 /**
  * Big numbers stay readable: 1234 -> 1.2k, 1,200,000 -> 1.2M, 1.5e9 -> 1.5B,
@@ -18,7 +22,13 @@ import { sfx } from '../core/sfx.js';
  * reads as a crash. '∞' is the honest answer and it is also the fun one.
  */
 export function fmtNum(n) {
-  if (!Number.isFinite(n)) return '∞';
+  if (!Number.isFinite(n)) return INFINITY_GLYPH;
+  // THE CAP READS AS ∞ (JC, 2026-08-10). scoring.js clamps every number it
+  // produces at INFINITY_CAP, so anything arriving here at the ceiling is not
+  // "1e30 damage" — it is the top of the game, and e30 and e100 are the same
+  // hand by design. One line, so the equation, every float, the recap and the
+  // lifetime shelf all say it without any of them knowing why.
+  if (n >= INFINITY_CAP) return INFINITY_GLYPH;
   if (n >= 1e12) {
     let exp = Math.floor(Math.log10(n));
     let mant = Number((n / Math.pow(10, exp)).toFixed(2));
@@ -264,6 +274,23 @@ export const PAYOFF_TIERS = [
   // which is what keeps the two readable as two different events rather than
   // "the big one, again but more".
   { min: 1e9, name: 'radiant', color: '#fff6c8', tint: 0xffd23e, size: 112, stroke: '#4a3202', sfx: 'payoff_1000000000', fire: true, radiant: true, flicker: ['#ffffff', '#ffe08a'] },
+  /**
+   * THE CEILING — INFINITY (JC, 2026-08-10, locked). 1e30 is where the game's
+   * arithmetic stops (scoring.INFINITY_CAP), so this tier is not "more RADIANT":
+   * it is the number BREAKING. Where BLACKOUT snuffs the world out and RADIANT
+   * sets it alight, INFINITY says the machine has run out of digits — screen
+   * shake, chromatic RGB ghosts tearing off the glyph, scanlines rolling, block
+   * artifacts popping, and the ∞ itself hue-cycling and corrupting between
+   * frames before it snaps back.
+   *
+   * IT REPLACES EVERY TIER BELOW IT — payoffTier returns the highest match, and
+   * `glitch` is checked before `fire`/`radiant`/`blackout` in totalPayoffFX, so
+   * none of their FX play underneath it.
+   *
+   * IT FIRES EVERY TIME (JC's explicit call — no once-per-run latch). Its hold
+   * is RADIANT's, so it is spectacular without stalling the fight.
+   */
+  { min: INFINITY_CAP, name: 'infinity', color: '#eaffff', tint: 0x7cf9ff, size: 118, stroke: '#0a0018', sfx: 'payoff_infinity', glitch: true, flicker: ['#ff2fd0', '#7cf9ff'] },
 ];
 
 /** The single highest tier a total has reached. */
@@ -488,6 +515,170 @@ export function goldEmbers(scene, x, y, depth, count, spread) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// INFINITY (1e30) — the number breaking.
+//
+// The palette is deliberately NOT the game's: hot magenta and cold cyan on a
+// near-black void, which is the one combination nothing else in HANDFORGED
+// wears. Everything below is rectangles and text, so this file stays
+// scene-agnostic (no atlas beyond 'fx_glow'/'fx_star'/'fx_dust').
+// ---------------------------------------------------------------------------
+
+/** The two channels a chromatic tear splits into. */
+export const GLITCH_CYAN = '#7cf9ff';
+export const GLITCH_MAGENTA = '#ff2fd0';
+/** What a corrupted glyph can briefly become. It always resolves back. */
+const GLITCH_GLYPHS = ['∞', '∞', '∞', '#', '%', '§', '∆', '◊', '8'];
+
+/**
+ * PAINT ANY TEXT OBJECT AS A LIVE GLITCH: hue cycling through the cold/hot
+ * pair, sub-pixel jitter, and the occasional one-frame glyph corruption.
+ *
+ * Shared with the HANDS chart, where the discovered SIX OF A KIND row wears the
+ * same visual family as the payoff that hand exists to produce. `strength`
+ * scales the jitter so a 30px chart row and a 118px payoff read as the same
+ * effect at their own sizes.
+ *
+ * The timer is parented to the TEXT (it dies with the object), exactly as
+ * rainbowText's is, so a closing overlay can never leak one.
+ *
+ * @returns {Phaser.Time.TimerEvent} the running timer
+ */
+export function glitchText(scene, textObj, { step = 60, strength = 1, corrupt = true } = {}) {
+  const homeX = textObj.x;
+  const homeY = textObj.y;
+  const palette = [GLITCH_CYAN, '#ffffff', GLITCH_MAGENTA, GLITCH_CYAN, '#b9f6ff', GLITCH_MAGENTA];
+  const home = textObj.text;
+  let i = 0;
+  const ev = scene.time.addEvent({
+    delay: step,
+    loop: true,
+    callback: () => {
+      if (!textObj.active) { ev.remove(); return; }
+      i += 1;
+      textObj.setColor(palette[i % palette.length]);
+      // The TEAR: most frames sit still, every fourth or so kicks sideways.
+      const kick = i % 4 === 0;
+      textObj.setPosition(
+        homeX + (kick ? Phaser.Math.Between(-3, 3) * strength : 0),
+        homeY + (kick ? Phaser.Math.Between(-2, 2) * strength : 0),
+      );
+      if (!corrupt) return;
+      // ONE FRAME of corruption, then back. The text always resolves to what it
+      // really says — a readout that stays garbled is a bug, not an effect.
+      if (i % 7 !== 0) { if (textObj.text !== home) textObj.setText(home); return; }
+      textObj.setText([...home].map(ch => (Math.random() < 0.34
+        ? Phaser.Math.RND.pick(GLITCH_GLYPHS) : ch)).join(''));
+    },
+  });
+  textObj.once('destroy', () => ev.remove());
+  return ev;
+}
+
+/**
+ * THE CEILING. A void wash, two chromatic ghosts of the glyph tearing off it in
+ * cyan and magenta, scanlines rolling down the screen, block artifacts popping
+ * in and out, and the hardest camera shake in the game.
+ *
+ * Everything owns its own teardown; the caller holds nothing. Returns the
+ * timers so totalPayoffFX can stop them with the rest.
+ */
+function glitchFX(scene, t, x, y, D, hold, size) {
+  const { width: W, height: H } = scene.scale.gameSize;
+  const timers = [];
+
+  // --- 1. the void: the screen drops out so the tear is the only thing lit ---
+  // (Same trick as BLACKOUT, at a colder colour and a shorter hold: this is a
+  //  machine fault, not a spotlight.)
+  const dim = scene.add.rectangle(W / 2, H / 2, W, H, 0x02000a, 1)
+    .setDepth(D - 4).setScrollFactor(0).setAlpha(0);
+  scene.tweens.add({
+    targets: dim, alpha: 0.80, duration: 90, hold: hold + 200, yoyo: true,
+    ease: 'Sine.easeOut', onComplete: () => dim.destroy(),
+  });
+
+  // --- 2. the chromatic tear: the glyph, twice, in the two channels ---------
+  // ADD-blended copies riding a few pixels either side of the real number. They
+  // are the effect people actually read as "corrupted", and they cost two Text
+  // objects and one timer.
+  const ghost = (color) => {
+    const g = scene.add.text(x, y, t.text, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${size}px`, color,
+    }).setOrigin(0.5).setDepth(D - 1).setAlpha(0.85)
+      .setBlendMode(Phaser.BlendModes.ADD);
+    return g;
+  };
+  const ghosts = [ghost(GLITCH_CYAN), ghost(GLITCH_MAGENTA)];
+  timers.push(scene.time.addEvent({
+    delay: 55,
+    loop: true,
+    callback: () => {
+      for (let i = 0; i < ghosts.length; i++) {
+        const g = ghosts[i];
+        if (!g.active) continue;
+        const dir = i === 0 ? -1 : 1;
+        g.setText(t.text);   // follows the corruption, one channel behind
+        g.setPosition(x + dir * Phaser.Math.Between(4, 16), y + Phaser.Math.Between(-5, 5));
+        g.setAlpha(Phaser.Math.FloatBetween(0.45, 0.95));
+      }
+    },
+  }));
+
+  // --- 3. the scanlines: thin bright rules sweeping down the void -----------
+  const sweep = () => {
+    const bar = scene.add.rectangle(W / 2, Phaser.Math.Between(-40, H),
+      W, Phaser.Math.Between(2, 7), 0x7cf9ff, 1)
+      .setBlendMode(Phaser.BlendModes.ADD).setDepth(D - 2).setScrollFactor(0)
+      .setAlpha(Phaser.Math.FloatBetween(0.18, 0.5));
+    scene.tweens.add({
+      targets: bar, y: bar.y + Phaser.Math.Between(120, 420), alpha: 0,
+      duration: Phaser.Math.Between(180, 420), ease: 'Sine.easeOut',
+      onComplete: () => bar.destroy(),
+    });
+  };
+  for (let i = 0; i < 5; i++) sweep();
+  timers.push(scene.time.addEvent({ delay: 90, loop: true, callback: sweep }));
+
+  // --- 4. the artifacting: blocks of the wrong colour, one frame each -------
+  timers.push(scene.time.addEvent({
+    delay: 70,
+    loop: true,
+    callback: () => {
+      for (let i = 0; i < 3; i++) {
+        const w = Phaser.Math.Between(40, Math.round(size * 3.4));
+        const blk = scene.add.rectangle(
+          x + Phaser.Math.Between(-Math.round(size * 3.2), Math.round(size * 3.2)),
+          y + Phaser.Math.Between(-Math.round(size * 0.9), Math.round(size * 0.9)),
+          w, Phaser.Math.Between(4, Math.round(size * 0.34)),
+          Phaser.Math.RND.pick([0x7cf9ff, 0xff2fd0, 0xffffff]), 1)
+          .setBlendMode(Phaser.BlendModes.ADD).setDepth(D - 1).setScrollFactor(0)
+          .setAlpha(Phaser.Math.FloatBetween(0.25, 0.7));
+        scene.tweens.add({
+          targets: blk, alpha: 0, duration: Phaser.Math.Between(70, 190),
+          onComplete: () => blk.destroy(),
+        });
+      }
+    },
+  }));
+
+  // --- 5. the number itself: hue cycling, jitter, one-frame corruption ------
+  timers.push(glitchText(scene, t, { step: 55, strength: 2 }));
+
+  // --- 6. the shake. Harder than RADIANT's, which is the whole point --------
+  shake(scene, 0.030, Math.round(hold * 0.75) + 260);
+
+  // Ghosts leave with the number.
+  scene.time.delayedCall(hold + 420, () => {
+    for (const g of ghosts) {
+      if (!g.active) continue;
+      scene.tweens.add({
+        targets: g, alpha: 0, duration: 300, onComplete: () => g.destroy(),
+      });
+    }
+  });
+  return timers;
+}
+
 /**
  * THE PAYOFF. Blooms `total` at (x, y) with everything its tier has earned:
  * color, size, aura, burst, shake, rainbow cycling, flame + embers, and at the
@@ -507,6 +698,9 @@ export function totalPayoffFX(scene, x, y, total, opts = {}) {
   const D = DEPTH.overlay;
   const size = Math.round(tier.size * scale);
 
+  // Every tier owns an sfx KEY; the file may not exist yet and sfx() is a
+  // silent no-op for a key with nothing behind it (payoff_infinity is the
+  // newest such slot — see docs/REQUESTS_AUDIO.txt).
   if (sound && tier.sfx) sfx(scene, tier.sfx, { volume: 0.8 });
 
   // --- 100k: the world goes dark so the number is the only thing left ---
@@ -561,13 +755,22 @@ export function totalPayoffFX(scene, x, y, total, opts = {}) {
     burst(scene, x, y, tier.tint, 6 + lvl * 3);
     // RADIANT is off the top of the ramp on purpose: it is the hardest hit the
     // camera ever takes, and the tiers below it are capped at 0.014 so there is
-    // somewhere left to go.
-    if (tier.radiant) shake(scene, 0.024, 560);
+    // somewhere left to go. INFINITY's own shake lives inside glitchFX, which
+    // is why it is not on this ramp at all.
+    if (tier.glitch) { /* glitchFX owns it */ }
+    else if (tier.radiant) shake(scene, 0.024, 560);
     else shake(scene, Math.min(0.002 + lvl * 0.0012, 0.014), 130 + lvl * 12);
   }
 
-  // --- 12.5k: hue cycling ---
   const timers = [];
+
+  // --- 1e30: THE CEILING. Runs LAST of the tier branches and returns its own
+  // timers, and it is the only branch that can fire because payoffTier answers
+  // the single highest tier a total reached — so the fire flicker, the rainbow
+  // and the two washes below/above are all skipped under `tier.glitch`.
+  if (tier.glitch) timers.push(...glitchFX(scene, t, x, y, D, hold, size));
+
+  // --- 12.5k: hue cycling ---
   if (tier.rainbow) {
     let h = 0;
     timers.push(scene.time.addEvent({
@@ -595,6 +798,10 @@ export function totalPayoffFX(scene, x, y, total, opts = {}) {
   scene.time.delayedCall(hold + 420, () => {
     stop();
     if (!t.active) return;
+    // The glitch left the glyph mid-tear and mid-corruption; it has to leave
+    // the screen as the number it actually is, from where it actually sits, or
+    // the exit tween starts from a jittered offset and reads as a stutter.
+    if (tier.glitch) t.setPosition(x, y).setText(prefix + fmtTotal(total));
     scene.tweens.add({
       targets: t, alpha: 0, y: y - 54, scale: 0.9, duration: 340,
       ease: 'Sine.easeIn', onComplete: () => t.destroy(),

@@ -12,6 +12,12 @@
 import {
   GAME_W, GAME_H, SIDEBAR_W, COLORS, DEPTH, CARD, CHARACTERS, PLAYER_BASE, SUIT_COLORS, SUIT_PIP_KEY, SUIT_GLYPH, PARCH,
   HOARD_LEFTOVER_BONUS, PARTICLE_VARIANTS, applyMobileCamera, MOBILE,
+  // THE TOUCH PASS (JC, 2026-08-10). TOUCH is MOBILE under its honest name —
+  // every `MOBILE ?` below it is a finger-size bump and stays one; TOUCH is
+  // what the two-tap model and the safe frame are asked about. PLAY_W is the
+  // arena's own width, which is 1920 on a phone and 1500 on a tablet, so
+  // anything sized "a fifth of the arena" says so instead of guessing.
+  TOUCH, SAFE, clearsCorners, PLAY_W,
 } from '../config.js';
 import { woodPanel } from '../ui/panels.js';
 import {
@@ -23,6 +29,7 @@ import {
   ZEAL_CAP, ZEAL_DAMAGE_PCT, zealCapFor, SHIELD_MULT_PCT,
   benchTriggers, STAMPS, FADE_VANISH_CHANCE, VALUE_BONUS_BY_MOD,
   ROULETTE_GOLD_CHIPS, ROULETTE_RED_MULT, ROULETTE_GREEN_VALUE,
+  INFINITY_CAP, isInfinite,
 } from '../core/scoring.js';
 import {
   tickStatuses, onEnemyAct, brittleMultiplier, addEnemyShield, absorbWithShield,
@@ -113,7 +120,7 @@ import { POTION_RARITY, POTION_BY_ID, potionUsableIn, drinkSfxKey, poisonStacksF
 import { fireAchievements } from '../ui/achievements.js';
 import { addPotionIcon, POTION_MAT, potionSpots, MAT_SHADOW } from '../ui/potionIcon.js';
 import { CardSprite } from '../ui/CardSprite.js';
-import { popNumber, popMessage, shake, burst, hitFlash, actionText, flashVignette, DEBUFF_COLORS, fmtNum, totalPayoffFX, payoffTier, fmtTotal, rainbowText, legible, INK_DARK, embers } from '../ui/juice.js';
+import { popNumber, popMessage, shake, burst, hitFlash, actionText, flashVignette, DEBUFF_COLORS, fmtNum, totalPayoffFX, payoffTier, fmtTotal, rainbowText, legible, INK_DARK, embers, INFINITY_GLYPH } from '../ui/juice.js';
 import { playMusic, stopMusic, musicFor } from '../core/music.js';
 import { sfx, sfxCapped, suspense, registerSfxLoop, refreshSfxVolume, sfxBusVolume } from '../core/sfx.js';
 import { settings } from '../core/settings.js';
@@ -125,6 +132,17 @@ import {
 import { addSettingsButton } from '../ui/settingsMenu.js';
 import { kineticScroll } from '../ui/kinetic.js';
 import { installLongPress, tapBind } from '../ui/touch.js';
+// THE TWO-TAP DESCRIPTION BOX (JC, 2026-08-10). One idiom for every surface
+// whose information hides behind an icon: first tap reads, second tap commits.
+// `twoTap` is TOUCH-ONLY BY DESIGN — it throws on desktop — so every call site
+// below keeps its own visible `else obj.on('pointerdown', ...)` fork.
+import { openChoiceBox, closeChoiceBox, twoTap } from '../ui/choicebox.js';
+import { installPointerPolicy } from '../ui/pointer.js';
+// THE CARD INSPECT BOX (JC, 2026-08-10): long left press or right-click on a
+// hand card prints what it is, what it scores and everything it is wearing.
+import { installCardInspect, hideCardInspect } from '../ui/inspect.js';
+// THE ROAD AHEAD, read-only, from inside the fight. Never MapScene itself.
+import { viewMapButton, hasMapToPeek } from '../ui/mapPeek.js';
 // THE ORACLE'S RECEIPT, pinned beside the hero (JC, 2026-08-05).
 import { addOracleChip, oracleCardKey } from '../ui/oracleChip.js';
 // ...and THE HERO'S PASSIVE stacked above it, which replaced the kit blurb
@@ -136,6 +154,45 @@ import { passiveAttribution } from '../core/passives.js';
 const ELITE_DROP_CHOICES = 3;
 
 const ARENA_CX = SIDEBAR_W + (GAME_W - SIDEBAR_W) * 0.50;
+
+/**
+ * ONE VERB, TWO INPUTS. There is no cursor on a phone, so a sentence that says
+ * "click" is describing a device the player is not holding. Every player-facing
+ * string that names the gesture goes through here rather than through a second
+ * copy of the sentence, so the two can never drift apart.
+ *
+ *   say('Click an enemy…', 'Tap an enemy…')
+ */
+const say = (mouse, touch) => (TOUCH ? touch : mouse);
+
+/**
+ * THE STRICTER CORNER TEST, for the audits.
+ *
+ * config.clearsCorners asks whether the box's NEAREST point to a corner arc is
+ * still on the glass — i.e. "is ANY of this visible". A box can pass it with a
+ * whole corner hanging out in the bite, which is precisely what a clipped
+ * element looks like: the settings cog at its shipped (2296, 42) passed
+ * clearsCorners while its outer corner sat 48px beyond the arc, and JC could
+ * see that on the phone.
+ *
+ * This asks whether ALL FOUR corners are inside the arc, which is the question
+ * "is any of this CLIPPED" actually is. The driver's contract is still
+ * clearsCorners; both verdicts are reported side by side so a human reading
+ * chromeAudit can see when the two disagree and why.
+ */
+function cornersInsideArc(box, r = SAFE.corner) {
+  if (!(r > 0)) return true;
+  for (const [cx, cy] of [[r, r], [GAME_W - r, r], [r, GAME_H - r], [GAME_W - r, GAME_H - r]]) {
+    for (const px of [box.left, box.right]) {
+      for (const py of [box.top, box.bottom]) {
+        const outX = cx <= r ? px < cx : px > cx;
+        const outY = cy <= r ? py < cy : py > cy;
+        if (outX && outY && Math.hypot(px - cx, py - cy) > r) return false;
+      }
+    }
+  }
+  return true;
+}
 
 /**
  * How long an opening-bell SIGNATURE sentence stays on screen, and therefore
@@ -179,6 +236,23 @@ const BLURB_STAGGER = BLURB_HOLD + BIG_MSG_FADE + 140;
  *               it always was: growth happens upward, into the freed band.
  *   cy          the row pair's centre, and the nook pouch's, and the drag
  *               code's row boundary.
+ *
+ * THE CORNER (2026-08-10). The mat is the one thing in the game pinned to a
+ * BOTTOM corner, so it is the one thing the phone's corner bite can reach from
+ * below. Measured against SAFE.corner = 150, centre (150, 930):
+ *
+ *   the leather's body   22..398 x 754..1046 -> clearsCorners TRUE
+ *   its bottom-left tip  (22, 1046), 172.7 from the centre — 22.7px INSIDE the
+ *                        bite. That tip is painted hide with a rounded corner
+ *                        of its own and nothing interactive within 30px of it,
+ *                        so it is left where JC's 0806 pass put it.
+ *   the bottom-left USE tag, which IS interactive, is the thing that had to be
+ *                        watched: see USE_TAG.lip, which grows the tag upward
+ *                        so its foot stays exactly where the 26-tall one's was.
+ *
+ * (clearsCorners tests the box's NEAREST point to the arc centre, so it answers
+ * "is any of this still on the glass" rather than "is all of it" — which is why
+ * the leather passes it. Both verdicts are reported by chromeAudit.)
  */
 const MAT = (() => {
   const pad = MOBILE ? 22 : 11;
@@ -240,16 +314,60 @@ const HEARTBEAT_VOLUME = 0.55;
  *
  *   needLeft   HANDS + gap + DECK, the wider of the left lane's two rows.
  *   needRight  DISCARD, which is also SORT.
+ *
+ * ===========================================================================
+ * BIGGER BY DEFAULT, SMALLER ONLY UNDER PRESSURE (JC, 2026-08-10)
+ * ===========================================================================
+ * "Bigger by default, filling their allotted space, easy to press; shrink/step
+ * aside dynamically ONLY when a large hand actually crowds them."
+ *
+ * core/dragSelect.handButtonLanes answers the SHRINK half and clamps its scale
+ * at 1 — it was written to stop plates overrunning a fan and has no opinion
+ * about spare room. So the GROW half is computed here instead, off the `avail`
+ * the same call already reports, between `minScale` and `maxScale`. One
+ * expression, two directions:
+ *
+ *     scale = clamp(avail / need, minScale, maxScale)
+ *
+ * At five cards on the phone each lane has 534px of air against a 322px need,
+ * so both lanes hit the 1.25 ceiling; at eight the left lane is exactly 337px
+ * against 322 and grows 4.8%; at twelve it is 206 against 322 and SHRINKS to
+ * 0.64, which is the old behaviour, unchanged, where it was always right.
+ *
+ *   plateH / fontSize  the plate itself. Desktop's 66/26 are the shipped pair
+ *                      and every literal that used to hold a copy of them
+ *                      (makeButton, layoutHandButtons.place) now reads these.
+ *   gutter             wall to lane. TOUCH takes HALF the safe inset (48): the
+ *                      DISCARD and SORT plates were 18px off a curved glass
+ *                      edge and read clipped on a real phone.
  */
 const BTN_LANE = {
-  rowY: [944, 1026],
+  // TOUCH LIFTS BOTH ROWS 30px (2026-08-10). JC: "the DISCARD and SORT plates
+  // are slightly clipped." The horizontal half of that is `gutter` below; this
+  // is the other half, and it is the one that was actually doing the damage.
+  // The bite is deepest on the DIAGONAL, so what gets clipped is the row-2
+  // plate's OUTER BOTTOM CORNER, not its edge:
+  //
+  //   shipped   SORT right 2322, bottom 1059 -> 184.6 from the arc centre
+  //             (2190, 930), i.e. 34.6px outside a 150 radius. Clipped.
+  //   gutter    right 2292, bottom 1065 -> 169.2. Still 19px out: the taller
+  //     alone   78px plate gave back most of what the gutter won.
+  //   +lift     right 2292, bottom 1035 -> 145.0. INSIDE. And row 1 rises with
+  //             it, because the two rows have to stay 2px apart or the plates
+  //             stack: 916+39 = 955, 996-39 = 957.
+  //
+  // Desktop keeps its shipped pair to the pixel; its canvas has no bite.
+  rowY: TOUCH ? [916, 996] : [944, 1026],
   gap: 18,
   playW: 240, discardW: 240, sortW: 240, handsW: 152, deckW: 152,
-  gutter: MOBILE ? 18 : 12,
-  // How much air the outermost card keeps to itself. The card is 164 wide on
+  gutter: TOUCH ? SAFE.x / 2 : 12,
+  // How much air the outermost card keeps to itself. The card is 180 wide on
   // the phone and its corner filigree is the part a plate must not touch.
   clear: MOBILE ? 26 : 18,
   minScale: 0.62,
+  maxScale: TOUCH ? 1.25 : 1,
+  plateH: TOUCH ? 78 : 66,
+  fontSize: TOUCH ? 30 : 26,
   // Desktop's shipped homes, by name. Never read on mobile.
   home: {
     play: 552, discard: -194, sort: -194, hands: 466, deck: 636,
@@ -313,11 +431,63 @@ const INTENT_ART = {
   stampSize: MOBILE ? 34 : 29,
 };
 
+/**
+ * ===========================================================================
+ * THE TOP-RIGHT CORNER, DERIVED (JC, 2026-08-10: "the settings cog is
+ * basically clipped")
+ * ===========================================================================
+ * The cog, the potion mat and the boss marquee are three objects fighting over
+ * one corner, and until now each of them held its own literal opinion about
+ * where the other two were (BOSS_BAR's comment quoted the mat's left edge;
+ * the enemy shield chip quoted `GAME_W - 330`). Move any one of them and the
+ * other two silently rotted.
+ *
+ * So the corner is now a CHAIN, computed once, top to bottom:
+ *
+ *   COG      pulled inside the safe frame. A phone's glass is not a rectangle
+ *            and the diagonal is where the bite is deepest, which is exactly
+ *            why the cog — alone in a corner — read as clipped while the mat
+ *            9pt from the same edge read fine.
+ *   POT_MAT  hangs UNDER the cog: its 'POTIONS' brass label starts below the
+ *            cog's foot, and its right edge stops 80px short of the glass.
+ *   BOSS_BAR.stripW  as wide as the room LEFT OVER between the arena's centre
+ *            and the mat's left edge. That is what the shipped 1120 was hand-
+ *            measured to be; it is now arithmetic, and it is finally right on
+ *            a tablet, whose 1500-wide arena the hand-measured number
+ *            overlapped by 185px.
+ */
+const COG = TOUCH
+  ? { x: GAME_W - SAFE.x - 48, y: SAFE.y + 54, size: 66 }
+  // Desktop's shipped corner, to the pixel. `size` mirrors what
+  // ui/settingsMenu.addSettingsButton draws (44 desktop / 66 touch) so the
+  // arithmetic below and the audit hook can both read it without that file
+  // having to grow a parameter.
+  : { x: GAME_W - 44, y: 42, size: 44 };
+
+const POT_MAT = (() => {
+  if (!TOUCH) return { cx: GAME_W - 169, cy: 136, w: 290 };
+  // A fifth of the arena, capped: 0.198 reproduces the shipped 380-ish phone
+  // mat on a 1920 arena and hands a 1500-wide tablet arena a 297 one instead
+  // of the same 350 it has no room for.
+  const w = Math.min(380, Math.round(PLAY_W * 0.198));
+  const h = w * POTION_MAT.aspect;
+  // 26 for the brass label that straddles the leather's top edge, 16 of air
+  // above that, and the cog's foot above THAT.
+  return {
+    cx: Math.round(GAME_W - 80 - w / 2),
+    cy: Math.round(COG.y + COG.size / 2 + 26 + 16 + h / 2),
+    w,
+  };
+})();
+
 /** The boss marquee across the top of the arena. */
 const BOSS_BAR = {
-  // 1120 and not more: centred on ARENA_CX (1380) the strip runs 820..1940,
-  // which is the widest that still clears the potion mat's left edge (1965).
-  stripW: MOBILE ? 1120 : 900,
+  // As wide as the room between the arena's centre and the potion mat's left
+  // edge allows, with 20px of air, and never wider than the 1120 the phone
+  // shipped. Phone: 2*(1880-20-1380) = 960. Tablet: 2*(1543-20-1170) = 706.
+  stripW: TOUCH
+    ? Math.min(1120, 2 * Math.floor((POT_MAT.cx - POT_MAT.w / 2) - 20 - ARENA_CX))
+    : 900,
   gap: 40,
   nameY: MOBILE ? 52 : 44, nameYDuo: MOBILE ? 44 : 38,
   barY: MOBILE ? 128 : 100, barYDuo: MOBILE ? 116 : 92,
@@ -330,22 +500,100 @@ const BOSS_BAR = {
   intentFloor: MOBILE ? 208 : 150,
 };
 
+/**
+ * THE USE TAG — the brass tab hanging off an active relic's lower lip.
+ *
+ * It was 72x26 with a 16px word, standing next to a 108px relic icon on a
+ * phone, and it fired `useActiveArtifact` on a RAW pointerdown: a one-per-fight
+ * irreversible active committed by a stray thumb on a 26px-tall target. It is
+ * a size class up on TOUCH and it OPENS THE RELIC'S BOX instead of firing (see
+ * buildActiveTag) — the second tap is the labelled button inside.
+ *
+ *   lip   the tag's centre, as an offset from the icon's BOTTOM EDGE. Negative
+ *         on TOUCH so a 40-tall tag's foot lands where the 26-tall one's did
+ *         (icon bottom + 14) rather than 7px further down the leather, which
+ *         on the bottom row is 7px further into the phone's corner bite.
+ */
+const USE_TAG = {
+  w: TOUCH ? 104 : 72,
+  h: TOUCH ? 40 : 26,
+  font: TOUCH ? 21 : 16,
+  spentFont: TOUCH ? 19 : 14,
+  lip: TOUCH ? -6 : 1,
+  nookY: TOUCH ? 53 : 46,
+};
+
+/**
+ * EVERY OTHER SIZE THE PHONE NEEDED, AS A TABLE (JC: "tables, not one-off
+ * numbers"). These were all literals written for a 1920 desktop and left at
+ * desktop size on a phone held at arm's length — the potion mat's own
+ * 'POTIONS' label was 15px on both builds, which is the clearest example.
+ * TOUCH runs 15-25% up; desktop's column is every shipped literal, unchanged.
+ */
+const CHROME = {
+  matPlaque: TOUCH ? 20 : 16,      // 'ARTIFACTS ▸ LEFT TO RIGHT' on the brass
+  nookLabel: TOUCH ? 17 : 14,      // 'THE GLOVE'
+  potionLabel: TOUCH ? 19 : 15,    // 'POTIONS'
+  tipTitle: TOUCH ? 27 : 22,       // the artifact tooltip's four sizes
+  tipBody: TOUCH ? 23 : 19,
+  tipNote: TOUCH ? 21 : 18,
+  tipOrder: TOUCH ? 19 : 16,
+  tipWrap: TOUCH ? 360 : 300,      // ...and the width they wrap inside
+  preview: TOUCH ? 32 : 27,        // the live hand-math line over the fan
+  eqName: TOUCH ? 31 : 27,         // the equation's caption (see EQ_NAME_Y)
+  eqNum: TOUCH ? 68 : 58,          // [SCORE] and [MULT]
+  eqTimes: TOUCH ? 46 : 40,        // the × between them
+  eqAoe: TOUCH ? 29 : 25,          // the splash chip beside the caption
+};
+
 // --- Score equation readout (replaces the old tapered hand banner) ---
 // The band between the enemy nameplates (which bottom out around y=450) and
 // the played row's top edge (y=563) is all the room there is, so the equation
 // takes the old banner's line and the hand name captions it from BELOW —
 // above it would land straight on an enemy's health bar.
-const EQ_Y = CARD.playedY - 176;   // 492 — the [SCORE] × [MULT] row
-const EQ_NAME_Y = EQ_Y + 44;       // 536 — hand name, caption-style beneath
+//
+// TOUCH TAKES 24 MORE (2026-08-10). The card grew to 180x270 and the played row
+// rose with it (playedY 668 -> 630), so the row's CEILING is now
+// playedY - CARD.h/2 = 630 - 135 = 495 — 41px higher than desktop's 563. At the
+// shipped -176 the caption would have sat at 498, inside the played cards. So:
+//
+//   EQ_Y      630 - 200 = 430          the [SCORE] × [MULT] row
+//   EQ_NAME_Y 430 + 44  = 474          the caption
+//   caption's line box  474 ± (31 × 1.28)/2 = 454.2 .. 493.8
+//   the played row's ceiling            495                    -> 1.2px clear
+//
+// which is why CHROME.eqName is 31 and not the 33 the same 15-25% pass gave
+// everything else: 33 lands the line box on 495 exactly.
+const EQ_Y = CARD.playedY - (TOUCH ? 200 : 176);   // 430 touch / 492 desktop
+const EQ_NAME_Y = EQ_Y + 44;       // 474 / 536 — hand name, caption-style beneath
 const EQ_GAP = 32;                 // half-gap: numbers grow OUTWARD from the ×
 
-/** Mult reads as a clean integer whenever it is one (×2, not ×2.00). */
-const fmtMult = (m) => (Math.abs(m - Math.round(m)) < 0.005
-  ? `${Math.round(m)}` : `${Math.round(m * 100) / 100}`);
+/**
+ * Mult reads as a clean integer whenever it is one (×2, not ×2.00).
+ *
+ * ...and as ∞ at the ceiling. The mult is clamped at INFINITY_CAP by the same
+ * clamp the damage is (scoring.capNum), so at the top of the game the two are
+ * literally the same number and must read the same way. Without this the mult
+ * side printed "1e+30" beside a score side that already said ∞ — and a
+ * non-finite mult used to print the raw string "Infinity".
+ */
+const fmtMult = (m) => {
+  if (!Number.isFinite(m) || m >= INFINITY_CAP) return INFINITY_GLYPH;
+  return Math.abs(m - Math.round(m)) < 0.005
+    ? `${Math.round(m)}` : `${Math.round(m * 100) / 100}`;
+};
 
-/** "Flush or better" for Meteor Sigil — the three SECRET hands count too. */
+/**
+ * "Flush or better" for Meteor Sigil — the four SECRET hands count too.
+ *
+ * SIX OF A KIND is on the list (2026-08-10): the relic reads "flush-or-better"
+ * and the top of the ladder is unambiguously better than a flush. Leaving the
+ * game's biggest hand off the game's widest relic would be the 0731 wave's bug
+ * (secrets silently excluded from a hand-kept set) happening a third time.
+ */
 const FLUSH_PLUS = new Set([
   'flush', 'fullHouse', 'quads', 'straightFlush', 'fiveOfAKind', 'flushHouse', 'flushFive',
+  'sixOfAKind',
 ]);
 
 /**
@@ -727,6 +975,21 @@ export class CombatScene extends Phaser.Scene {
   }
 
   /** One place to assemble the scoring state, incl. every artifact mod. */
+  /**
+   * HOW THIS SCENE EVALUATES A HAND RIGHT NOW.
+   *
+   * evaluateHand and bestHandOf are pure and know nothing about the belt, so
+   * every caller in the scene — the preview, the DOUBLE JEOPARDY gate, the
+   * committed play, the dev hook — has to hand them the same options bag or the
+   * hand you are shown and the hand you play can be two different hands. One
+   * method, read four times.
+   */
+  handEvalOpts() {
+    return {
+      ofAKindMinus1: !!(this._forceOfAKindMinus1 || collectMods().ofAKindMinus1),
+    };
+  }
+
   buildScoreState(cards = null) {
     // THE ROPEMAKER'S NOOSE is applied HERE, around the two readers that cannot
     // take a list of their own (collectMods and collectModList both read the
@@ -902,8 +1165,14 @@ export class CombatScene extends Phaser.Scene {
     // to be. handValue is keyed by hand TYPE, so the bonus is stamped onto the
     // type this selection actually makes — which means the PREVIEW and the PLAY
     // read the same number, and the ice rides the mult like any other value.
+    // THE UNDERSTUDY'S RULE, forced from a driver. The relic itself ships next
+    // wave and will write mods.ofAKindMinus1 through collectMods like any other
+    // relic; this is the same channel, set by hand, so the engine path a driver
+    // exercises is the exact path the relic will take. __hfCombat.forceSixOfKind()
+    if (this._forceOfAKindMinus1) mods.ofAKindMinus1 = (mods.ofAKindMinus1 ?? 0) + 1;
+
     if (this.potionIceValue > 0 && cards?.length) {
-      const iced = bestHandOf(cards).type;
+      const iced = bestHandOf(cards, { ofAKindMinus1: !!mods.ofAKindMinus1 }).type;
       mods.handValue[iced] = (mods.handValue[iced] ?? 0) + this.potionIceValue;
     }
 
@@ -980,6 +1249,24 @@ export class CombatScene extends Phaser.Scene {
   buildScene() {
     applyMobileCamera(this);   // no-op on desktop
     installLongPress(this);    // hold = hover on touch; no-op on desktop
+    installPointerPolicy(this);   // right-click never acts, anywhere
+    /**
+     * THE INSPECT GESTURE, armed for the fan and for every picker this scene
+     * opens over it. `resolve` is the whole policy: a CardSprite is
+     * inspectable when it is in the hand (where the fight knows its frost, its
+     * seal and its gaze) or when it was drawn by a picker/viewer, which tags
+     * itself with `picker`. Anything else — a played card mid-cascade, a
+     * decorative card on a pack wrapper — answers null and the hold does
+     * nothing at all.
+     */
+    installCardInspect(this, (obj) => {
+      if (!(obj instanceof CardSprite)) return null;
+      if (this.handCards?.includes(obj)) {
+        return { card: obj.card, sprite: obj, burned: isBurned(this.burnedCards, obj.card) };
+      }
+      if (obj.getData?.('picker')) return { card: obj.card, sprite: obj, depth: obj.depth + 4 };
+      return null;
+    });
     window.__hfScene = 'combat';
     /**
      * THE PACK TABLE, FETCHED WHILE THE FIGHT HAPPENS. Every road out of this
@@ -1000,6 +1287,11 @@ export class CombatScene extends Phaser.Scene {
     this._sfxLoopOff?.();
     this._sfxLoopOff = registerSfxLoop(() => this.applyHeartbeatVolume());
     this.events.once('shutdown', () => { this._sfxLoopOff?.(); this._sfxLoopOff = null; });
+    // ...and the two-tap box, for the same reason. choicebox wires its own
+    // shutdown teardown the first time one opens; this covers the handle THIS
+    // scene keeps, which nothing else knows about.
+    this.events.once('shutdown', () => { closeChoiceBox(this); this._potConfirm = null; });
+    this._potConfirm = null;
     this.pstatTip = null;      // hover tip from the previous fight died with the display list
     // ...and the Oracle chip and ITS tip, for exactly the same reason: both
     // died with the last fight's display list and a kept handle would let a
@@ -1478,6 +1770,82 @@ export class CombatScene extends Phaser.Scene {
         this.redrawHand();
         return this.handCards.length;
       },
+      /**
+       * SIX OF A KIND, WITHOUT THE RELIC (2026-08-10).
+       *
+       * THE UNDERSTUDY ships next wave; the engine ships now, so drivers and
+       * every future wave need a way in. This sets the SAME mod channel the
+       * relic will set (mods.ofAKindMinus1, through buildScoreState) and stages
+       * five of one rank, then selects them — so what a driver exercises is the
+       * real classification path and the real scoring path, not a shortcut.
+       *
+       * Pass `rank`/`suit` to choose the pile; leave `select` false to set the
+       * rule up and pick the cards by hand.
+       */
+      forceSixOfKind: ({ rank = 13, suit = 'swords', select = true } = {}) => {
+        this._forceOfAKindMinus1 = true;
+        for (const c of [...this.selected]) this.toggleCard(c);
+        const staged = [];
+        for (let i = 0; i < 5 && i < this.handCards.length; i++) {
+          const cs = this.handCards[i];
+          cs.card.rank = rank;
+          cs.card.suit = suit;
+          const deckCard = run.runDeck.find(c => c.id === cs.card.id);
+          if (deckCard) Object.assign(deckCard, { rank, suit });
+          staged.push(this.replaceCardSprite(cs) ?? cs);
+        }
+        if (select) {
+          for (const cs of this.handCards.slice(0, 5)) {
+            if (!cs.selected && !cs.playLocked) this.toggleCard(cs);
+          }
+        }
+        this.updatePreview?.();
+        return {
+          on: true, staged: staged.length, selected: this.selected.length,
+          hand: this.selected.length
+            ? bestHandOf(this.selected.map(c => c.card), this.handEvalOpts()).type : null,
+        };
+      },
+      /** Turn THE UNDERSTUDY's rule on or off on its own (no staging). */
+      setOfAKindMinus1: (on = true) => {
+        this._forceOfAKindMinus1 = !!on;
+        this.updatePreview?.();
+        return this.handEvalOpts();
+      },
+      /**
+       * REACH THE CEILING FROM A DRIVER. Banks a flat mult big enough that the
+       * next hand clamps at INFINITY_CAP, through the ordinary scene channel a
+       * potion or a blessing uses (bonusMods.handMult on every hand type), so
+       * the whole equation, cascade, payoff and blow are the real ones.
+       */
+      forceInfinity: (on = true) => {
+        // newRun rebuilds bonusMods as `{ suitValue: {} }` and the handMult bag
+        // is only created when something first writes to it (packs.js uses the
+        // same `??=`), so a hook reaching straight in throws on a virgin run.
+        run.bonusMods.handMult ??= {};
+        for (const t of Object.keys(HAND_DEFS)) {
+          run.bonusMods.handMult[t] = on ? INFINITY_CAP : 0;
+        }
+        this.updatePreview?.();
+        return { on: !!on, cap: INFINITY_CAP };
+      },
+      /** WHAT THE LAST BLOW ACTUALLY DID TO A BODY (see damageEnemy). */
+      lastHit: () => (this._lastHit ? { ...this._lastHit } : null),
+      /** The ∞ contract, as plain numbers: what was scored, what was shown. */
+      infinityState: () => ({
+        cap: INFINITY_CAP,
+        damage: this._lastRes?.damage ?? 0,
+        effMult: this._lastRes?.effMult ?? 0,
+        scoreSide: this._lastRes?.scoreSide ?? 0,
+        infinite: !!this._lastRes?.infinite,
+        handSquared: !!this._lastRes?.handSquared,
+        multBeforeSquare: this._lastRes?.multBeforeSquare ?? 0,
+        handType: this._lastRes?.handType ?? null,
+        eqScoreText: this.eqScore?.text ?? '',
+        eqMultText: this.eqMult?.text ?? '',
+        glyph: INFINITY_GLYPH,
+        lastHit: this._lastHit ? { ...this._lastHit } : null,
+      }),
       handAudit: () => {
         const box = o => (o ? {
           x: o.x, y: o.y, w: o.displayWidth, h: o.displayHeight,
@@ -1497,6 +1865,20 @@ export class CombatScene extends Phaser.Scene {
           cards,
           buttons: [this.playBtn, this.handsBtn, this.deckBtn, this.discardBtn, this.sortBtn]
             .map(box).filter(Boolean),
+          // THE PLATE TABLE AND THE SCALE IT ACTUALLY APPLIED (2026-08-10).
+          // `up` is layoutHandButtons' own answer, not handButtonLanes' — the
+          // lane helper clamps at 1 and the grow half is computed in the scene,
+          // so a driver asserting "a five-card hand leaves the plates BIG" has
+          // to read the number the scene used rather than the one it was
+          // handed. `lanes.*.scale` is still reported beside it, unchanged.
+          plate: {
+            plateH: BTN_LANE.plateH, fontSize: BTN_LANE.fontSize,
+            minScale: BTN_LANE.minScale, maxScale: BTN_LANE.maxScale,
+            gutter: BTN_LANE.gutter, clear: BTN_LANE.clear,
+            needLeft: BTN_LANE.needLeft, needRight: BTN_LANE.needRight,
+            rowY: [...BTN_LANE.rowY],
+          },
+          up: this._btnUp ?? null,
           sidebarW: SIDEBAR_W, gameW: GAME_W, gameH: GAME_H,
         };
       },
@@ -1563,15 +1945,155 @@ export class CombatScene extends Phaser.Scene {
           nook: ic.x > SIDEBAR_W,
         } : null)).filter(Boolean),
         nook: { x: NOOK.x, y: NOOK.y, worn: nookArtifacts().length },
+        // THE USE TAGS AS BOXES (2026-08-10). They are the smallest interactive
+        // thing on the mat and the one pinned nearest a bottom corner, so the
+        // sizing driver asserts BOTH their size class and their clearance.
+        // `clears` is clearsCorners' verdict (nearest point still on the glass);
+        // `cornerOK` is the stricter one — every one of the box's four corners
+        // inside the arc — which is the question a clipped tag actually asks.
+        tagTable: { ...USE_TAG },
+        tags: (this.activeTags ?? []).filter(t => t.img?.active).map(t => {
+          const b = {
+            id: t.art.id, spent: !!t.spent, label: t.label.text,
+            x: t.img.x, y: t.img.y, w: t.img.displayWidth, h: t.img.displayHeight,
+            left: t.img.x - t.img.displayWidth / 2, right: t.img.x + t.img.displayWidth / 2,
+            top: t.img.y - t.img.displayHeight / 2, bottom: t.img.y + t.img.displayHeight / 2,
+            interactive: !!t.img.input,
+          };
+          b.clears = clearsCorners(b);
+          b.cornerOK = cornersInsideArc(b);
+          return b;
+        }),
         chips: {
           passive: this.passiveChip ? { x: this.passiveChip.x, y: this.passiveChip.y, size: this.passiveChip.chipSize } : null,
           oracle: this.oracleChip ? { x: this.oracleChip.x, y: this.oracleChip.y, size: this.oracleChip.chipSize } : null,
         },
       }),
+      // =====================================================================
+      // THE TWO-TAP MODEL, AS PLAIN DATA (2026-08-10)
+      // =====================================================================
+      /**
+       * Whatever description box is open, or `{ open: false }`. ui/choicebox
+       * publishes it — title, body, note, its own box, every button's label,
+       * enabled state and screen rect, plus `press(label)` and `close()`. A
+       * driver asserts NOTHING COMMITTED ON THE FIRST TAP by reading this.
+       */
+      box: () => window.__hfBox ?? { open: false },
+      /**
+       * THE FIRST TAP on a belt (or nook) relic, performed programmatically:
+       * opens that relic's box and commits nothing at all. Returns the box key,
+       * or null on a desktop build, where there is no box to open — the desktop
+       * fork is a straight `sellPromptInFight`, and `sellRelic(id)` is the hook
+       * that drives that.
+       */
+      tapRelic: (id) => {
+        if (!TOUCH) return null;
+        const art = run.artifacts.find(a => a.id === id);
+        if (!art) return null;
+        const icon = this.artifactIcons?.[run.artifacts.indexOf(art)];
+        const anchor = icon?.active
+          ? this.relicAnchor(icon)
+          : () => ({ x: MAT.cx, y: MAT.cy, w: 0, h: 0 });
+        openChoiceBox(this, this.relicBoxSpec(art, anchor));
+        return window.__hfBox?.key ?? null;
+      },
+      /** ...and the same first tap on a potion. Nothing is drunk. */
+      tapPotion: (i) => {
+        if (!TOUCH) return null;
+        this.confirmPotionTap(i);
+        return window.__hfBox?.key ?? null;
+      },
+      /** The safe frame the corner pass is written against. */
+      safe: () => ({ ...SAFE, gutter: BTN_LANE.gutter }),
+      /**
+       * EVERY CORNER-PINNED THING IN THE ARENA, AS A BOX.
+       *
+       * The sizing driver asserts clearsCorners on all of them; `cornerOK` is
+       * the stricter all-four-corners verdict beside it, and `collisions` is
+       * the pairwise overlap check the cog and the potion mat exist to fail if
+       * either is ever moved back into the other.
+       */
+      chromeAudit: () => {
+        const B = (label, x, y, w, h) => {
+          const b = {
+            label, x, y, w, h,
+            left: x - w / 2, right: x + w / 2, top: y - h / 2, bottom: y + h / 2,
+          };
+          b.clears = clearsCorners(b);
+          b.cornerOK = cornersInsideArc(b);
+          return b;
+        };
+        const hit = (a, c) => !!a && !!c
+          && a.left < c.right && a.right > c.left && a.top < c.bottom && a.bottom > c.top;
+        const mz = this.potMatZone();
+        // COG.size is the NOMINAL box (the max dimension settingsMenu scales the
+        // gear into). `drawn` is what the image actually measures, which is
+        // smaller on the short axis and grows again while the hover tween has
+        // it rotated — so the audit asserts the nominal square and reports the
+        // real one beside it.
+        const cog = B('COG', COG.x, COG.y, COG.size, COG.size);
+        cog.drawn = this.cogBtn?.active
+          ? { w: Math.round(this.cogBtn.displayWidth), h: Math.round(this.cogBtn.displayHeight) }
+          : null;
+        // The mat's box INCLUDES its brass label band: the label is what the
+        // cog would land on first, and a check that only knew about the leather
+        // would call a collision a clearance.
+        const potMat = B('POTIONS', mz.x, (mz.labelTop + mz.bottom) / 2,
+          mz.w, mz.bottom - mz.labelTop);
+        const artMat = B('ARTIFACTS', MAT.pad + MAT.bodyW / 2, MAT.bodyTop + MAT.bodyH / 2,
+          MAT.bodyW, MAT.bodyH);
+        // DECOR, NOT A TARGET — and the distinction is load-bearing (2026-08-10).
+        // Both mats are painted leather with interactive things standing ON
+        // them; the SOCKETS, the bottles and the USE tags are swept separately
+        // and every one of them clears. The artifact mat's own bottom-left
+        // corner does NOT, and has not since the 0806 "extend it downward"
+        // pass: at 420 wide and 292 tall, bottom-anchored in the corner of a
+        // phone, its corner is ~23px outside a 150px arc. Nothing clickable is
+        // within 30px of that corner. Moving it is a design call (the two
+        // levers are MAT.bottom and MAT.pad, and both undo work JC asked for),
+        // so the audit REPORTS it rather than quietly failing the build.
+        potMat.decor = true;
+        artMat.decor = true;
+        const map = this.mapBtn?.active
+          ? B('MAP', this.mapBtn.x, this.mapBtn.y, this.mapBtn.displayWidth, this.mapBtn.displayHeight)
+          : null;
+        const plate = (btn) => (btn?.active
+          ? B(btn.getData('hfLabel') ?? '?', btn.x, btn.y, btn.displayWidth, btn.displayHeight)
+          : null);
+        const rows = BTN_LANE.rowY.map((y, i) => ({
+          row: i, y, plateH: BTN_LANE.plateH,
+          plates: (i === 0
+            ? [this.playBtn, this.discardBtn]
+            : [this.handsBtn, this.deckBtn, this.sortBtn]).map(plate).filter(Boolean),
+        }));
+        const all = [cog, potMat, artMat, map, ...rows.flatMap(r => r.plates)].filter(Boolean);
+        // The boss marquee is not corner-pinned, but it is the third party in
+        // the top-right argument and the only one whose width is derived from
+        // the other two — so it is reported as the span it will occupy.
+        const strip = {
+          w: BOSS_BAR.stripW,
+          left: ARENA_CX - BOSS_BAR.stripW / 2, right: ARENA_CX + BOSS_BAR.stripW / 2,
+          arenaCx: ARENA_CX,
+        };
+        return {
+          gameW: GAME_W, gameH: GAME_H, playW: PLAY_W, sidebarW: SIDEBAR_W,
+          touch: TOUCH, safe: { ...SAFE, gutter: BTN_LANE.gutter },
+          cog, potMat, artMat, map, rows, strip,
+          potZone: mz,
+          collisions: {
+            cogVsMat: hit(cog, potMat),
+            mapVsStrip: !!map && map.right > strip.left,
+            matVsStrip: potMat.left < strip.right,
+            rowsOverlap: rows[0].plates.some(a => rows[1].plates.some(c => hit(a, c))),
+          },
+          allClear: all.every(b => b.clears),
+          allCornerOK: all.every(b => b.cornerOK),
+        };
+      },
       /** What the CURRENT selection evaluates to, straight from the evaluator. */
       previewHand: () => {
         const cards = this.selected.map(c => c.card);
-        return cards.length ? evaluateHand(cards) : null;
+        return cards.length ? evaluateHand(cards, this.handEvalOpts()) : null;
       },
       // --- ACTIVE-USE relics (the Hushed Bell, the Wheel of Divinity) ---
       /** Everything a verification run needs about the belt's clickable relics. */
@@ -1922,11 +2444,30 @@ export class CombatScene extends Phaser.Scene {
     this.buildHandUI();
     this.buildPotionBelt();
     this.startFight();
-    addSettingsButton(this);
+    // THE COG COMES IN OFF THE GLASS (JC, 2026-08-10: "the settings cog is
+    // basically clipped"). Its shipped home put a 66px icon centred 44px from
+    // a corner whose glass is cut by a ~55pt radius — the deepest bite on the
+    // whole screen is the one it was sitting in. COG holds both builds' homes;
+    // desktop's is passed as literally the same pair the default arguments
+    // are, so that build cannot move.
+    //
+    // ui/settingsMenu.addSettingsButton takes (scene, x, y, depth) and sizes
+    // itself 66/44 off MOBILE — there is no size parameter to pass, so the
+    // touch cog stays 66px. See the report: growing it needs one line there.
+    this.cogBtn = addSettingsButton(this, COG.x, COG.y);
+    // THE MAP, FROM INSIDE THE FIGHT (JC, 2026-08-10). Top-left of the arena:
+    // clear of the boss marquee (centred on ARENA_CX, 900 desktop / 960 phone /
+    // 706 tablet) and clear of the potion mat in the opposite corner, on both
+    // builds. On TOUCH it drops inside the safe frame's top edge — at y 40 its
+    // ceiling was 15, which is 9px above SAFE.y.
+    if (hasMapToPeek()) {
+      this.mapHud = this.add.container(0, 0).setDepth(DEPTH.overlay - 1);
+      this.mapBtn = viewMapButton(this, this.mapHud, SIDEBAR_W + 88, TOUCH ? SAFE.y + 32 : 40);
+    }
     if (settings.dev) {
-      const devBtn = this.add.image(SIDEBAR_W + 84, 40, 'btn_green').setDisplaySize(120, 48)
+      const devBtn = this.add.image(SIDEBAR_W + 250, 40, 'btn_green').setDisplaySize(120, 48)
         .setDepth(DEPTH.overlay - 1).setInteractive({ useHandCursor: true });
-      this.add.text(SIDEBAR_W + 84, 37, 'WIN ▶', {
+      this.add.text(SIDEBAR_W + 250, 37, 'WIN ▶', {
         fontFamily: 'Lilita One', resolution: 2, fontSize: '22px', color: '#0c3d18',
       }).setOrigin(0.5).setDepth(DEPTH.overlay - 1);
       devBtn.on('pointerdown', () => {
@@ -1951,14 +2492,29 @@ export class CombatScene extends Phaser.Scene {
     this._pendingDrag = null;
     this._sweptThisPress = false;
     this._sweepTickAt = 0;
-    this.input.on('pointerdown', () => { this._sweptThisPress = false; });
+    this._inspectHeld = false;
+    this._reorderedThisPress = false;
+    this.input.on('pointerdown', () => {
+      this._sweptThisPress = false;
+      this._inspectHeld = false;
+      this._reorderedThisPress = false;
+    });
     this.input.on('gameobjectup', (p, obj) => {
       // A sweep ends on top of a card, and Phaser reports that release like any
       // other click. Without this the last card a sweep crossed would be toggled
       // straight back off by its own gesture.
       if (this._sweptThisPress) return;
+      // ...and the same is true of a HOLD: the inspect box opens under a finger
+      // that is still down, and the release that follows is not a pick.
+      if (this._inspectHeld) { this._inspectHeld = false; return; }
+      // Belt and braces over ui/pointer.js: a right press can never get this
+      // far, and if it ever did it would select a card, which is the exact bug
+      // the policy exists to kill.
+      if (p.button === 2) return;
+      // A press that became a REORDER is not a click, whichever card it happens
+      // to be released over. (Per-press, not per-card — see beginReorder.)
+      if (this._reorderedThisPress) return;
       if (obj instanceof CardSprite && this.handCards?.includes(obj)) {
-        if (obj._justDragged) { obj._justDragged = false; return; }
         this.toggleCard(obj);
       }
     });
@@ -2387,6 +2943,15 @@ export class CombatScene extends Phaser.Scene {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '25px', color: PARCH.accent,
     }).setOrigin(1, 0.5);
     g.add(shIcon); g.add(this.shieldText); g.add(this.resourceText);
+    // WHAT SHIELD ACTUALLY DOES (JC, 2026-08-10). The number on its own never
+    // said whether it decays, whether it caps, or what walks straight past it —
+    // and two of the three answers are surprising. The hit box covers the glyph
+    // AND the number, because the number is the thing a player points at.
+    const shHit = this.add.rectangle(38, 468, 110, 44, 0x000000, 0)
+      .setOrigin(0, 0.5).setInteractive({ useHandCursor: true });
+    shHit.on('pointerover', () => this.showRuleTip(SIDEBAR_W - 20, 452, 'SHIELD', this.shieldRuleText()));
+    shHit.on('pointerout', () => this.hideIntentTip());
+    g.add(shHit);
 
     this.pstatUI = this.add.container(0, 0).setDepth(DEPTH.panel + 1);
     g.add(this.pstatUI);
@@ -2428,7 +2993,7 @@ export class CombatScene extends Phaser.Scene {
     // which already carried it. Pale cream on brass without one is the bug.
     const plaqueY = MAT.y + MAT_PLAQUE.y + MAT_PLAQUE.h / 2;
     const plaqueLabel = legible(this.add.text(SIDEBAR_W / 2, plaqueY, 'ARTIFACTS  ▸  LEFT TO RIGHT', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '16px', color: '#e8d3a4',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.matPlaque}px`, color: '#e8d3a4',
     }), { shadow: false }).setOrigin(0.5);
     // Whatever the label says, it stays ON the brass: it used to spill off both
     // ends of a plaque cut for one word and read as a mis-set caption.
@@ -2452,7 +3017,7 @@ export class CombatScene extends Phaser.Scene {
     // the halo bleed) with a readable margin above that.
     this.previewCeilY = CARD.fanY - (CARD.h / 2) * 1.06 - CARD.selectLift - 13;
     this.previewText = this.add.text(ARENA_CX, this.previewCeilY - 36, '', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '27px', color: '#ffd897',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.preview}px`, color: '#ffd897',
       stroke: '#241505', strokeThickness: 6,
     }).setOrigin(0.5).setDepth(DEPTH.fx).setAlpha(0);
     this._previewWant = '';
@@ -2773,7 +3338,7 @@ export class CombatScene extends Phaser.Scene {
       // while charged, cold iron and ✓ once spent. It is the button. The offset
       // is read off the ICON's own size so the tab keeps hanging off the lip
       // rather than climbing onto the painting as the row's size class changes.
-      if (art.active) this.buildActiveTag(art, icon, x, y + iconSize / 2 + 1);
+      if (art.active) this.buildActiveTag(art, icon, x, y + iconSize / 2 + USE_TAG.lip);
       const entry = { art, icon, shadow, dragging: false };
       entries.push(entry);
 
@@ -2803,18 +3368,41 @@ export class CombatScene extends Phaser.Scene {
       // pointerup used to fall through to this icon and read as a fresh click:
       // press SPIN on the Slot Button, and the sell panel opened over the spin.
       // The same started-here rule the skins dimmer already follows.
-      icon.on('pointerdown', () => { entry.pressed = true; });
-      icon.on('pointerup', (pointer) => {
-        const started = entry.pressed;
-        entry.pressed = false;
-        if (!started) return;
-        if (entry.dragging || this._artifactDragging) return;
-        if (pointer.getDistance?.() > 8) return;
-        if (this._touchHoldFired) return;   // a HOLD reads; only a tap opens
-        this.sellPromptInFight(art);
-      });
+      //
+      // TOUCH TAKES THE OTHER FORK (2026-08-10): the first tap opens the
+      // relic's box — name, rarity, full rules, chain position, and the USE /
+      // SELL buttons — and commits nothing. DRAG-REORDER IS UNAFFECTED:
+      // `this.input.dragDistanceThreshold` is 14, which IS `SLOP` in
+      // ui/touch.js, and tapBind refuses any gesture that drifted that far, so
+      // the two gestures are separated by the same one number.
+      if (TOUCH) {
+        // `dragged` is the PRESS's latch, not the frame's: a reorder that
+        // wandered out past the 14px threshold and came back to within it
+        // would otherwise pass tapBind's slop test on the way up and open a
+        // box the player never asked for. Same idea as `_reorderedThisPress`
+        // in the fan, and for the same reason.
+        icon.on('pointerdown', () => { entry.dragged = false; });
+        twoTap(this, icon, {
+          ...this.relicBoxSpec(art, this.relicAnchor(icon)),
+          // Belt and braces on top of the slop test: a relic that is in the
+          // air, or whose neighbour is, is being REORDERED, not read.
+          guard: () => !entry.dragged && !entry.dragging && !this._artifactDragging,
+        });
+      } else {
+        icon.on('pointerdown', () => { entry.pressed = true; });
+        icon.on('pointerup', (pointer) => {
+          const started = entry.pressed;
+          entry.pressed = false;
+          if (!started) return;
+          if (entry.dragging || this._artifactDragging) return;
+          if (pointer.getDistance?.() > 8) return;
+          if (this._touchHoldFired) return;   // a HOLD reads; only a tap opens
+          this.sellPromptInFight(art);
+        });
+      }
       icon.on('dragstart', () => {
         entry.pressed = false;
+        entry.dragged = true;
         entry.dragging = true;
         this._artifactDragging = true;
         this.hideIntentTip();
@@ -2903,7 +3491,7 @@ export class CombatScene extends Phaser.Scene {
       const x = NOOK.x, y = NOOK.y + k * 128;
       this.artifactPanelG.add(this.add.image(x, y, 'hud_nook'));
       this.artifactPanelG.add(this.add.text(x, y - 78, 'THE GLOVE', {
-        fontFamily: 'Lilita One', resolution: 2, fontSize: '14px', color: '#e8d3a4',
+        fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.nookLabel}px`, color: '#e8d3a4',
         stroke: '#241505', strokeThickness: 4,
       }).setOrigin(0.5));
       const shadow = addArtifactIcon(this, x + 3, y + 12, art, 62).setTint(0x120a06).setAlpha(0.4);
@@ -2925,15 +3513,25 @@ export class CombatScene extends Phaser.Scene {
       // anything else, and the same click opens the same confirm. Same
       // started-here guard as the row: a USE tag's gesture must not fall
       // through to this icon when the tag disables itself mid-click.
-      let nookPressed = false;
-      icon.on('pointerdown', () => { nookPressed = true; });
-      icon.on('pointerup', (pointer) => {
-        const started = nookPressed;
-        nookPressed = false;
-        if (!started || pointer.getDistance?.() > 8) return;
-        this.sellPromptInFight(art);
-      });
-      if (art.active) this.buildActiveTag(art, icon, x, y + 46);
+      //
+      // ...AND THE SAME BOX ON TOUCH. This branch also fixes a latent bug the
+      // belt did not have: the nook's pointerup was never gated on
+      // `_touchHoldFired`, so a long-press that read the glove's tooltip ALSO
+      // opened the sell confirm on top of what it had just been asked to show.
+      // tapBind refuses a hold outright, so the whole class goes away here.
+      if (TOUCH) {
+        twoTap(this, icon, this.relicBoxSpec(art, this.relicAnchor(icon)));
+      } else {
+        let nookPressed = false;
+        icon.on('pointerdown', () => { nookPressed = true; });
+        icon.on('pointerup', (pointer) => {
+          const started = nookPressed;
+          nookPressed = false;
+          if (!started || pointer.getDistance?.() > 8) return;
+          this.sellPromptInFight(art);
+        });
+      }
+      if (art.active) this.buildActiveTag(art, icon, x, y + USE_TAG.nookY);
     });
 
     // ...and the noose goes back on. The mat was just rebuilt from scratch, so
@@ -3163,11 +3761,17 @@ export class CombatScene extends Phaser.Scene {
    * The USE tab: a brass tag pinned to a clickable relic's lower lip, breathing
    * while it is charged. Clicking it spends the relic's one charge for this
    * fight. Spent, it turns cold and wears a ✓ until the next fight.
+   *
+   * ON TOUCH IT NO LONGER SPENDS ANYTHING. It is still tappable — it is the
+   * shortcut, and the biggest thing on the cell that ISN'T the relic art — but
+   * the tap opens the relic's box and the box's own USE button is what fires
+   * the charge. A one-per-fight irreversible active had been committing on a
+   * raw pointerDOWN, on a 72x26 plate, beside a 108px icon.
    */
   buildActiveTag(art, icon, x, y) {
-    const img = this.add.image(x, y, 'hud_tag_use').setDisplaySize(72, 26);
+    const img = this.add.image(x, y, 'hud_tag_use').setDisplaySize(USE_TAG.w, USE_TAG.h);
     const label = this.add.text(x, y - 2, art.active.label ?? 'USE', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '16px', color: '#3d2a08',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${USE_TAG.font}px`, color: '#3d2a08',
     }).setOrigin(0.5);
     this.artifactPanelG.add(img);
     this.artifactPanelG.add(label);
@@ -3182,7 +3786,8 @@ export class CombatScene extends Phaser.Scene {
       this.hideIntentTip();
       this.tweens.add({ targets: [img, label], scale: 1, duration: 100 });
     });
-    img.on('pointerdown', () => this.useActiveArtifact(art));
+    if (TOUCH) twoTap(this, img, this.relicBoxSpec(art, this.relicAnchor(icon)));
+    else img.on('pointerdown', () => this.useActiveArtifact(art));
     this.syncActiveTag(tag);
     return tag;
   }
@@ -3226,15 +3831,21 @@ export class CombatScene extends Phaser.Scene {
     tag.breath?.remove();
     tag.breath = null;
     if (spent) {
-      tag.img.setTexture('hud_tag_spent').setDisplaySize(72, 26).setAlpha(0.92);
+      tag.img.setTexture('hud_tag_spent').setDisplaySize(USE_TAG.w, USE_TAG.h).setAlpha(0.92);
       // Cold, not gone: #b8ada0 on the pale spent brass was unreadable rather
       // than merely dim, and "have I used this?" is a question worth answering.
-      tag.label.setText('✓ SPENT').setColor('#6b6055').setFontSize('14px');
+      tag.label.setText('✓ SPENT').setColor('#6b6055').setFontSize(`${USE_TAG.spentFont}px`);
       tag.icon.setAlpha(0.42);
-      tag.img.disableInteractive();
+      // A SPENT TAG STAYS TAPPABLE ON TOUCH. Desktop's tag only ever did one
+      // thing, so a dead one is correctly dead; the phone's opens the relic's
+      // box, and a spent relic is exactly when you want to read it (and, quite
+      // often, sell it). Killing the hit area here would drop the tap through
+      // to the icon underneath, which does the same thing anyway — this just
+      // stops the biggest target on the cell going quietly numb.
+      if (!TOUCH) tag.img.disableInteractive();
     } else {
-      tag.img.setTexture('hud_tag_use').setDisplaySize(72, 26).setAlpha(1);
-      tag.label.setText(tag.art.active.label ?? 'USE').setColor('#3d2a08').setFontSize('16px');
+      tag.img.setTexture('hud_tag_use').setDisplaySize(USE_TAG.w, USE_TAG.h).setAlpha(1);
+      tag.label.setText(tag.art.active.label ?? 'USE').setColor('#3d2a08').setFontSize(`${USE_TAG.font}px`);
       tag.icon.setAlpha(1);
       tag.img.setInteractive({ useHandCursor: true });
       tag.breath = this.tweens.add({
@@ -3624,6 +4235,191 @@ export class CombatScene extends Phaser.Scene {
     return jobs.length;
   }
 
+  /**
+   * WHAT SHIELD ACTUALLY DOES, for the player's own pool.
+   *
+   * Every line is read off the code that runs, and two of them exist because
+   * the honest answer is not the one a card game trains you to expect:
+   *   · it does NOT decay at end of turn (nothing ticks player.shield down;
+   *     only damage spends it, and only The Ancient Shield's `shieldMelts`
+   *     wipes it — which is why that line is conditional)
+   *   · it has NO cap (addShield is a bare +=)
+   *   · poison and bleed never see it (damagePlayer is the only path that
+   *     absorbs; the DoTs go straight to hp)
+   *   · a new fight resets it to the opening plate (startFight zeroes it
+   *     unless a relic grants keepShield, then re-plates from run.startShield)
+   */
+  shieldRuleText() {
+    const lines = [
+      'Damage hits SHIELD before your HP, point for point, and spends it.',
+      'It does not decay between turns and it has no cap.',
+      'POISON and BLEED go straight through it.',
+    ];
+    if (this.prop('shieldMelts') > 0) lines.push('MELTS: your shield is wiped at the end of every enemy turn.');
+    if (this.shatterguard) lines.push('SHATTERED: every point of shield you gain this fight is worth 0.');
+    if (this.pstat?.brittle > 0) lines.push('BRITTLE: incoming damage is raised BEFORE shield sees it.');
+    lines.push('A new fight starts you back on your opening plate.');
+    return lines.join('\n');
+  }
+
+  /** ...and for a body on the other side of the arena. */
+  enemyShieldRuleText() {
+    const lines = [
+      'Damage hits SHIELD before its HP, point for point, and spends it.',
+      'It does not decay. Only damage takes it down.',
+    ];
+    if (this.chr?.id === 'venomancer') lines.push('Your POISON is read before the plate and seeps through it.');
+    return lines.join('\n');
+  }
+
+  /** The shield chip over a body: hover either half of it for the rule. */
+  bindShieldChipTip(enemy) {
+    for (const part of [enemy.shieldIcon, enemy.shieldText]) {
+      if (!part || part.input) continue;
+      part.setInteractive();
+      // The chip is drawn at alpha 0 until the body actually plates itself, so
+      // the guard is what stops an invisible glyph answering a hover.
+      part.on('pointerover', () => {
+        if (!(enemy.shield > 0) || !enemy.alive) return;
+        this.showRuleTip(part.x, part.y - 22, `SHIELD  ◆ ${enemy.shield}`, this.enemyShieldRuleText());
+      });
+      part.on('pointerout', () => this.hideIntentTip());
+    }
+  }
+
+  /**
+   * A plain parchment rule panel — a title and a block of text, bottom edge at
+   * (x, y), clamped on screen. Same slot as every other hover in this scene
+   * (`this.intentTip`), so one hideIntentTip closes whichever is open.
+   */
+  showRuleTip(x, y, title, body) {
+    this.hideIntentTip();
+    const tip = this.add.container(0, 0).setDepth(DEPTH.overlay + 3);
+    const t = this.add.text(0, 0, title, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: '22px', color: PARCH.text,
+    }).setOrigin(0.5, 0);
+    const b = this.add.text(0, 30, body, {
+      fontFamily: '"Baloo 2"', resolution: 2, fontSize: '18px', color: PARCH.textDim, fontStyle: 'bold',
+      wordWrap: { width: 330 }, align: 'center', lineSpacing: 3,
+    }).setOrigin(0.5, 0);
+    const h = 30 + b.height + 26;
+    const w = Math.max(t.width, b.width) + 44;
+    const parts = woodPanel(this, 0, h / 2 - 6, w, h, { shadow: true });
+    tip.add([parts.shadow, parts.panel, t, b]);
+    tip.setPosition(
+      Phaser.Math.Clamp(x, w / 2 + 8, GAME_W - w / 2 - 8),
+      Phaser.Math.Clamp(y - h - 10, 10, GAME_H - h - 10),
+    );
+    this.intentTip = tip;
+    return tip;
+  }
+
+  // =========================================================================
+  // WHAT A RELIC SAYS, WRITTEN ONCE (2026-08-10)
+  // -------------------------------------------------------------------------
+  // There are two surfaces that print a relic's rules now — the hover tooltip
+  // (showArtifactTip) and the TOUCH build's choice box (relicBoxSpec) — and a
+  // player who long-presses a relic and then taps it must not be told two
+  // different things about it. So the three paragraphs are built HERE and both
+  // surfaces read them. Adding a fourth line is one edit, in one place.
+  // =========================================================================
+
+  /** The rules, plus the running total every scaler answers with. */
+  artifactBodyText(art) {
+    const live = artifactLiveLine(art, run);
+    return personalize(art.desc) + (live ? `\n\n${live}` : '');
+  }
+
+  /**
+   * The one extra line, at most: the mirror's verdict (which names the relic it
+   * is pointed at either way) or an active relic's charge state. No relic is
+   * both — actives are uncopyable.
+   *
+   * PARCHMENT INKS, not the dark-UI pastels. This line lives inside a cream
+   * panel, where #8fe098 / #ff8590 / #b8ada0 / #ffd23e all sit near 1:1. Same
+   * four meanings, said in colours that survive the ground they are on.
+   */
+  artifactNoteLine(art) {
+    const mn = mirrorNote(art);
+    if (mn) return { text: mn.text, color: mn.ok ? '#2f7a4a' : '#a8202e' };
+    if (!art.active) return null;
+    if (this.activeSpent(art)) return { text: '✓ already used this fight', color: '#6b6055' };
+    const label = art.active.label ?? 'USE';
+    // On TOUCH the tag no longer FIRES — it opens the relic's box, and the box
+    // carries the button that does. The sentence has to describe the surface
+    // the player is actually holding.
+    return {
+      text: say(`▶ CLICK THE ${label} TAG. Once per fight.`,
+        `▶ TAP IT, then ${label}. Once per fight.`),
+      color: '#8a5a00',
+    };
+  }
+
+  /**
+   * THE CHAIN. Where this relic sits in the row is part of what it does, so
+   * every relic says so, and says how to change it.
+   */
+  artifactOrderLine(art) {
+    const belt = beltArtifacts();
+    const slot = belt.indexOf(art);
+    if (slot < 0) return null;
+    return `#${slot + 1} of ${belt.length} · relics resolve left to right. `
+      + say(`Drag to reorder, click to sell for ◉ ${sellValue(art)}.`,
+        `Drag to reorder, tap to read or sell (◉ ${sellValue(art)}).`);
+  }
+
+  /**
+   * THE RELIC'S CHOICE BOX (TOUCH only) — the ONE surface that replaced three.
+   *
+   * Before this, a relic on the phone answered a tap in three different places
+   * with three different rules: the belt icon opened the sell confirm on
+   * pointerUP, the glove nook opened it on pointerUP with no hold guard at all
+   * (so a long-press that read the tooltip ALSO opened the sell panel behind
+   * it), and the USE tag fired the active outright on pointerDOWN. Now all
+   * three open this, and nothing commits until a labelled button is pressed.
+   *
+   * `anchor` is a function so a relic mid-settle reports where it actually is.
+   */
+  relicBoxSpec(art, anchor) {
+    const rar = ARTIFACT_RARITY[art.rarity] ?? { label: '', color: 0xd8c49a };
+    return {
+      key: `relic:${art.id}`,
+      anchor,
+      title: `${art.name}  ·  ${rar.label}`,
+      body: () => this.artifactBodyText(art),
+      note: () => {
+        const n = this.artifactNoteLine(art);
+        return [n?.text, this.artifactOrderLine(art)].filter(Boolean).join('\n');
+      },
+      accent: rar.color,
+      depth: DEPTH.overlay + 6,
+      buttons: () => [
+        art.active && {
+          label: (art.active.label ?? 'USE').toUpperCase(),
+          kind: 'go',
+          onClick: () => this.useActiveArtifact(art),
+          // A spent charge still DRAWS its button — "you have already used
+          // this" is information, and a missing button is not.
+          enabled: !this.activeSpent(art) && !this.busy,
+        },
+        {
+          label: `SELL ◉${sellValue(art)}`,
+          kind: 'buy',
+          // sellPromptInFight stays the final are-you-sure. It is the existing
+          // three-way confirm, it is good, and a Legendary should cost two
+          // deliberate taps and a yes.
+          onClick: () => this.sellPromptInFight(art),
+          enabled: !this.busy,
+        },
+      ].filter(Boolean),
+    };
+  }
+
+  /** The live box anchor for a relic icon (or its USE tag, which shares one). */
+  relicAnchor(icon) {
+    return () => ({ x: icon.x, y: icon.y, w: icon.displayWidth, h: icon.displayHeight });
+  }
+
   showArtifactTip(x, y, art) {
     this.hideIntentTip();
     const tip = this.add.container(0, 0).setDepth(DEPTH.overlay + 3);
@@ -3632,45 +4428,33 @@ export class CombatScene extends Phaser.Scene {
     // COMMON's near-white #dadada on it is a blank line. Outlined the way the
     // map's sell panel already outlines the same colours on the same parchment.
     const title = legible(this.add.text(0, 0, art.name, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '22px',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.tipTitle}px`,
       color: '#' + rar.color.toString(16).padStart(6, '0'),
     }), { shadow: false }).setOrigin(0.5, 0);
     // A HERO EXCLUSIVE names itself in cycling rainbow, here as everywhere.
     if (rar.rainbow) rainbowText(this, title);
     // THE RULES, then THE RUNNING TOTAL. Every scaler answers liveDesc(), so a
     // Kingmaker reads "+12 mult (12 Kings crowned)" right under its own rules
-    // instead of leaving the player to count kings in their head.
-    const live = artifactLiveLine(art, run);
-    const body = this.add.text(0, 28, personalize(art.desc) + (live ? `\n\n${live}` : ''), {
-      fontFamily: '"Baloo 2"', resolution: 2, fontSize: '19px', color: PARCH.textDim, fontStyle: 'bold',
-      wordWrap: { width: 300 }, align: 'center', lineSpacing: 3,
+    // instead of leaving the player to count kings in their head. Built by
+    // artifactBodyText, which is also what the TOUCH box prints.
+    const body = this.add.text(0, 28, this.artifactBodyText(art), {
+      fontFamily: '"Baloo 2"', resolution: 2, fontSize: `${CHROME.tipBody}px`,
+      color: PARCH.textDim, fontStyle: 'bold',
+      wordWrap: { width: CHROME.tipWrap }, align: 'center', lineSpacing: 3,
     }).setOrigin(0.5, 0);
-    // One extra line, at most: the mirror's verdict (which now names the relic
-    // it is pointed at either way) or an active relic's charge state. No relic
-    // is both — actives are uncopyable.
-    const mn = mirrorNote(art);
-    // PARCHMENT INKS, not the dark-UI pastels. This line lives inside a cream
-    // panel, where #8fe098 / #ff8590 / #b8ada0 / #ffd23e all sit near 1:1. Same
-    // four meanings, said in colours that survive the ground they are on.
-    const note = mn ? { text: mn.text, color: mn.ok ? '#2f7a4a' : '#a8202e' }
-      : art.active ? (this.activeSpent(art)
-        ? { text: '✓ already used this fight', color: '#6b6055' }
-        : { text: `▶ CLICK THE ${art.active.label ?? 'USE'} TAG. Once per fight.`, color: '#8a5a00' })
-        : null;
+    const note = this.artifactNoteLine(art);
     const warn = note ? this.add.text(0, 28 + body.height + 8, note.text, {
-      fontFamily: '"Baloo 2"', resolution: 2, fontSize: '18px', color: note.color, fontStyle: 'bold',
-      wordWrap: { width: 300 }, align: 'center',
+      fontFamily: '"Baloo 2"', resolution: 2, fontSize: `${CHROME.tipNote}px`,
+      color: note.color, fontStyle: 'bold',
+      wordWrap: { width: CHROME.tipWrap }, align: 'center',
     }).setOrigin(0.5, 0) : null;
-    // THE CHAIN. Where this relic sits in the row is now part of what it does,
-    // so every relic says so, and says how to change it.
-    const belt = beltArtifacts();
-    const slot = belt.indexOf(art);
+    const orderLine = this.artifactOrderLine(art);
     const orderY = 28 + body.height + (warn ? warn.height + 8 : 0) + 8;
-    const order = slot >= 0 ? this.add.text(0, orderY,
-      `#${slot + 1} of ${belt.length} · relics resolve left to right. Drag to reorder, click to sell for ◉ ${sellValue(art)}.`, {
-        fontFamily: '"Baloo 2"', resolution: 2, fontSize: '16px', color: PARCH.textDim, fontStyle: 'bold',
-        wordWrap: { width: 300 }, align: 'center',
-      }).setOrigin(0.5, 0) : null;
+    const order = orderLine ? this.add.text(0, orderY, orderLine, {
+      fontFamily: '"Baloo 2"', resolution: 2, fontSize: `${CHROME.tipOrder}px`,
+      color: PARCH.textDim, fontStyle: 'bold',
+      wordWrap: { width: CHROME.tipWrap }, align: 'center',
+    }).setOrigin(0.5, 0) : null;
     const h = 28 + body.height + (warn ? warn.height + 8 : 0) + (order ? order.height + 8 : 0) + 26;
     const w = Math.max(title.width, body.width, warn?.width ?? 0, order?.width ?? 0) + 44;
     const parts = woodPanel(this, 0, h / 2 - 6, w, h, { shadow: true });
@@ -6417,7 +7201,7 @@ export class CombatScene extends Phaser.Scene {
     this.tweens.add({ targets: this.targetArrow, scale: { from: 0.92, to: 1.12 }, duration: 460, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
 
     if (defs.length > 1) {
-      popMessage(this, ARENA_CX + 160, 330, 'Click an enemy to target it', { color: '#ffc542', size: 30, rise: 40, delay: 600 });
+      popMessage(this, ARENA_CX + 160, 330, say('Click an enemy to target it', 'Tap an enemy to target it'), { color: '#ffc542', size: 30, rise: 40, delay: 600 });
     }
 
     this.newFightState();
@@ -6604,6 +7388,7 @@ export class CombatScene extends Phaser.Scene {
     enemy.shieldIcon = this.add.image(shX - enemy.shieldText.width - 18, chipY, 'icon_shield')
       .setTint(0x7fe0f4).setAlpha(0);
     enemy.shieldIcon.setScale(ENEMY_HUD.statusIcon / Math.max(enemy.shieldIcon.width, enemy.shieldIcon.height));
+    this.bindShieldChipTip(enemy);
 
     enemy.statusUI = {};
     const sdefs = [['poison', 'icon_skull', 0x63d84a, '#8fe098', '#123a0c'],
@@ -6768,9 +7553,16 @@ export class CombatScene extends Phaser.Scene {
     // SHIELD chip, hung off the health bar: the icon_shield glyph + ◆N in
     // cyan, hidden entirely until something grants a pool. It normally sits to
     // the RIGHT of the bar — but a right-hand enemy whose stack rides high
-    // would tuck it clean under the potion mat (x>=1606, y<=186), so in that
-    // corner it mirrors to the left of the bar instead.
-    const matBlocked = (ex + barW / 2 + 60) > (GAME_W - 330) && hpY < 210;
+    // would tuck it clean under the potion mat, so in that corner it mirrors to
+    // the left of the bar instead.
+    //
+    // DERIVED FROM THE MAT THAT IS ACTUALLY ON SCREEN (2026-08-10). This was
+    // `(GAME_W - 330)` and `hpY < 210` — two numbers hand-measured against a
+    // mat that has since moved twice, and which would have gone on quietly
+    // agreeing with a mat that was no longer there. potMatZone reproduces the
+    // desktop pair to the pixel, so nothing on that build changes hands.
+    const mz = this.potMatZone();
+    const matBlocked = (ex + barW / 2 + 60) > mz.blockLeft && hpY < mz.blockBottom;
     const chipX = matBlocked ? ex - barW / 2 - 16 : ex + barW / 2 + 16;
     // ...and the NAMEPLATE gets the same treatment, for the same reason and off
     // the same geometry. See fitBossName: a 34px boss name is the one label in
@@ -6786,6 +7578,7 @@ export class CombatScene extends Phaser.Scene {
       fontFamily: 'Lilita One', resolution: 2, fontSize: `${ENEMY_HUD.chipTextSize}px`, color: '#9aeaff',
       stroke: '#0a2b3a', strokeThickness: 4,
     }).setOrigin(matBlocked ? 1 : 0, 0.5).setAlpha(0);
+    this.bindShieldChipTip(enemy);
     // Free-floating intent icons (no plate) with an invisible hover zone.
     enemy.intentIcons = this.add.container(ex, intentY);
     enemy.intentHit = this.add.rectangle(ex, intentY, INTENT_ART.hitW, INTENT_ART.hitH, 0xffffff, 0.001);
@@ -7943,6 +8736,15 @@ export class CombatScene extends Phaser.Scene {
   }
 
   newFightState() {
+    // A DESCRIPTION BOX IS ABOUT THIS FIGHT. The scene is a SINGLETON, so a box
+    // left standing by the last one — a relic's USE/SELL, a potion's confirm —
+    // would open the next fight offering to spend a charge that has already
+    // recharged, on a display list that no longer holds the icon it points at.
+    // `_potConfirm` in particular was never cleared anywhere: it is the handle
+    // tools/verify_mobile.py reads, and it survived fights, defeats and
+    // scene changes as a pointer to a destroyed container.
+    closeChoiceBox(this);
+    this._potConfirm = null;
     this.deck = shuffle([...run.runDeck]);
     this.discardPile = [];
     this.handCards = [];
@@ -8063,6 +8865,11 @@ export class CombatScene extends Phaser.Scene {
     this._revivedThisFight = false;
     this._rouletteForce = null;    // DEV pins (see __hfCombat.forceRoulette)
     this._etherealForce = null;
+    // A card's inspect box describes a card in THIS fight. The scene is a
+    // singleton, so a panel left open by the last one is a panel about a hand
+    // that no longer exists.
+    this._inspectHeld = false;
+    hideCardInspect(this);
     if (this.handGroup) { this.handGroup.destroy(true); }
     this.handGroup = this.add.container(0, 0).setDepth(DEPTH.cards);
   }
@@ -8119,10 +8926,40 @@ export class CombatScene extends Phaser.Scene {
       gutter: BTN_LANE.gutter, clear: BTN_LANE.clear, minScale: BTN_LANE.minScale,
     });
     const [R1, R2] = BTN_LANE.rowY;
-    const sL = lanes.left.scale, sR = lanes.right.scale;
+    /**
+     * THE UP-SCALE, COMPUTED HERE (2026-08-10).
+     *
+     * handButtonLanes answers "how much must these shrink to fit", and its
+     * `fit()` clamps at 1 by design — it has no opinion about spare room. JC
+     * wants the other half: plates that FILL their allotted space and only
+     * step aside when a large hand actually crowds them. Both halves are the
+     * same expression, so the lane's `avail` (which it already returns) is run
+     * through it again with the ceiling raised:
+     *
+     *     scale = clamp(avail / need, minScale, maxScale)
+     *
+     * `need` is per-lane and NOT interchangeable — the left lane must fit
+     * HANDS+gap+DECK (322) and the right only DISCARD (240) — so a single
+     * scale for both would size the right lane off the left lane's crowding.
+     *
+     * Phone, arithmetic in full (gutter 48, clear 26, sidebar 420, W 2340):
+     *    5 cards  fan 1028..1732  avail L 534 R 534  ->  1.25 / 1.25 (ceiling)
+     *    8 cards  fan  831..1929  avail L 337 R 337  ->  1.048 / 1.25
+     *   12 cards  fan  700..2060  avail L 206 R 206  ->  0.640 / 0.858
+     * so nothing shrinks until twelve, and twelve shrinks exactly as it did.
+     */
+    const up = (avail, need) => (need > 0
+      ? Math.max(BTN_LANE.minScale, Math.min(BTN_LANE.maxScale, avail / need))
+      : BTN_LANE.maxScale);
+    const sL = up(lanes.left.avail, BTN_LANE.needLeft);
+    const sR = up(lanes.right.avail, BTN_LANE.needRight);
+    // The plate's HEIGHT does not ride the scale: a 78px row that shrank to 50
+    // at twelve cards would be a thumb target that punishes a big hand. Only
+    // the width gives. Row 2 bottoms out at 1026 + 78/2 = 1065 (< 1080) and its
+    // top at 987 clears row 1's foot at 983.
     const place = (btn, x, y, w) => {
       if (!btn) return;
-      btn.setDisplaySize(w, 66);
+      btn.setDisplaySize(w, BTN_LANE.plateH);
       btn.setPosition(x, y);
       btn.label.setPosition(x, y - 4);
       // The plate shrank; the word on it has to fit inside what is left.
@@ -8139,6 +8976,7 @@ export class CombatScene extends Phaser.Scene {
     place(this.discardBtn, rx - discardW / 2, R1, discardW);
     place(this.sortBtn, rx - sortW / 2, R2, sortW);
     this._btnLanes = lanes;
+    this._btnUp = { left: sL, right: sR };
   }
 
   // ---------------- The score equation ----------------
@@ -8157,19 +8995,19 @@ export class CombatScene extends Phaser.Scene {
   buildEquationHUD() {
     const drop = (t) => { t.setShadow(3, 5, '#000000cc', 9, true, true); return t; };
     this.eqName = drop(this.add.text(ARENA_CX, EQ_NAME_Y, '', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '27px', color: '#f0dcac',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.eqName}px`, color: '#f0dcac',
       stroke: '#2a1808', strokeThickness: 6,
     })).setOrigin(0.5).setDepth(DEPTH.fx + 1).setAlpha(0);
     this.eqScore = drop(this.add.text(ARENA_CX - EQ_GAP, EQ_Y, '0', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '58px', color: '#c8e2ff',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.eqNum}px`, color: '#c8e2ff',
       stroke: '#16293f', strokeThickness: 8,
     })).setOrigin(1, 0.5).setDepth(DEPTH.fx + 1).setAlpha(0);
     this.eqTimes = drop(this.add.text(ARENA_CX, EQ_Y + 2, '×', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '40px', color: '#e8dcc0',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.eqTimes}px`, color: '#e8dcc0',
       stroke: '#2a1808', strokeThickness: 6,
     })).setOrigin(0.5).setDepth(DEPTH.fx + 1).setAlpha(0);
     this.eqMult = drop(this.add.text(ARENA_CX + EQ_GAP, EQ_Y, '1', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '58px', color: '#ff7a3c',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.eqNum}px`, color: '#ff7a3c',
       stroke: '#3d1002', strokeThickness: 8,
     })).setOrigin(0, 0.5).setDepth(DEPTH.fx + 1).setAlpha(0);
     /**
@@ -8180,7 +9018,7 @@ export class CombatScene extends Phaser.Scene {
      * collides with the caption however long the hand's name is.
      */
     this.eqAoe = drop(this.add.text(0, EQ_NAME_Y, '', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '25px', color: AOE_COLOR,
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.eqAoe}px`, color: AOE_COLOR,
       stroke: '#12300f', strokeThickness: 6,
     })).setOrigin(0, 0.5).setDepth(DEPTH.fx + 1).setAlpha(0);
     this.eqParts = [this.eqName, this.eqScore, this.eqTimes, this.eqMult, this.eqAoe];
@@ -8355,6 +9193,13 @@ export class CombatScene extends Phaser.Scene {
   eqSlam(res) {
     this.eqSlamAt = performance.now();   // verification hook (__hfCombat.eqState)
     this.clearEqTag();
+    // SIX OF A KIND SQUARES THE MULT, and the square is the whole hand: it has
+    // to be a BEAT and not a silent jump in the reconciliation below, or the
+    // biggest number the game can make arrives unexplained.
+    if (res.handSquared) {
+      sfx(this, 'score_tick', { volume: 0.85, rate: 1.5 });
+      popMessage(this, ARENA_CX, EQ_Y - 96, 'MULT SQUARED', { color: '#7cf9ff', size: 36 });
+    }
     // THE BLUR ENDS AT THE IMPACT. Everything from here — the payoff bloom, the
     // strike, the enemy's answer — plays at full weight however long the
     // cascade that fed it had to compress itself to get here.
@@ -8373,9 +9218,20 @@ export class CombatScene extends Phaser.Scene {
       this.eqScoreVal = res.scoreSide;
       if (this.eqScore?.active) this.eqScore.setText(fmtTotal(Math.round(res.scoreSide)));
     }
-    const total = this.eqMultApplies
-      ? Math.round(this.eqScoreVal * res.effMult)
-      : Math.round(this.eqScoreVal);
+    // THE TOTAL IS THE BLOW (2026-08-10). It used to be recomputed here as
+    // eqScoreVal × effMult, which is the same number the engine computed —
+    // right up until it was not: the flat-damage bonus and the Giant's Brew
+    // both land ON res.damage after the identity, and an overflow in either
+    // half made the recompute disagree with the hit outright. res.damage is
+    // what resolveHand is about to deal, so a DAMAGE hand quotes exactly it and
+    // displayed == applied is true by construction rather than by arithmetic.
+    // (The two currency rewrites keep the recompute: nothing else knows their
+    // total, and their pools are clamped by the same cap.)
+    const total = this.eqCurrency === 'damage' && this.eqMultApplies && Number.isFinite(res.damage)
+      ? Math.round(res.damage)
+      : (this.eqMultApplies
+        ? Math.round(this.eqScoreVal * res.effMult)
+        : Math.round(this.eqScoreVal));
     this.tweens.add({ targets: this.eqScore, x: ARENA_CX - 8, duration: this.spd(185), ease: 'Back.easeIn' });
     this.tweens.add({ targets: this.eqMult, x: ARENA_CX + 8, duration: this.spd(185), ease: 'Back.easeIn' });
     this.eqPunch(this.eqScore, 1.3);
@@ -8397,12 +9253,23 @@ export class CombatScene extends Phaser.Scene {
   }
 
   makeButton(x, y, key, label, textColor, onClick, w = 240) {
-    const img = this.add.image(x, y, key).setDisplaySize(w, 66).setDepth(DEPTH.fx).setInteractive({ useHandCursor: true });
+    const img = this.add.image(x, y, key).setDisplaySize(w, BTN_LANE.plateH).setDepth(DEPTH.fx).setInteractive({ useHandCursor: true });
     const txt = this.add.text(x, y - 4, label, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '26px', color: textColor,
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${BTN_LANE.fontSize}px`, color: textColor,
     }).setOrigin(0.5).setDepth(DEPTH.fx);
     img.label = txt;
-    img.on('pointerdown', () => { if (!this.busy) { sfx(this, 'button', { volume: 0.8 }); this.tweens.add({ targets: [img, txt], scale: 0.94, duration: 60, yoyo: true }); onClick(img); } });
+    // COMMIT ON RELEASE, ON TOUCH ONLY. tapBind collapses to exactly the
+    // pointerdown this line used to be on desktop, so that build is unchanged
+    // to the character — and the phone stops handing the back half of its own
+    // gesture to whatever the plate was covering, which is the press/release
+    // pass-through class ui/pointer.js exists to document. PLAY HAND deals a
+    // new fan under the finger that pressed it; that is the whole risk.
+    tapBind(this, img, () => {
+      if (this.busy) return;
+      sfx(this, 'button', { volume: 0.8 });
+      this.tweens.add({ targets: [img, txt], scale: 0.94, duration: 60, yoyo: true });
+      onClick(img);
+    });
     return img;
   }
 
@@ -8676,7 +9543,22 @@ export class CombatScene extends Phaser.Scene {
 
   /** The reorder drag, exactly as it has always been. Deferred when held. */
   beginReorder(obj) {
-    obj._justDragged = true;
+    // THE VERDICT IS THE GESTURE'S, NOT THE CARD'S (bug found 2026-08-10 while
+    // driving the pass-through wave).
+    //
+    // This used to write `obj._justDragged = true`, to be cleared by the same
+    // gesture's `gameobjectup` so that a reorder never also selected the card
+    // it moved. But `gameobjectup` only fires when the card is still the
+    // topmost thing under the pointer AT RELEASE, and after a reorder it very
+    // often is not: the fan re-lays out under the finger, the pointer lands in
+    // the gap between two slots, or on a neighbour. When that happened the flag
+    // was never consumed and it SILENTLY ATE THE NEXT CLICK ON THAT CARD —
+    // measured at 4 clicks in 5 on a reordered hand, and it predates this wave.
+    //
+    // So the flag is now the PRESS's, exactly like `_sweptThisPress` beside it,
+    // and the scene's own pointerdown clears it. A gesture cannot leak a verdict
+    // into the next gesture if the verdict dies with the press that made it.
+    this._reorderedThisPress = true;
     this.handGroup.bringToTop(obj);
     this.tweens.add({ targets: obj, scale: 1.08, duration: 90 });
   }
@@ -8888,7 +9770,7 @@ export class CombatScene extends Phaser.Scene {
     // bestHandOf IS evaluateHand for 1-5 cards; it only differs when GO-GO GOO
     // has lit a whole eight-card hand, which is the one time a selection can be
     // bigger than the evaluator's five.
-    const ev = bestHandOf(cards);
+    const ev = bestHandOf(cards, this.handEvalOpts());
     const res = scoreHand({ cards, character: this.chr.id, state: this.buildScoreState(cards) });
     // NO NUMBERS FROM IRON UP (0803-B §1.4). The hand is still SCORED here — the
     // bench cast, the value grants and the verification hooks all hang off this
@@ -9522,7 +10404,7 @@ export class CombatScene extends Phaser.Scene {
     // `cardDenied` — and it can never deadlock, because checkMistrial wipes the
     // docket the moment nothing your hand can form is still legal.
     if (this.handTypeOnce) {
-      const t = bestHandOf(this.selected.map(c => c.card)).type;
+      const t = bestHandOf(this.selected.map(c => c.card), this.handEvalOpts()).type;
       if (handTypeSpent(this.usedHandTypes, t, true)) return this.denyUsedHandType(t);
     }
     this.busy = true;
@@ -9589,7 +10471,7 @@ export class CombatScene extends Phaser.Scene {
     }
     // Same rule as the preview: identical to evaluateHand for any ordinary
     // hand, and the best five present when GO-GO GOO played all eight.
-    const ev = bestHandOf(cards);
+    const ev = bestHandOf(cards, this.handEvalOpts());
 
     // THE CHAOS ORB decides, once, before the hand is scored. It has to happen
     // HERE — ahead of buildScoreState — so the roll is inside the very mult the
@@ -10074,6 +10956,11 @@ export class CombatScene extends Phaser.Scene {
     // than recomputed, so the trophy can never disagree with the screen.
     fireAchievements(this, 'hand', {
       handType: ev.type, damage: dmgDealt,
+      // WHAT THE HAND SCORED, beside what it managed to land. A hand can reach
+      // the ceiling and still deliver nothing to a body (an immune phase, a
+      // biome wall), and INFINITY is a trophy for the SCORE — you built the
+      // number, whether or not there was anything left standing to spend it on.
+      scored: res.damage ?? 0,
       mult: res.effMult ?? 0, cards: played.length,
     });
 
@@ -10488,7 +11375,15 @@ export class CombatScene extends Phaser.Scene {
     // the cheapest net wide enough to catch poison stacks applied OUTSIDE a
     // hand (a thrown potion, a relic) before the enemy turn ticks them down.
     this.notePoisonPeak();
-    if (enemy.immune) return this.immunePop(enemy);
+    if (enemy.immune) {
+      // The refusal is recorded too, so a driver can prove that an ∞ blow was
+      // REFUSED by immunity rather than never swung (__hfCombat.lastHit).
+      this._lastHit = {
+        id: enemy.def?.id ?? null, amount, hpBefore: enemy.hp, hpAfter: enemy.hp,
+        infinite: isInfinite(amount), immune: true, at: performance.now(),
+      };
+      return this.immunePop(enemy);
+    }
     // THE BIOME GATES, at the one funnel every point of damage in the game
     // passes through. `_handCtx` is set for the length of a hand's resolution
     // and nothing else — so a WALL, a NOTHING TWICE and a marked card all stop
@@ -10537,7 +11432,35 @@ export class CombatScene extends Phaser.Scene {
     // ABSOLUTE OVERKILL (achievement) reads the body BEFORE the blow lands, so
     // it can ask how much of this hit the enemy actually had any use for.
     const hpBefore = enemy.hp;
-    enemy.hp = Math.max(0, enemy.hp - amount);
+    /**
+     * THE INFINITY BLOW (JC, 2026-08-10). A single hit at the ceiling kills
+     * whatever it lands on, full stop.
+     *
+     * IT SITS HERE AND NOWHERE EARLIER, on purpose: every IMMUNITY gate is
+     * upstream of this line and is therefore respected without this rule having
+     * to know any of their names.
+     *   · enemy.immune  — the Depth Knight's DEF/void-shell form, GLACIAL AEGIS's
+     *                     immune turns, STILLNESS — returns at immunePop above.
+     *   · biomeGate     — the WALL, NOTHING TWICE, the marked card — returns above.
+     *   · forgetSuit    — subtracts the forgotten suit's share above, and a hand
+     *                     reduced to nothing never reaches here.
+     * SHIELDS AND WARDS are not immunity and are not spared: they absorb what
+     * they can and 1e30 goes straight through them, which is correct.
+     *
+     * Written as an explicit zero rather than left to the subtraction (which
+     * already reaches zero at this magnitude) so the rule is a rule, provable
+     * from a driver, and cannot be undone by a future "cannot be reduced below
+     * 1 HP" effect that has not been written yet.
+     */
+    const infiniteBlow = isInfinite(amount);
+    enemy.hp = infiniteBlow ? 0 : Math.max(0, enemy.hp - amount);
+    // VERIFICATION HOOK (__hfCombat.lastHit): what was actually APPLIED to a
+    // body, beside what the equation said. The friend's "e12 displayed, 0 dealt"
+    // report had no way to be asserted before this existed.
+    this._lastHit = {
+      id: enemy.def?.id ?? null, amount, hpBefore, hpAfter: enemy.hp,
+      infinite: infiniteBlow, at: performance.now(),
+    };
     hitFlash(this, enemy.sprite);
     // THE RECOIL (JC, 2026-08-04): every hit is a body blow — the sprite jolts
     // and rights itself, so a Chip of Tripling Down's three strikes read as
@@ -11667,19 +12590,21 @@ export class CombatScene extends Phaser.Scene {
    * The old 'POTIONS' label is gone — the mat is self-describing.
    */
   buildPotionBelt() {
-    // MOBILE (v2): same top-right home as desktop, just BIGGER — the wider
-    // arena pays for a 350px mat and 64px bottles (JC: "the potions rack
-    // could be larger").
-    this.potMat = MOBILE
-      ? { cx: GAME_W - 200, cy: 148, w: 350 }
-      : { cx: GAME_W - 169, cy: 136, w: 290 };
+    // WHERE IT SITS is POT_MAT's business now, not this method's — the cog
+    // above it, the boss marquee beside it and the enemy shield chips below it
+    // all derive from the same table, so the mat cannot be nudged without the
+    // other three following it. (2026-08-10; it used to be two literals here
+    // and three hand-measured copies of them elsewhere.)
+    this.potMat = { ...POT_MAT };
     const m = this.potMat;
     const mat = this.add.image(m.cx, m.cy, 'potion_mat').setDepth(DEPTH.panel + 1);
     mat.setDisplaySize(m.w, m.w * POTION_MAT.aspect);
     dropShadow(this, mat, MAT_SHADOW).setDepth(DEPTH.panel);
-    // Labelled like the ARTIFACTS mat (JC) — obvious at a glance.
+    // Labelled like the ARTIFACTS mat (JC) — obvious at a glance. It was 15px
+    // on BOTH builds, which made it the smallest type on a phone HUD whose
+    // every sibling label had already been sized up.
     this.add.text(m.cx, m.cy - (m.w * POTION_MAT.aspect) / 2 - 11, 'POTIONS', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '15px', color: '#e8d3a4',
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${CHROME.potionLabel}px`, color: '#e8d3a4',
       stroke: '#241505', strokeThickness: 4,
     }).setOrigin(0.5).setDepth(DEPTH.panel + 2);
     this.potionBeltG = this.add.container(0, 0).setDepth(DEPTH.panel + 2);
@@ -11693,7 +12618,11 @@ export class CombatScene extends Phaser.Scene {
     this.hidePotionTip();
     const m = this.potMat;
     const spots = potionSpots(m.cx, m.cy, m.w);
-    const iconSize = MOBILE ? 64 : 52;
+    // The bottle is a fraction of the mat it stands on rather than a constant:
+    // 0.183 reproduces the shipped 64 on the phone's old 350 mat, gives 70 on
+    // its new 380 one, and stops a tablet's narrower mat from being overrun by
+    // bottles cut for a wider one.
+    const iconSize = MOBILE ? Math.round(m.w * 0.183) : 52;
     // MAT CLEANUP (JC, 2026-08-01): the mat's OWN painted worn circles are the
     // only slot indicators. No empty-slot circle, no rarity ring, no rarity glow
     // disc — a potion just sits on its painted spot, drop-shadowed, and an empty
@@ -11752,61 +12681,86 @@ export class CombatScene extends Phaser.Scene {
   hidePotionTip() { if (this.potTip) { this.potTip.destroy(true); this.potTip = null; } }
 
   /**
+   * THE POTION MAT'S FOOTPRINT AS THE REST OF THE ARENA SEES IT.
+   *
+   * Read by the enemy shield chip (which mirrors to the other side of a health
+   * bar rather than tuck itself under the leather) and by chromeAudit. It used
+   * to be two literals inline — `GAME_W - 330` and `hpY < 210` — hand-measured
+   * against a mat that has now moved twice, which is exactly the kind of thing
+   * that rots in silence.
+   *
+   *   blockLeft / blockBottom  the leather plus the air a chip needs beside it.
+   *     The -16 / +24 are not decoration: on the DESKTOP mat (cx 1751, w 290,
+   *     cy 136) they reproduce the shipped pair EXACTLY — 1606-16 = 1590 and
+   *     186+24 = 210 — so this rewrite cannot move a single desktop chip.
+   *   labelTop  the brass 'POTIONS' band above the leather, which is part of
+   *     the mat as far as anything trying to clear it is concerned.
+   */
+  potMatZone() {
+    const m = this.potMat ?? POT_MAT;
+    const h = m.w * POTION_MAT.aspect;
+    const left = Math.round(m.cx - m.w / 2), right = Math.round(m.cx + m.w / 2);
+    const top = Math.round(m.cy - h / 2), bottom = Math.round(m.cy + h / 2);
+    return {
+      x: m.cx, y: m.cy, w: m.w, h: Math.round(h),
+      left, right, top, bottom,
+      labelTop: top - 24,
+      blockLeft: left - 16, blockBottom: bottom + 24,
+    };
+  }
+
+  /**
    * THE TWO-STEP TAP (JC, 2026-08-04, mobile): tapping a bottle opens its
    * description with a USE plate; tapping anywhere else lets go. No potion is
-   * ever spent by a stray finger. The catcher spans the WHOLE widened canvas,
-   * rails included, so "anywhere else" means anywhere.
+   * ever spent by a stray finger.
+   *
+   * RESTYLED ONTO THE SHARED BOX (2026-08-10). The behaviour is the one that
+   * shipped; what changed is that it is no longer its own hand-rolled panel
+   * with its own full-screen catcher. It is ui/choicebox, like the relics, the
+   * shelves and the Oracle — one idiom, so a player who has learned "tap to
+   * read, tap the named button to commit" anywhere has learned it everywhere.
+   * The catcher went with it: see choicebox's own note on why a catcher makes
+   * browsing cost two taps per option instead of one.
+   *
+   * `_potConfirm` STAYS, pointing at the open box: tools/verify_mobile.py
+   * reads it, and the CANCEL / USE plates are still text objects reading
+   * exactly that.
    */
-  confirmPotionTap(i, x, y) {
+  confirmPotionTap(i, x = null, y = null) {
     const pot = run.potions[i];
-    if (!pot) return;
+    if (!pot) return null;
     this.hidePotionTip();
-    if (this._potConfirm) { this._potConfirm.destroy(true); this._potConfirm = null; }
-    const ov = this.add.container(0, 0).setDepth(DEPTH.overlay + 4);
-    this._potConfirm = ov;
-    const close = () => { if (this._potConfirm === ov) this._potConfirm = null; ov.destroy(true); };
-    const catcher = this.add.rectangle(GAME_W / 2, GAME_H / 2,
-      GAME_W + 20, GAME_H + 20, 0x14101c, 0.001).setInteractive();
-    catcher.on('pointerdown', close);
-    ov.add(catcher);
-
-    const w = 360, h = 300;
-    const tx = GAME_W - w / 2 - 26;
-    const ty = Phaser.Math.Clamp(y + 170, h / 2 + 12, GAME_H - h / 2 - 12);
-    const parts = woodPanel(this, tx, ty, w, h, { shadow: true, accent: POTION_RARITY[pot.rarity].color });
-    ov.add([parts.shadow, parts.panel, parts.line]);
-    ov.add(this.add.text(tx, ty - h / 2 + 28, pot.name, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: PARCH.text,
-    }).setOrigin(0.5));
-    ov.add(this.add.text(tx, ty - h / 2 + 50, personalize(pot.desc), {
-      fontFamily: '"Baloo 2"', resolution: 2, fontSize: '18px', color: PARCH.textDim, fontStyle: 'bold',
-      wordWrap: { width: w - 44 }, align: 'center',
-    }).setOrigin(0.5, 0));
-    const usable = pot.use === 'passive' ? false : potionUsableIn(pot, 'combat');
-    const label = pot.use === 'passive' ? 'WORKS FROM THE BELT' : usable ? 'USE' : 'NOT IN A FIGHT';
-    const btn = this.add.image(tx, ty + h / 2 - 96, usable ? 'btn_green' : 'btn_gray')
-      .setDisplaySize(220, 58).setInteractive({ useHandCursor: usable });
-    const bt = this.add.text(tx, ty + h / 2 - 100, label, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: usable ? '24px' : '18px',
-      color: usable ? '#0c3d18' : '#3a3a44',
-    }).setOrigin(0.5);
-    ov.add(btn); ov.add(bt);
-    if (usable) {
-      btn.on('pointerdown', () => {
-        sfx(this, 'button', { volume: 0.8 });
-        close();
-        this.usePotion(i);
-      });
-    }
-    // ...and a spelled-out way back (JC, 2026-08-05): tapping anywhere else
-    // still cancels, but a button says so for anyone who wants one.
-    const cbtn = this.add.image(tx, ty + h / 2 - 34, 'btn_dark')
-      .setDisplaySize(220, 52).setInteractive({ useHandCursor: true });
-    const cbt = this.add.text(tx, ty + h / 2 - 38, 'CANCEL', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '22px', color: '#cfc8e8',
-    }).setOrigin(0.5);
-    ov.add(cbtn); ov.add(cbt);
-    cbtn.on('pointerdown', () => { sfx(this, 'card_deselect', { volume: 0.5 }); close(); });
+    const m = this.potMat ?? POT_MAT;
+    const spot = potionSpots(m.cx, m.cy, m.w)[i] ?? { x: m.cx, y: m.cy, r: m.w * POTION_MAT.spotRF };
+    const ax = x ?? spot.x, ay = y ?? spot.y;
+    const usable = pot.use !== 'passive' && potionUsableIn(pot, 'combat');
+    // A refusal still has to SAY SO. It used to be written on the dead button
+    // itself; it is the box's note now, and the button beside it draws dead.
+    const note = pot.use === 'passive'
+      ? 'WORKS FROM THE BELT · there is nothing to drink.'
+      : usable ? '' : 'NOT IN A FIGHT · this one waits for the road.';
+    const box = openChoiceBox(this, {
+      key: `potion:${i}:${pot.id}`,
+      anchor: { x: ax, y: ay, w: spot.r * 2, h: spot.r * 2 },
+      title: pot.name,
+      body: personalize(pot.desc),
+      note,
+      accent: POTION_RARITY[pot.rarity].color,
+      depth: DEPTH.overlay + 4,
+      buttons: [
+        { label: 'USE', kind: 'go', onClick: () => this.usePotion(i), enabled: usable },
+        // ...and a spelled-out way back (JC, 2026-08-05): tapping anywhere else
+        // still cancels, but a button says so for anyone who wants one.
+        { label: 'CANCEL', kind: 'off', onClick: () => {} },
+      ],
+      // Null it however the box goes away — the button, the tap-away, a new box
+      // opening over it, or the scene shutting down. openChoiceBox closes the
+      // previous box BEFORE it builds the new one, so this can never null a
+      // handle that was just written.
+      onClose: () => { this._potConfirm = null; },
+    });
+    this._potConfirm = box;
+    return box;
   }
 
   consumePotion(pot) {

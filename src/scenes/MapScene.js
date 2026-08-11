@@ -19,7 +19,9 @@ import {
 import { woodPanel } from '../ui/panels.js';
 // THE SHARED DESCRIPTION BOX — the one idiom behind every icon on this screen
 // whose information is hidden. See ui/choicebox.js for why hold-to-hover died.
-import { twoTap, openChoiceBox } from '../ui/choicebox.js';
+// ...and `tapInfo` is the same box with no commit plates, for a surface whose
+// only content is the answer (2026-08-11).
+import { twoTap, openChoiceBox, tapInfo } from '../ui/choicebox.js';
 import {
   run, chr, advanceAct, newActMap, effectiveArtifacts, removalPrice, boosterPrice, mirrorBlockedBy,
   sellValue, sellArtifact, beltArtifacts, nookArtifacts, slotsUsed, gainGold, enterMapNode,
@@ -70,12 +72,26 @@ import { MAX_POTIONS, POTION_RARITY, POTION_BY_ID, rollShopPotions, potionUsable
 import { addPotionIcon, POTION_MAT, potionSpots, makePotionIconInteractive, MAT_SHADOW } from '../ui/potionIcon.js';
 import { fireAchievements } from '../ui/achievements.js';
 import { popMessage, rainbowText, legible, INK_DARK } from '../ui/juice.js';
-import { addSettingsButton } from '../ui/settingsMenu.js';
+// THE GEAR'S ONE HOME AND ONE SIZE (2026-08-11), plus the shared box arithmetic
+// every scene's chrome audit is now built from. See ui/settingsMenu.js: this
+// screen used to hold its own opinion about both, and it was 10px stale about
+// the size and 4px short of the artifact belt because of it.
+import {
+  addSettingsButton, COG_HOME, COG_SIZE,
+  chromeButtons, chromeBox, chromeObjBox, chromeCollisions,
+} from '../ui/settingsMenu.js';
 import { settings } from '../core/settings.js';
 import { getProp } from '../core/artifacts.js';
 import { stageForMap, fetchStage } from '../core/stages.js';
 import { kineticScroll } from '../ui/kinetic.js';
-import { installLongPress, tapBind } from '../ui/touch.js';
+// `hoverInfo` is THE binder for every hover that shows INFORMATION: it binds
+// nothing on touch (JC's 2026-08-11 ruling — see ui/touch.js), so every tooltip
+// on this screen is desktop-only by construction and the tap that replaces it is
+// the two-tap box that was already there.
+import { installLongPress, tapBind, hoverInfo } from '../ui/touch.js';
+// THE ONE-PANEL INVARIANT: this scene's `mapTip` announces itself so the count
+// a driver reads is honest. See ui/infoPanels.js.
+import { notePanelOpen, notePanelClosed, forgetPanels } from '../ui/infoPanels.js';
 import { installPointerPolicy } from '../ui/pointer.js';
 import { installCardInspect } from '../ui/inspect.js';
 import { CardSprite } from '../ui/CardSprite.js';
@@ -346,6 +362,13 @@ export class MapScene extends Phaser.Scene {
     this.oracleTip = null;
     this.passiveChip = null;
     this.passiveTip = null;
+    // ...and the PANEL REGISTRY's entries, for the same reason one level up: the
+    // display list is destroyed wholesale on a restart (this scene restarts on
+    // every act change and every belt-affecting purchase), so a surviving
+    // registration would hold a close callback pointing at a tip that is
+    // already gone — and the next panel anywhere would invoke it.
+    this._mapTipToken = null;
+    this.events.once('shutdown', () => { this._mapTipToken = null; forgetPanels(); });
     this.cameras.main.fadeIn(300, 20, 16, 28);
     playMusic(this, this.act.music.fight);
 
@@ -366,18 +389,35 @@ export class MapScene extends Phaser.Scene {
     // THE COG WAS THE WORST OFFENDER (JC, 2026-08-10: "basically clipped"), and
     // the reason is that it is the only thing on this screen that lives in the
     // corner ITSELF rather than along an edge — where the glass is cut on the
-    // DIAGONAL and an edge inset buys nothing. It is 66px on touch, so its box
-    // is 66x66 about the centre passed here; at (GAME_W-SAFE.x-52, SAFE.y+54)
-    // that box is 2159..2225 x 45..111 on the 2340 canvas, whose farthest point
-    // from the top-right arc's centre (2190,150) is 111px against a 150 radius
-    // — comfortably inside the glass. clearsCorners() below is the assertion,
-    // and __hf.safe() hands the driver the same numbers.
-    const cog = TOUCH
-      ? addSettingsButton(this, GAME_W - SAFE.x - 52, SAFE.y + 54, DEPTH.overlay + 20)
-      : addSettingsButton(this, GAME_W - 44 - HUD_SAFE, 42, DEPTH.overlay + 20);
+    // DIAGONAL and an edge inset buys nothing.
+    //
+    // THE NUMBERS THIS COMMENT USED TO QUOTE WERE STALE (2026-08-11). It said
+    // "66px on touch ... 2159..2225 x 45..111", off a private `-52` inset. The
+    // gear has drawn at 76 since the phone build landed, and three scenes each
+    // held a different x. Both now come from ui/settingsMenu — COG_HOME and
+    // COG_SIZE, the pair addSettingsButton itself draws from — so the box is
+    // [GAME_W-182 .. GAME_W-106] x [40 .. 116] on BOTH touch canvases (each term
+    // is GAME_W-relative), and desktop's (GAME_W-44, 42) is the corner it has
+    // always drawn, unchanged. Its worst corner, (GAME_W-106, 40), is 118px from
+    // the top-right arc's centre against a 150 radius: 32px of margin.
+    //
+    // The 4px move left also buys the artifact belt below it — see beltY0, which
+    // now hangs off this gear's FOOT instead of off a literal 132.
+    const cog = addSettingsButton(this, COG_HOME.x, COG_HOME.y, DEPTH.overlay + 20);
     // It names itself for the same reason VIEW DECK does: five drivers had its
     // old coordinates typed into them (see __hf.buttons).
     cog.setData('hfLabel', 'SETTINGS');
+    // ...AND ITS ROLE, WHICH IS NOT ITS LABEL (2026-08-11). `hfLabel` names what
+    // a control SAYS, and more than one control is allowed to say the same word
+    // — TitleScene has a gear AND a ladder plate both labelled SETTINGS, and its
+    // audit matched the cog by that string, picked the wrong object, and then
+    // dropped BOTH from the collision sweep. That is a blind spot on the exact
+    // plate next to the cog, inside the audit built for JC's cog complaint.
+    // `hfRole` is an IDENTITY: exactly one object in a scene wears 'cog', and
+    // the audits below resolve it by role (or by this handle) and never by the
+    // word printed on it.
+    cog.setData('hfRole', 'cog');
+    this.cogBtn = cog;
     this._cogClear = clearsCorners({
       left: cog.x - cog.displayWidth / 2, right: cog.x + cog.displayWidth / 2,
       top: cog.y - cog.displayHeight / 2, bottom: cog.y + cog.displayHeight / 2,
@@ -666,8 +706,179 @@ export class MapScene extends Phaser.Scene {
         openChoiceBox(this, spec);
         return { ok: true, id, box: window.__hfBox };
       },
+      /**
+       * THE MERCHANT'S DIG, while his tent is open. `restock()` reads the whole
+       * per-visit model — the ladder rung, the Royal Charter's remaining free
+       * digs, any freeFirstRestock coupons, the live price and the exact plate
+       * text; `restockPull()` presses the button through its own handler.
+       * Null when no shop is open, because every one of those numbers is scoped
+       * to the visit and there is no honest answer outside one.
+       */
+      restock: () => this._restockDriver?.state() ?? null,
+      restockPull: () => this._restockDriver?.pull() ?? null,
       /** The rounded-glass frame this scene laid itself out inside. */
       safe: () => ({ ...SAFE, hudSafe: HUD_SAFE, cogClearsCorners: this._cogClear !== false }),
+      /**
+       * =====================================================================
+       * THE CORNER, MEASURED (2026-08-11) — MapScene's half of the cog audit
+       * =====================================================================
+       * JC's report was "the settings cog SOMETIMES overlaps with main menu
+       * elements", and the only honest answer to a SOMETIMES is a driver that
+       * measures every screen at both touch widths instead of a person
+       * squinting at one. CombatScene has had `__hfCombat.chromeAudit()` for a
+       * while; this screen had `buttons()` (which finds `btn_` plates only) and
+       * a single boolean, `cogClearsCorners`, that answered a completely
+       * different question — is the gear on the GLASS — and was perfectly happy
+       * while the gear stood 4px from the artifact belt's top cell.
+       *
+       * It is deliberately the SAME SHAPE as chromeAudit's and built from the
+       * same three helpers in ui/settingsMenu.js, so one driver assertion
+       * covers both scenes and neither can drift into its own idea of what a
+       * rectangle is.
+       *
+       *   boxes       every target that is not painted decor, labelled.
+       *   collisions  every intersecting pair, label against label. ASSERT [].
+       *   cogVsAny    what the gear's box lands on across the WHOLE display
+       *               list, HUD or board — the wider net, reported rather than
+       *               asserted, because the scrolling board legitimately slides
+       *               node icons under the HUD's corner and that is a different
+       *               complaint from "a control is on the gear".
+       *   allClear    every box still on the glass (config.clearsCorners).
+       */
+      chrome: () => {
+        // BY HANDLE, NEVER BY LABEL. `addSettingsButton` handed this back; the
+        // object also wears `hfRole: 'cog'` so a driver (or a future walk that
+        // does not have the handle) can find it without matching the WORD
+        // 'SETTINGS', which is not unique on every screen. It surfaces in
+        // `boxes` as 'COG' with `role: 'cog'`, which IS unique.
+        const cogObj = this.cogBtn;
+        const cog = chromeBox('COG', COG_HOME.x, COG_HOME.y, COG_SIZE, COG_SIZE);
+        cog.role = 'cog';
+        cog.drawn = cogObj?.active
+          ? { w: Math.round(cogObj.displayWidth), h: Math.round(cogObj.displayHeight) }
+          : null;
+        // The tilt is DESKTOP-ONLY since 2026-08-11 (a 30-degree rotation
+        // inflates a square's AABB by cos30+sin30 = 1.366), so on touch the
+        // worst case IS the drawn box. Reported either way: every clearance in
+        // this corner has to hold at the gear's largest, not its nominal.
+        cog.tweened = MOBILE ? cog.drawn : (cog.drawn && {
+          w: Math.round(cog.drawn.w * 1.366), h: Math.round(cog.drawn.h * 1.366),
+        });
+        /**
+         * ===================================================================
+         * ONE BOX PER CONTROL, SIZED TO EVERYTHING THAT CONTROL DRAWS
+         * ===================================================================
+         * (2026-08-11, the day the strict assertion was found to be
+         * unsatisfiable.) The first cut of this hook emitted the belt SOCKET
+         * and the RELIC SITTING IN IT as two peer boxes — so every relic on the
+         * belt manufactured a `('BELT<i>','RELIC<i>')` pair, and a full belt
+         * reported eight "collisions" at both touch widths. An invariant that
+         * cannot be satisfied is worse than no invariant: the driver has to
+         * either keep it red forever or filter it, and a filter is where real
+         * collisions go to hide.
+         *
+         * The modelling error was calling them two things. They are ONE
+         * control: the socket and the painting on it share `beltSpec`, share a
+         * box key, and open the same panel whichever half the finger lands on.
+         * A neighbour must clear the pair, and the pair's outline is what the
+         * pair occupies — so the box is their UNION and the parts are reported
+         * INSIDE it (`holds`, `art`) rather than beside it.
+         *
+         * The union, not just the socket, on purpose: it keeps the check honest
+         * if a relic painting is ever cut larger than the cell it stands in.
+         * `overflow` says by how much, so an oversized art asset is still
+         * visible in the readout instead of being swallowed by the socket.
+         */
+        const union = (label, objs) => {
+          const live = objs.filter(o => o?.active).map(o => o.getBounds());
+          if (!live.length) return null;
+          const l = Math.min(...live.map(b => b.left)), r = Math.max(...live.map(b => b.right));
+          const t = Math.min(...live.map(b => b.top)), bt = Math.max(...live.map(b => b.bottom));
+          return chromeBox(label, (l + r) / 2, (t + bt) / 2, r - l, bt - t);
+        };
+        const boxes = [cog];
+        (this._hudBelt ?? []).forEach((socket, i) => {
+          const held = (this._hudBeltEntries ?? [])[i];
+          const box = union(`BELT${i}`, [socket, held?.icon]);
+          if (!box) return;
+          box.art = held?.art?.id ?? null;
+          box.holds = held?.icon?.active
+            ? { w: Math.round(held.icon.displayWidth), h: Math.round(held.icon.displayHeight) }
+            : null;
+          const sock = socket.getBounds();
+          box.overflow = Math.round(Math.max(
+            sock.left - box.left, box.right - sock.right,
+            sock.top - box.top, box.bottom - sock.bottom, 0,
+          ));
+          boxes.push(box);
+        });
+        (this._hudNook ?? []).forEach((p, i) => {
+          const box = chromeObjBox(`GLOVE${i}`, p);
+          if (box) boxes.push(box);
+        });
+        (this._hudPotHits ?? []).forEach((h, i) => {
+          const box = chromeObjBox(`BOTTLE${i}`, h);
+          if (box) boxes.push(box);
+        });
+        // ===================================================================
+        // ...AND EVERY NAMED PLATE — RESOLVED BY IDENTITY, NEVER BY ITS WORD
+        // ===================================================================
+        // VIEW DECK, HANDS, the dev buttons, every plate the two-tap box draws.
+        // The gear is dropped by OBJECT IDENTITY (`o === cogObj`), which is the
+        // whole point of this rewrite: this loop used to be
+        // `if (p.label === 'SETTINGS') continue`, over chromeButtons' flat
+        // records, and that is exactly the bug TitleScene shipped — a scene is
+        // allowed more than one control saying the same word (a gear AND a
+        // ladder plate both say SETTINGS), so a label filter silently drops the
+        // plate NEXT TO the cog from the very sweep that exists to catch things
+        // next to the cog. `hfLabel` says what a control SAYS; `hfRole` says
+        // what it IS, and only one object in a scene wears 'cog'.
+        const hit = (a, b) => a.left < b.right && a.right > b.left
+          && a.top < b.bottom && a.bottom > b.top;
+        const every = [];
+        const walk = (o) => {
+          if (!o) return;
+          const isCog = o === cogObj || o.getData?.('hfRole') === 'cog';
+          if (o.input?.enabled && o.visible !== false && !isCog) {
+            const label = o.getData?.('hfLabel') ?? o.texture?.key ?? o.type ?? '?';
+            const b = chromeObjBox(label, o);
+            if (b && b.w > 0 && b.h > 0) {
+              b.role = o.getData?.('hfRole') ?? null;
+              every.push(b);
+              // Named wooden plates join the CHROME contract; the rest (node
+              // icons on the scrolling board, card sprites in a picker) stay in
+              // the wider `every` net only. A plate is what a driver can name.
+              if (/^btn_/.test(o.texture?.key ?? '')) boxes.push(b);
+            }
+          }
+          (o.list ?? []).forEach(walk);
+        };
+        this.children.list.forEach(walk);
+        /**
+         * TWO CONTROLS WEARING ONE NAME. The failure above was not "someone
+         * wrote the wrong filter", it was "a label was treated as an identity".
+         * So the audit REPORTS every label it saw more than once: the next
+         * driver that reaches for `boxes.find(b => b.label === 'X')` can tell
+         * whether X is unique on this screen before it trusts the answer.
+         */
+        const seen = new Map();
+        for (const b of [...boxes, ...every]) seen.set(b.label, (seen.get(b.label) ?? 0) + 1);
+        const dupLabels = [...seen].filter(([, n]) => n > 1).map(([l, n]) => ({ label: l, n }));
+        return {
+          gameW: GAME_W, gameH: GAME_H, touch: TOUCH,
+          safe: { ...SAFE, hudSafe: HUD_SAFE },
+          cog,
+          // The two numbers the belt's top cell is derived from, so a failure
+          // message can say WHICH end of the chain moved.
+          belt: { x: this._hudBelt?.[0]?.x ?? null, cellTop: boxes.find(b => b.label === 'BELT0')?.top ?? null },
+          boxes,
+          collisions: chromeCollisions(boxes),
+          cogVsAny: every.filter(b => hit(cog, b)).map(b => b.label),
+          plates: chromeButtons(this),
+          dupLabels,
+          allClear: boxes.every(b => b.clears),
+        };
+      },
       music: () => musicDebug(),
       sounds: () => this.sound.sounds.map(s => ({ key: s.key, playing: s.isPlaying, volume: s.volume })),
       reforgeNow: () => artifactPickerOverlay(this, run, {}, (a) =>
@@ -1104,12 +1315,18 @@ export class MapScene extends Phaser.Scene {
     }
 
     sprite.setInteractive({ useHandCursor: true });
-    sprite.on('pointerover', () => {
-      this.showTip(pos.x, pos.y + this.mapLayer.y + 205,
-        `${boss.name}  ·  ${this.act.mechanic}`, boss.blurb);
-      this.tweens.add({ targets: g, scale: 1.04, duration: 120 });
-    });
-    sprite.on('pointerout', () => { this.hideTip(); this.tweens.add({ targets: g, scale: 1, duration: 120 }); });
+    // POLISH RAW, DESCRIPTION THROUGH `hoverInfo` (2026-08-11). The 1.04 swell
+    // is a medallion reacting to a pointer and reads as press feedback on a
+    // finger, so it stays. The TIP is the same sentence the two-tap box below
+    // prints, and on a phone both used to open at once, stacked — which is the
+    // bug JC actually reported. `hoverInfo` binds nothing on touch, so the box
+    // is the only surface left that speaks.
+    sprite.on('pointerover', () => this.tweens.add({ targets: g, scale: 1.04, duration: 120 }));
+    sprite.on('pointerout', () => this.tweens.add({ targets: g, scale: 1, duration: 120 }));
+    hoverInfo(sprite,
+      () => this.showTip(pos.x, pos.y + this.mapLayer.y + 205,
+        `${boss.name}  ·  ${this.act.mechanic}`, boss.blurb),
+      () => this.hideTip());
 
     // THE MEDALLION IS 240px OF BOSS HEAD and it committed on a RAW pointerdown
     // — it never went through tapBind at all, so on the phone a thumb brushing
@@ -1226,19 +1443,24 @@ export class MapScene extends Phaser.Scene {
       const clickable = () => isOpen || settings.dev;
       icon.setInteractive({ useHandCursor: isOpen });
       const label = mythic ? 'Something glows RED out here...' : style.label;
+      // The 1.14 pop is polish and stays raw on both builds; the tip is a
+      // description and rides `hoverInfo`, so on touch the node is described by
+      // its two-tap box (below) and by nothing else. Same split as the boss
+      // medallion — see the note there.
       icon.on('pointerover', () => {
-        if (!node.visited || isCurrent) {
-          // A FORGED node is the one hover on the board that has to SELL a
-          // decision, so it spends the body text on what it costs and what it
-          // pays instead of on "click to travel".
-          const travel = isOpen ? say('Click to travel', 'Tap to travel')
-            : settings.dev ? say('DEV: click to teleport', 'DEV: tap to teleport') : null;
-          const body = forged ? `${FORGED_BLURB}${travel ? `\n${travel}` : ''}` : travel;
-          this.showTip(pos.x, pos.y + this.mapLayer.y - r - 18, label, body);
-        }
         if (clickable()) this.tweens.add({ targets: g, scale: 1.14, duration: 110 });
       });
-      icon.on('pointerout', () => { this.hideTip(); this.tweens.add({ targets: g, scale: 1, duration: 110 }); });
+      icon.on('pointerout', () => this.tweens.add({ targets: g, scale: 1, duration: 110 }));
+      hoverInfo(icon, () => {
+        if (node.visited && !isCurrent) return;
+        // A FORGED node is the one hover on the board that has to SELL a
+        // decision, so it spends the body text on what it costs and what it
+        // pays instead of on "click to travel".
+        const travel = isOpen ? say('Click to travel', 'Tap to travel')
+          : settings.dev ? say('DEV: click to teleport', 'DEV: tap to teleport') : null;
+        const body = forged ? `${FORGED_BLURB}${travel ? `\n${travel}` : ''}` : travel;
+        this.showTip(pos.x, pos.y + this.mapLayer.y - r - 18, label, body);
+      }, () => this.hideTip());
 
       // TRAVEL IS THE MISCLICK JC NAMED FIRST. The board is a field of 80px
       // icons with a scrolling drag living on top of them, and entering the
@@ -1601,11 +1823,38 @@ export class MapScene extends Phaser.Scene {
     // ...and DOWN by SAFE.y as well as in by SAFE.x (2026-08-10). The column was
     // pinched horizontally only, which left the topmost 72px cell with its lid
     // 96px from the top edge — fine along a flat edge, and 24px inside the arc
-    // in the corner it actually lives in. At (GAME_W-180, 156) on the 2340
-    // canvas the top cell's box is 2124..2196 x 120..192, whose farthest point
-    // from the corner centre (2190,150) is 31px against a 150 radius.
+    // in the corner it actually lives in.
+    //
+    // ========================================================================
+    // ...AND THEN IT WAS 4px FROM THE SETTINGS COG (JC, 2026-08-11: "the cog
+    // sometimes overlaps with main menu elements")
+    // ========================================================================
+    // `132 + SAFE.y` = 156 put the top cell's lid at 120 against a gear whose
+    // foot is at 116 — four pixels, across a 42px band of shared width, at BOTH
+    // touch widths. And the gear sits at DEPTH.overlay+20 while the belt is in
+    // the HUD, so anything the two share is the GEAR'S tap, not the relic's.
+    // Four pixels is not a clearance, it is a rounding error that happened to
+    // land the right way; it was 9.9px of genuine overlap until the hover tilt
+    // was made desktop-only in the same wave (a 30-degree rotation inflates a
+    // 76px square's AABB to 103.8).
+    //
+    // So the column's top is DERIVED from the thing above it rather than being
+    // a literal that agreed with a cog nobody re-measured: the gear's foot,
+    // plus a thumb of daylight, plus half a cell (beltCellY is a CENTRE).
+    //
+    //   touch  116 + 24 + 36 = 176 -> top cell 140..212. 24px of air, both
+    //          canvases, and its worst corner (beltX+36, 140) is 12px from the
+    //          corner arc's centre against a 150 radius.
+    //   desktop 132, to the pixel, because SAFE is {0,0} and the desktop gear's
+    //          foot (64) is already 41px clear of a 54px cell at 105. Deriving
+    //          there would MOVE a shipped board for no reason, so it does not.
     const beltX = (MOBILE ? GAME_W - 84 : GAME_W - 68) - HUD_SAFE;
-    const beltY0 = 132 + SAFE.y;
+    const BELT_CELL = MOBILE ? 72 : 54;
+    /** Daylight between the gear's foot and the first relic cell's lid. */
+    const BELT_COG_GAP = 24;
+    const beltY0 = TOUCH
+      ? Math.round(COG_HOME.y + COG_SIZE / 2 + BELT_COG_GAP + BELT_CELL / 2)
+      : 132;
     const BELT_PITCH = MOBILE ? 84 : 64;
     const belt = beltArtifacts();
     const cells = Math.max(run.artifactSlots, belt.length);
@@ -1634,6 +1883,15 @@ export class MapScene extends Phaser.Scene {
     this._beltDragging = false;              // scenes are singletons: reset it
     const beltEntries = [];
     const beltBoxes = [];
+    // THE HUD'S OWN TARGETS, KEPT (2026-08-11) so `__hf.chrome()` can measure
+    // the cog against the things that actually live under it. The belt cells and
+    // the glove pouch are plain Rectangles, not `btn_` plates, so the display
+    // walk in chromeButtons cannot find them by texture — and the belt's top
+    // cell is precisely the thing the gear was standing on.
+    this._hudBelt = beltBoxes;
+    this._hudBeltEntries = beltEntries;
+    this._hudNook = [];
+    this._hudPotHits = [];
     const beltPlace = () => {
       beltEntries.forEach((e, idx) => {
         if (e.dragging) return;
@@ -1696,7 +1954,7 @@ export class MapScene extends Phaser.Scene {
 
     for (let i = 0; i < cells; i++) {
       const y = beltCellY(i);
-      const box = this.add.rectangle(beltX, y, MOBILE ? 72 : 54, MOBILE ? 72 : 54, 0x241b31, 0.85).setStrokeStyle(3, 0x4a3c60);
+      const box = this.add.rectangle(beltX, y, BELT_CELL, BELT_CELL, 0x241b31, 0.85).setStrokeStyle(3, 0x4a3c60);
       hud.add(box);
       beltBoxes.push(box);
       const art = belt[i];
@@ -1721,8 +1979,12 @@ export class MapScene extends Phaser.Scene {
         // air the column holds still and says nothing.
         const quiet = () => !this._beltDragging;
         box.setInteractive({ useHandCursor: true });
-        box.on('pointerover', () => quiet() && showBeltTip());
-        box.on('pointerout', () => this.hideTip());
+        // DESKTOP ONLY (2026-08-11). The cell and the icon on it are two hit
+        // areas over one relic and BOTH printed this tip; on touch they also
+        // both open `beltSpec`, so a tap produced the box and the tooltip on top
+        // of each other — twice over. `hoverInfo` binds nothing on a finger, so
+        // what is left is one box per relic, whichever half was tapped.
+        hoverInfo(box, () => { if (quiet()) showBeltTip(); }, () => this.hideTip());
 
         /**
          * THE BELT'S ONE COMMIT, and its two triggers.
@@ -1742,7 +2004,7 @@ export class MapScene extends Phaser.Scene {
         const beltSell = () => { this.hideTip(); this.sellPrompt(art); };
         const beltSpec = {
           key: `belt:${art.id}`,
-          anchor: () => ({ x: beltX, y: icon.y, w: MOBILE ? 72 : 54, h: MOBILE ? 72 : 54 }),
+          anchor: () => ({ x: beltX, y: icon.y, w: BELT_CELL, h: BELT_CELL }),
           title: `${art.name}  ·  ${artRar?.label ?? ''}`,
           body: artifactTipBody(art),
           note: REORDER_HINT,
@@ -1757,8 +2019,7 @@ export class MapScene extends Phaser.Scene {
         // still sells, a drag reorders. `_justDragged` keeps the two apart.
         const base = icon.scale;
         icon.setInteractive({ useHandCursor: true, draggable: true });
-        icon.on('pointerover', () => quiet() && showBeltTip());
-        icon.on('pointerout', () => this.hideTip());
+        hoverInfo(icon, () => { if (quiet()) showBeltTip(); }, () => this.hideTip());
         icon.on('dragstart', () => {
           entry.dragging = true;
           icon._justDragged = true;
@@ -1867,16 +2128,18 @@ export class MapScene extends Phaser.Scene {
         // shrunk to belt scale.
         const flap = this.add.rectangle(beltX, y - 22, 46, 12, 0x4a3018, 1).setStrokeStyle(2, 0x2a1808);
         hud.add(pouch); hud.add(flap);
+        this._hudNook.push(pouch);
         hud.add(addArtifactIcon(this, beltX, y + 4, art, 40));
         const rar = ARTIFACT_RARITY[art.rarity];
         const WORN = '(worn, not slotted. It costs you no slot.)';
         pouch.setInteractive({ useHandCursor: true });
-        pouch.on('pointerover', () => this.showTip(beltX - 40, y, art.name,
+        // Desktop only: the pouch's twoTap below prints the same three
+        // paragraphs on touch, and printing them twice at once was the bug.
+        hoverInfo(pouch, () => this.showTip(beltX - 40, y, art.name,
           `${rar?.label ?? ''}\n` + artifactTipBody(art)
           + `\n${WORN}`
           + `\n\n${say('Click', 'Tap')} to sell for ◉ ${sellValue(art)}. Its gift leaves with it.`,
-          1, !!rar?.rainbow));
-        pouch.on('pointerout', () => this.hideTip());
+          1, !!rar?.rainbow), () => this.hideTip());
         // The pouch never had a MOBILE branch at all: it sold a Sixth Finger on
         // a raw first touch, with no tapBind, no hold check and no confirm in
         // front of it but sellPrompt's. Same box as the belt above it.
@@ -1942,15 +2205,36 @@ export class MapScene extends Phaser.Scene {
       if (!usable) icon.setAlpha(0.55);
       const hit = this.add.circle(x, y, r, 0xffffff, 0.001).setInteractive({ useHandCursor: usable });
       hud.add(hit);
-      hit.on('pointerover', () => this.showTip(x, y - 56, pot.name,
-        pot.desc + (usable ? say('\nClick to drink.', '\nTap to drink.')
-          : pot.use === 'passive' ? '\n(always working)' : '\n(combat only)')));
-      hit.on('pointerout', () => this.hideTip());
+      this._hudPotHits.push(hit);
+      /** The one sentence about this bottle, so both surfaces print it. */
+      const whyNot = () => (pot.use === 'passive' ? '(always working)' : '(combat only)');
+      // Desktop only: on touch `confirmMapPotion` already opens a box carrying
+      // this exact name and rules text, with a DRINK plate on it.
+      hoverInfo(hit, () => this.showTip(x, y - 56, pot.name,
+        pot.desc + (usable ? say('\nClick to drink.', '\nTap to drink.') : `\n${whyNot()}`)),
+      () => this.hideTip());
       if (usable) {
         // TWO STEPS ON TOUCH (JC): tap opens the description with a DRINK
         // plate; tapping anywhere else lets go. Desktop keeps one-click.
         if (MOBILE) tapBind(this, hit, () => this.confirmMapPotion(pot, x, y));
         else hit.on('pointerdown', () => this.drinkPotionHere(pot, x, y));
+      } else if (TOUCH) {
+        // AN UNDRINKABLE BOTTLE STILL HAS TO SAY WHAT IT IS (2026-08-11). This
+        // branch was `if (usable)` and nothing else, which was fine while hover
+        // existed: a combat brew sitting dim on the map answered a hover with
+        // its rules and the reason it is dim. With hover gone on touch, a
+        // greyed bottle would have become a picture with no path to its own
+        // text — and a bottle you cannot drink HERE is exactly the one a player
+        // stops to ask about. It gets the info panel with no plates on it,
+        // because there is nothing to commit: `tapInfo`, not `twoTap`.
+        tapInfo(this, hit, {
+          key: `mappotion:${i}`,
+          anchor: { x, y, w: r * 2, h: r * 2 },
+          title: pot.name,
+          body: pot.desc,
+          note: whyNot(),
+          accent: POTION_RARITY[pot.rarity]?.color,
+        });
       }
     });
 
@@ -2087,9 +2371,21 @@ export class MapScene extends Phaser.Scene {
     tip.setPosition(originX === 1 ? x - w / 2 : tx,
       Phaser.Math.Clamp(y - contentH / 2 - h / 2 - 8, 8 - top, GAME_H - 8 - top - h));
     this.mapTip = tip;
+    // ONE DESCRIPTION PANEL AT A TIME, EVER (ui/infoPanels.js). Every hover on
+    // this screen is bound through `hoverInfo` now, so on touch this never
+    // opens at all — and registering it anyway is exactly what lets the driver
+    // ASSERT `window.__hfPanels.count() === 0` after tapping every convertible
+    // thing on the board, instead of assuming it. Note :538's tipAudit calls
+    // showTip PROGRAMMATICALLY and tears it down again; it registers and
+    // unregisters like any other, which is what keeps the count honest.
+    this._mapTipToken = notePanelOpen('tip', title, () => this.hideTip());
   }
 
-  hideTip() { if (this.mapTip) { this.mapTip.destroy(true); this.mapTip = null; } }
+  hideTip() {
+    if (this.mapTip) { this.mapTip.destroy(true); this.mapTip = null; }
+    notePanelClosed(this._mapTipToken);
+    this._mapTipToken = null;
+  }
 
   /**
    * FIRE AN ARTIFACT HOOK FROM THE MAP, over the EFFECTIVE belt (mirrors count).
@@ -3206,12 +3502,19 @@ export class MapScene extends Phaser.Scene {
       // Potion icons come back as shadow CONTAINERS, relics as Images — the
       // helper gives each the right hit area.
       makePotionIconInteractive(icon, iconH);
+      // The tick and the 1.08 swell are polish and stay raw on both builds; the
+      // TIP is the same title and body the two-tap box below prints, so it rides
+      // `hoverInfo` and is desktop-only. On the merchant's mat this was the most
+      // visible instance of the double-description bug: the goods are three
+      // across, so the box lands beside the icon and the tooltip landed on it.
       icon.on('pointerover', () => {
         sfx(this, 'menu_select', { volume: 0.25, jitter: 0.06 });
         this.tweens.add({ targets: spot, scale: 1.08, duration: 110 });
-        this.showTip(x, y - iconH / 2 - 64, tipTitle, tipBody, 0.5, !!rar.rainbow);
       });
-      icon.on('pointerout', () => { this.hideTip(); this.tweens.add({ targets: spot, scale: 1, duration: 110 }); });
+      icon.on('pointerout', () => this.tweens.add({ targets: spot, scale: 1, duration: 110 }));
+      hoverInfo(icon,
+        () => this.showTip(x, y - iconH / 2 - 64, tipTitle, tipBody, 0.5, !!rar.rainbow),
+        () => this.hideTip());
       const commitBuy = () => {
         const fail = (msg) => {
           this.tweens.add({ targets: spot, x: x + 8, duration: 50, yoyo: true, repeat: 2 });
@@ -3459,11 +3762,13 @@ export class MapScene extends Phaser.Scene {
         // tab under the bottle is the deliberate second affordance, so nobody
         // liquidates a Mythical brew by fumbling a drink.
         const sellFor = potionSellValue(pot);
-        hit.on('pointerover', () => this.showTip(x, y + 70, pot.name,
+        // Desktop only: the box below carries the same name, the same rules and
+        // the same price, with DRINK and SELL as plates instead of as sentences.
+        hoverInfo(hit, () => this.showTip(x, y + 70, pot.name,
           pot.desc + (drinkable ? say('\nClick to drink it right here.', '\nTap to drink it right here.')
             : pot.use === 'passive' ? '\n(always working)' : '\n(combat only)')
-          + `\n${say('Or press SELL. He pays', 'He pays')} ◉ ${sellFor}.`));
-        hit.on('pointerout', () => this.hideTip());
+          + `\n${say('Or press SELL. He pays', 'He pays')} ◉ ${sellFor}.`),
+        () => this.hideTip());
         const drink = () => this.drinkPotionHere(pot, x, y, {
           after: () => { updateBelt(); updateChips(); refreshPrices(); refreshServices(); },
         });
@@ -3569,12 +3874,13 @@ export class MapScene extends Phaser.Scene {
         if (mirrorBlockedBy(art)) relicShelf.add(noMirrorBadge(this, x + 21, y - 20, 9));
         const rar = ARTIFACT_RARITY[art.rarity];
         box.setInteractive({ useHandCursor: true });
-        box.on('pointerover', () => {
-          sfx(this, 'menu_select', { volume: 0.22, jitter: 0.06 });
-          this.showTip(x, y - 40, art.name, `${rar?.label ?? ''}\n` + artifactTipBody(art)
-            + `\n\n${say('Click', 'Tap')} to sell it for ◉ ${sellValue(art)}`, 0.5, !!rar?.rainbow);
-        });
-        box.on('pointerout', () => this.hideTip());
+        // The tick stays raw (press feedback on a finger); the tip is the same
+        // text the shelf's two-tap box prints and is therefore desktop-only.
+        box.on('pointerover', () => sfx(this, 'menu_select', { volume: 0.22, jitter: 0.06 }));
+        hoverInfo(box,
+          () => this.showTip(x, y - 40, art.name, `${rar?.label ?? ''}\n` + artifactTipBody(art)
+            + `\n\n${say('Click', 'Tap')} to sell it for ◉ ${sellValue(art)}`, 0.5, !!rar?.rainbow),
+          () => this.hideTip());
         // A grid of 58px squares whose only tell is a 46px painting, and the
         // first touch on any of them opened a sell confirm. Same box, same
         // rule: read first, then SELL, then the confirm.
@@ -3619,14 +3925,37 @@ export class MapScene extends Phaser.Scene {
     // not reset the price of the next one. Scoped to runShop() like `restocks`
     // itself, so every tent honours one coupon per relic held.
     //
-    // THE ROYAL CHARTER (props.freeRestock) is a different promise and sits
-    // ABOVE the coupon: not the first dig of a visit but EVERY dig, forever. It
-    // answers before the ladder is even consulted, and because it answers first
-    // the coupon below is never reached and therefore never SPENT while the
-    // charter is covering the bill — sell the charter and the coupons you were
-    // holding are all still there.
+    // ========================================================================
+    // THE ROYAL CHARTER: THREE FREE DIGS A VISIT, NOT INFINITE (JC, 2026-08-11)
+    // ========================================================================
+    // It used to answer 0 unconditionally — "RESTOCK is free, forever" — and
+    // that promise is why it had to change. An infinite dig turns the
+    // merchant's shelf into a tap: pull until the chip-granting potions show
+    // up, pull again until the ~1-in-100 MYTHICAL does, and the ladder that
+    // exists precisely to price that hunt never charges a chip. The relic is
+    // still a legendary; it is just no longer a solved run.
+    //
+    // It is a PER-VISIT allowance, counted in this closure exactly like
+    // `restocks`, `removedThisVisit` and the coupon below — one scope, one
+    // idiom, and the merchant's memory ends when you walk out. The count comes
+    // from props.freeRestock, so a MIRRORED charter grants six, the same way
+    // two coupons grant two.
+    //
+    // AND THE FREE ONES CLIMB THE LADDER. `restocks` advances on every pull,
+    // paid or not (it always has — see the coupon's own note), so the 4th dig
+    // of a visit costs RESTOCK_LADDER[3] and not RESTOCK_LADDER[0]. That is the
+    // difference between "three free digs" and "three free digs plus a cheap
+    // ladder", and the second one is very nearly the exploit this replaced.
+    //
+    // The COUPON still sits UNDER the charter: while charter digs remain they
+    // answer first, so a freeFirstRestock coupon is not torn off, and once the
+    // charter's three are spent the coupon covers the fourth. Sell the charter
+    // mid-visit and the coupon is still in your pocket.
     let freeRestocks = getProp(effectiveArtifacts(), 'freeFirstRestock');
-    const charterCovers = () => getProp(effectiveArtifacts(), 'freeRestock') > 0;
+    let charterLeft = getProp(effectiveArtifacts(), 'freeRestock');
+    // Re-read the prop every time: selling the charter at his own table has to
+    // take its allowance with it, and `charterLeft` alone would not notice.
+    const charterCovers = () => charterLeft > 0 && getProp(effectiveArtifacts(), 'freeRestock') > 0;
     const restockPrice = () => {
       if (charterCovers()) return 0;
       if (freeRestocks > 0) return 0;
@@ -3637,7 +3966,15 @@ export class MapScene extends Phaser.Scene {
       const dug = getProp(effectiveArtifacts(), 'restockHalf') > 0 ? Math.round(base / 2) : base;
       return shopPrice(dug);   // digging is a purchase, so the till applies here too
     };
-    const restockLabel = () => (restockPrice() === 0 ? 'RESTOCK: FREE' : `RESTOCK: ◉ ${restockPrice()}`);
+    // THE BUTTON COUNTS THEM DOWN OUT LOUD. A free thing that silently stops
+    // being free reads as a bug, and the player has to be able to decide
+    // whether to spend the last one — so the plate says FREE (3 left), FREE
+    // (2 left), FREE (1 left), and then the price, in that order.
+    const restockLabel = () => {
+      if (charterCovers()) return `RESTOCK: FREE (${charterLeft} left)`;
+      const p = restockPrice();
+      return p === 0 ? 'RESTOCK: FREE' : `RESTOCK: ◉ ${p}`;
+    };
     const restockBtn = this.add.image(GAME_W - 230, 210, 'btn_blue').setInteractive({ useHandCursor: true });
     const restockTxt = this.add.text(GAME_W - 230, 206, restockLabel(), {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '21px', color: '#0a2a4a',
@@ -3652,9 +3989,17 @@ export class MapScene extends Phaser.Scene {
         return;
       }
       run.chips -= cost;
-      // A COUPON IS ONLY SPENT WHEN A COUPON PAID. The charter answers 0 above
-      // it, so a charter holder digs all day without ever tearing one off.
-      if (cost === 0 && !charterCovers() && freeRestocks > 0) freeRestocks -= 1;
+      // WHICHEVER FREE THING PAID IS THE ONE THAT IS SPENT. The charter answers
+      // above the coupon, so while it has digs left the coupon is never torn
+      // off — and now that the charter is finite, its own counter comes down
+      // first and the coupon takes over when it runs out.
+      if (cost === 0) {
+        if (charterCovers()) charterLeft -= 1;
+        else if (freeRestocks > 0) freeRestocks -= 1;
+      }
+      // ...AND THE LADDER CLIMBS EITHER WAY. A free dig buys the DIG, not a
+      // reset: this line has been unconditional since the coupon shipped, and
+      // it is what makes the charter's 4th restock cost the ladder's 4th rung.
       restocks += 1;
       updateChips();
       this.hideTip();
@@ -3663,6 +4008,32 @@ export class MapScene extends Phaser.Scene {
       restockBtn.setDisplaySize(fitWidth(restockTxt, { pad: 56, min: 200, max: 320 }), 60);
       renderStock();
     });
+    /**
+     * THE DIG, AS PLAIN DATA — and a way to pull the lever (2026-08-11).
+     *
+     * The whole restock model lives in `let`s inside this closure (that is the
+     * point: the merchant's memory ends when you leave the tent), which means a
+     * driver could not read a single one of them. It cannot prove "three free,
+     * then the ladder's FOURTH rung" by clicking a coordinate and squinting at
+     * a label, and that ruling is exactly the one JC gets a veto on.
+     *
+     * `pull()` goes through the button's own handler rather than reproducing
+     * it, so a driver exercises the code the finger exercises.
+     */
+    this._restockDriver = {
+      state: () => ({
+        restocks,
+        charterLeft,
+        charterCovers: charterCovers(),
+        coupons: freeRestocks,
+        price: restockPrice(),
+        label: restockTxt.text,
+        ladder: [...RESTOCK_LADDER],
+        chips: run.chips,
+      }),
+      pull: () => { restockBtn.emit('pointerdown'); return this._restockDriver.state(); },
+    };
+    ov.once('destroy', () => { this._restockDriver = null; });
 
     // Services on the lower boards. BOTH priced services climb a per-RUN ladder
     // (run.counters), so their labels are LIVE — re-read after every purchase

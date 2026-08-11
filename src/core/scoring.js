@@ -624,8 +624,14 @@ export function ruleSuitOf(card, character, mods = null) {
  *                            effMult (the Infinite Heart's rewrite; shieldByMult
  *                            is the same lever kept live for a future relic, no
  *                            longer used by The Ancient Shield)
- *   shieldMult             — THE ANCIENT SHIELD: +SHIELD_MULT_PCT mult per point
- *                            of Shield, uncapped. Zeal's shape, on the Bull.
+ *   shieldMult             — +SHIELD_MULT_PCT mult per point of Shield,
+ *                            uncapped. Zeal's shape. NO RELIC WRITES IT (this
+ *                            line said "THE ANCIENT SHIELD" until 2026-08-11 and
+ *                            was simply wrong — the Ancient Shield writes
+ *                            shieldByMult, above). Kept live as the lever a
+ *                            future relic picks up; the cascade has no beat for
+ *                            it and tests/pulses0811.test.js will refuse the
+ *                            first relic that writes it until one is written.
  *   zealUncap              — RETIRED 2026-08-04 (Zeal is uncapped for everyone
  *                            now — see zealCapFor). Read by nothing; old saves
  *                            may still carry it and it does no harm.

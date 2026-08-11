@@ -12,7 +12,8 @@
  *     shelf's 0x1c1626 with the padlock on it, and the name is '???'. You can
  *     see the SHAPE of what you have not earned, which is the tease; you cannot
  *     see the paint.
- *   · HOVER SAYS WHY. Every tile — locked or not — writes to the DETAIL BAR at
+ *   · ASKING SAYS WHY (hover on desktop; a tap on touch, since the 2026-08-11
+ *     hover removal). Every tile — locked or not — writes to the DETAIL BAR at
  *     the foot of the panel: the skin's name, and either its flavour line or
  *     the exact thing you have to go and do. A bar rather than a floating tip
  *     because the requirement lines run long ("Beat THE DAUGHTERS OF DARKNESS
@@ -24,8 +25,12 @@
  *     hidden "unequip" anywhere.
  */
 
-import { GAME_W, GAME_H, DEPTH, PARCH, CHARACTERS, SUIT_COLORS } from '../config.js';
+import { GAME_W, GAME_H, DEPTH, PARCH, CHARACTERS, SUIT_COLORS, TOUCH } from '../config.js';
 import { woodPanel } from './panels.js';
+// THE HOVER REMOVAL (JC, 2026-08-11): `hoverInfo` is the one binder every
+// tooltip in this game goes through, and it binds NOTHING on a finger. See
+// makeTile for what a finger gets instead.
+import { hoverInfo } from './touch.js';
 import { legible } from './juice.js';
 import { sfx } from '../core/sfx.js';
 import { kineticScroll } from './kinetic.js';
@@ -130,7 +135,12 @@ export function openSkins(scene, opts = {}) {
   }).setOrigin(0.5, 0);
   ov.add(barName); ov.add(barLine); ov.add(barEarned);
 
-  const REST = 'Hover a skin to read it. Click one to wear it.';
+  // The one copy fork in this menu. A build with no mouse must never be told to
+  // hover; on touch the tile's own tap both reads it and wears it, which is the
+  // honest description of what happens (see makeTile).
+  const REST = TOUCH
+    ? 'Tap a skin to read it and put it on.'
+    : 'Hover a skin to read it. Click one to wear it.';
   const showDetail = (name, line, locked, earned = '') => {
     barName.setText(name).setColor(locked ? '#8a78a0' : PARCH.text);
     barLine.setText(line).setColor(locked ? '#a3541c' : PARCH.textDim);
@@ -360,17 +370,42 @@ function makeTile(scene, shelf, x, y, w, h, chrId, skin, { showDetail, clearDeta
   };
 
   parts.panel.setInteractive({ useHandCursor: true });
+  // THE PUFF IS POLISH and stays on the raw binding: a tile that swells is not
+  // a second description of anything, and on a finger Phaser fires the
+  // `pointerover` on the press, where it reads as the tile acknowledging it.
   parts.panel.on('pointerover', () => {
     sfx(scene, 'card_hover', { volume: 0.3, jitter: 0.08 });
-    hover();
     scene.tweens.add({ targets: tile, scale: 1.05, duration: 120, ease: 'Sine.easeOut' });
   });
-  parts.panel.on('pointerout', () => {
-    clearDetail();
-    scene.tweens.add({ targets: tile, scale: 1, duration: 120 });
-  });
+  parts.panel.on('pointerout', () => scene.tweens.add({ targets: tile, scale: 1, duration: 120 }));
+  // ------------------------------------------------------------------
+  // THE DETAIL BAR IS INFORMATION, so on desktop it goes through hoverInfo and
+  // on touch it follows the TAP instead (JC, 2026-08-11: hover is removed
+  // entirely on a finger and replaced by tapping to learn more).
+  //
+  // NO `tapInfo` BOX HERE, and that is the point of the bar existing. The
+  // wardrobe already has a fixed answer region at the foot of its own panel —
+  // it is a bar rather than a floating tip precisely because the requirement
+  // lines run long and a tip that size cannot be kept inside the grid at the
+  // edges. A choice box on top of it would be a second description of the same
+  // skin, which is the exact bug this whole wave exists to end. The bar is
+  // furniture, like the difficulty picker's detail parchment: always drawn,
+  // never floating, and therefore never a competing panel.
+  //
+  // A LOCKED TILE ANSWERS TOO. Its tap is a refusal — it equips nothing — but
+  // "LOCKED. <the ask>" is the only place the game says what would open it, and
+  // a refusal that will not explain itself is worse on a phone than on a mouse,
+  // because the phone has no other way to ask.
+  //
+  // `window.__hfSkins.hover(id)` (tools/verify_skins.py) drives this through
+  // the returned handle's own `hover`, NOT through a pointer binding, so it
+  // keeps working on both builds — which is exactly why the gate lives at the
+  // binder and not inside showDetail.
+  // ------------------------------------------------------------------
+  hoverInfo(parts.panel, hover, clearDetail);
   parts.panel.on('pointerdown', () => {
     const { open } = state();
+    if (TOUCH) hover();
     if (!open) { sfx(scene, 'button', { volume: 0.4, rate: 0.8 }); return; }
     equipSkin(chrId, skin ? skin.id : null);
     sfx(scene, 'menu_select', { volume: 0.6 });

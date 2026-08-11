@@ -10,8 +10,8 @@
  *
  * In its place: a chip, in both scenes that own a hero, stacked directly above
  * THE ORACLE's receipt because they are the same kind of thing — a permanent
- * fact about this run that says what it does on hover and otherwise keeps
- * quiet. Same three layers as every other socketed object in this game (contact
+ * fact about this run that says what it does when you ASK — hover on desktop, a
+ * tap on touch since the 2026-08-11 hover removal — and otherwise keeps quiet. Same three layers as every other socketed object in this game (contact
  * pool, sunken socket, frame), so it reads as a thing on the parchment rather
  * than a decal printed onto it.
  *
@@ -33,10 +33,15 @@
  * nulled in their create().
  */
 
-import { GAME_W, GAME_H, DEPTH, PARCH } from '../config.js';
+import { GAME_W, GAME_H, DEPTH, PARCH, TOUCH } from '../config.js';
 import { woodPanel } from './panels.js';
 import { passiveDef, passiveAccent, passiveText } from '../core/passives.js';
 import { personalize } from './rewards.js';
+// THE HOVER REMOVAL (JC, 2026-08-11), exactly as on the oracle chip next door:
+// `hoverInfo` binds nothing on a finger, `tapInfo` is what a finger gets, and
+// the fork stays visible at the call site rather than hidden in a helper.
+import { hoverInfo } from './touch.js';
+import { tapInfo } from './choicebox.js';
 
 /** Whatever tip is open, gone. Safe on a scene that never opened one. */
 export function hidePassiveTip(scene) {
@@ -146,18 +151,52 @@ export function addPassiveChip(scene, x, y, chrId, {
   chip.chipSize = size;            // the INKED footprint, for layout audits
   chip.chrId = def.id;
   chip.accent = accent;
-  // WHERE ITS FLOATING LABEL MAY SIT. The chip lives in a narrow panel on both
-  // surfaces and a wide label ('1 CARD ×4', 'ZEAL 12 ×1.24') centred on a chip
-  // near that panel's edge runs off it — the same problem, and the same fix,
-  // that the artifact mat's own pulse labels have. The panel's width is the
-  // caller's business, not this file's.
+  // THE LANE ITS FLOATING LABEL MUST STAY INSIDE, as [left, right] of the INK.
+  // The chip lives in a narrow panel on both surfaces and a wide label
+  // ('1 CARD ×4', 'ZEAL 4.2M ×1.24') centred on a chip near that panel's edge
+  // runs off it — the same problem, and the same fix, that the artifact mat's
+  // own pulse labels have. The panel's width is the caller's business, not this
+  // file's; what IS this file's business is honouring these as ink bounds
+  // rather than as a clamp on the centre, which is the distinction the e6 Zeal
+  // labels were paid for. See pulsePassive.
   chip.labelBounds = labelBounds;
 
-  hit.on('pointerover', () => {
-    hidePassiveTip(scene);
-    scene.passiveTip = passiveTip(scene, def, x, y, { below, gap: half + 18 });
-  });
-  hit.on('pointerout', () => hidePassiveTip(scene));
+  // ------------------------------------------------------------------
+  // WHAT DOES MY HERO ACTUALLY DO? — and, since 2026-08-11, how a finger asks.
+  //
+  // The kit blurb was deleted from the combat sidebar when this chip replaced
+  // it, which means the chip is now the ONLY place in a run that prints
+  // Dextra's ×4 or Drusky's chips-to-mult rate. On the 08-04 model a phone
+  // reached it by holding, because the long press synthesised a `pointerover`;
+  // that synthesis is gone, so a hover-only binding here would have deleted the
+  // hero's own rules text from the touch build entirely.
+  //
+  // Both paths print the same string — `passiveText(def.id)` through
+  // personalize(), which is the character def's own `kit` field — so the panel
+  // a thumb opens and the tooltip a mouse opens cannot drift.
+  //
+  // MOUNTED TWICE (combat sidebar, map HUD) and the fork lives in the module,
+  // so both scenes inherit it without either one being edited.
+  // ------------------------------------------------------------------
+  if (TOUCH) {
+    tapInfo(scene, hit, {
+      key: `passive:${def.id}`,
+      // A FUNCTION over the WORLD matrix: (x, y) are local to whichever
+      // container this scene hung the chip in, and the two scenes differ.
+      anchor: () => {
+        const m = hit.getWorldTransformMatrix();
+        return { x: m.tx, y: m.ty, w: hitW, h: hitW };
+      },
+      title: `${def.name.toUpperCase()}  ·  ${def.title.toUpperCase()}`,
+      body: () => personalize(passiveText(def.id)),
+      accent,
+    });
+  } else {
+    hoverInfo(hit, () => {
+      hidePassiveTip(scene);
+      scene.passiveTip = passiveTip(scene, def, x, y, { below, gap: half + 18 });
+    }, () => hidePassiveTip(scene));
+  }
   chip.once('destroy', () => hidePassiveTip(scene));
   return chip;
 }
@@ -194,13 +233,53 @@ export function pulsePassive(scene, label, { color = '#ffd23e' } = {}) {
     scene.tweens.add({ targets: old, y: old.y - 42, alpha: 0, duration: 420, onComplete: () => old.destroy() });
   }
   const size = Math.min(23 + tot.uses * 3, 36);
+  // ------------------------------------------------------------------
+  // THE LANE IS THE INK'S, NOT THE CENTRE'S (JC, 2026-08-11: the Infinite Heart
+  // engine run to INFINITY on Mythril, where Zeal genuinely reaches e6 and the
+  // number "spills out of its lane").
+  //
+  // `labelBounds` was AUTHORED as a lane and CONSUMED as a centre clamp, and
+  // that mismatch is the whole bug. CombatScene hands us [96, SIDEBAR_W - 74] —
+  // read as an ink lane those are sane panel margins, 96px of parchment on the
+  // left and 74 on the right; read as a bound on the CENTRE they mean nothing
+  // at all, because a label centred on the rightmost allowed pixel still hangs
+  // half its own width past it. At the shipped 23-36px sizes the labels were
+  // short enough ('◆ ×2', '1 CARD ×4') that nobody saw it. 'ZEAL 4.2M ×1.24' is
+  // ~300px at 36px of Lilita One against a 250px lane, and half of it was
+  // standing outside the sidebar.
+  //
+  // So the ink is FITTED to the lane first and the centre is clamped by the
+  // ink's own half-width second. A short label still tracks its chip exactly as
+  // it always did (the clamp only bites once the ink is wide enough to need
+  // it); a long one shrinks until it fits and then sits centred in the lane,
+  // which is the only honest place left for it.
+  //
+  // THE STRING ITSELF IS NOT THIS FILE'S. Callers hand us something already
+  // formatted (core/passives.js builds 'ZEAL <n> ×<f>'), and the abbreviation of
+  // <n> through juice.fmtNum belongs there — the chip must not re-interpret a
+  // label it did not write. This is the LANE half of that fix, and it is what
+  // keeps ANY future label inside the panel, not just Zeal's.
+  //
+  // LANE BUDGET, for the driver: touch [96, 346] = 250px of ink inside a 420px
+  // sidebar; desktop [96, 266] = 170px inside 340. Anything wider is scaled,
+  // never clipped.
+  // ------------------------------------------------------------------
   const b = chip.labelBounds ?? [96, GAME_W - 96];
-  const lx = Phaser.Math.Clamp(chip.x, b[0], b[1]);
-  tot.labelObj = scene.add.text(lx, chip.y - chip.chipSize / 2 - 26, label, {
+  const laneW = Math.max(1, b[1] - b[0]);
+  tot.labelObj = scene.add.text(0, chip.y - chip.chipSize / 2 - 26, label, {
     fontFamily: 'Lilita One', resolution: 2, fontSize: `${size}px`,
     color, stroke: '#241505', strokeThickness: 6,
-  }).setOrigin(0.5).setDepth(DEPTH.overlay).setScale(0);
-  scene.tweens.add({ targets: tot.labelObj, scale: 1, duration: 140, ease: 'Back.easeOut' });
+  }).setOrigin(0.5).setDepth(DEPTH.overlay);
+  // How much of the natural size survives. 1 for every label that already fits,
+  // so nothing that reads correctly today moves by a pixel.
+  const fit = Math.min(1, laneW / Math.max(1, tot.labelObj.width));
+  const half = (tot.labelObj.width * fit) / 2;
+  // lo > hi only when the ink exactly fills the lane; the midpoint is then the
+  // one legal answer, and Phaser.Math.Clamp would return the wrong end of it.
+  const lo = b[0] + half, hi = b[1] - half;
+  tot.labelObj.x = lo > hi ? (b[0] + b[1]) / 2 : Phaser.Math.Clamp(chip.x, lo, hi);
+  tot.labelObj.setScale(0);
+  scene.tweens.add({ targets: tot.labelObj, scale: fit, duration: 140, ease: 'Back.easeOut' });
 
   tot.fadeTimer?.remove();
   tot.fadeTimer = scene.time.delayedCall(1500, () => {

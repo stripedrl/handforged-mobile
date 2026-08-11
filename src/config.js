@@ -2,7 +2,7 @@
 
 // Build stamp — shown on the title screen so playtest feedback can name a
 // version. Bump this string every time a build goes out to testers.
-export const BUILD = 'alpha 0.30c';
+export const BUILD = 'alpha 0.30d';
 
 /**
  * IMAGE EXTENSION — the one knob the shipped build turns.

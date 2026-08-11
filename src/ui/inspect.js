@@ -42,6 +42,7 @@ import { run } from '../core/run.js';
 import { woodPanel } from './panels.js';
 import { HOLD_MS, SLOP } from './touch.js';
 import { isRightPointer, onRightClick, swallowGestures } from './pointer.js';
+import { notePanelOpen, notePanelClosed } from './infoPanels.js';
 
 const pct = (p) => `${Math.round(p * 100)}%`;
 const odds = (result) => pct(ROULETTE_ODDS.find(o => o.result === result)?.p ?? 0);
@@ -176,7 +177,11 @@ export function cardInspectLines(card, opts) {
 
 /** Tear down whatever inspect panel is open on this scene. */
 export function hideCardInspect(scene) {
-  if (scene._inspectPanel) { scene._inspectPanel.destroy(true); scene._inspectPanel = null; }
+  if (scene._inspectPanel) {
+    notePanelClosed(scene._inspectPanel.panelToken);
+    scene._inspectPanel.destroy(true);
+    scene._inspectPanel = null;
+  }
 }
 
 /**
@@ -231,6 +236,9 @@ export function showCardInspect(scene, card, anchor, { depth = null, heroId = nu
   ov.armedAt = scene.time.now;
   ov.report = report;
   scene._inspectPanel = ov;
+  // ONE DESCRIPTION PANEL AT A TIME (ui/infoPanels.js). Holding a card while a
+  // relic's choice box is open used to leave both up, one over the other.
+  ov.panelToken = notePanelOpen('inspect', report.title, () => hideCardInspect(scene));
   // The verification driver reads THIS rather than the canvas.
   window.__hfInspect = { open: true, title, lines, report };
   ov.once('destroy', () => {

@@ -40,6 +40,7 @@
  */
 
 import { CHARACTERS, SUIT_COLORS } from '../config.js';
+import { fmtNum } from './fmt.js';
 
 /** The character def a chip is drawn from, or null for an unknown id. */
 export function passiveDef(chrId) {
@@ -67,6 +68,19 @@ export function passiveText(chrId) {
 function fmtF(n) {
   return String(Math.round(n * 100) / 100);
 }
+
+/**
+ * THE TWO NUMBERS ON A CHIP ARE DIFFERENT ANIMALS, and they are formatted by
+ * different functions on purpose (JC, 2026-08-11: "ZEAL 4200000").
+ *
+ * A FACTOR is small and its precision is the whole point — ×1.24 must not
+ * become ×1.2, so factors keep `fmtF`. A TOTAL is unbounded: Zeal genuinely
+ * reaches e6 on a Mythril Infinite-Heart run and Drusky's hoard goes further,
+ * and the chip's label clamps to its own ink lane, so an eight-digit total did
+ * not overflow the chip — it SHRANK it, to 0.44 scale. That is not a readout.
+ * Totals therefore go through the same `fmtNum` the equation and every float
+ * already use, so the chip says `ZEAL 4.2M ×1.24` and lands legible.
+ */
 
 /**
  * DID THE PASSIVE CONTRIBUTE, AND BY HOW MUCH.
@@ -122,7 +136,7 @@ export function passiveAttribution(chrId, res, ctx = {}) {
       const f = res.zealFactor ?? 1;
       const spent = res.zealConsumed ?? 0;
       if (!(spent > 0) || !(f > 1)) return null;
-      return row({ when: 'zeal', eqMul: f, amount: spent, color: '#ffd166', label: `ZEAL ${spent}  ×${fmtF(f)}` });
+      return row({ when: 'zeal', eqMul: f, amount: spent, color: '#ffd166', label: `ZEAL ${fmtNum(spent)}  ×${fmtF(f)}` });
     }
 
     // THE BULL. His Diamonds hit twice as hard, which happens on the SCORE side
@@ -146,7 +160,9 @@ export function passiveAttribution(chrId, res, ctx = {}) {
       if (!(add > 0) || !res.multApplies) return null;
       return row({
         when: 'open', eqAdd: add, amount: add,
-        label: `◉ ${res.chipsRead ?? 0}  +${fmtF(add)} mult`,
+        // The HOARD is the other unbounded total on a chip — it is Drusky's
+        // whole bank, read live, and it outgrows Zeal. Same treatment.
+        label: `◉ ${fmtNum(res.chipsRead ?? 0)}  +${fmtF(add)} mult`,
       });
     }
 

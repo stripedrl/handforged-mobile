@@ -1,10 +1,17 @@
-import { GAME_W, GAME_H, DEPTH, PARCH, BUILD, CHARACTERS, applyMobileCamera } from '../config.js';
+import { GAME_W, GAME_H, DEPTH, PARCH, BUILD, CHARACTERS, SAFE, TOUCH, applyMobileCamera } from '../config.js';
 import { installPointerPolicy } from '../ui/pointer.js';
 import { installLongPress } from '../ui/touch.js';
 import { DIFFICULTIES } from '../core/difficulty.js';
 import { addTavernBackdrop } from '../ui/tavern.js';
 import { gleamSweep } from '../ui/titleFx.js';
-import { addSettingsButton, openSettings } from '../ui/settingsMenu.js';
+import {
+  addSettingsButton, openSettings, COG_HOME,
+  // THE CHROME AUDIT (2026-08-11). This screen had no geometry hook of any
+  // kind, which is why "the cog sometimes overlaps with main menu elements"
+  // could only ever be answered by a person squinting at one phone. See
+  // window.__hfTitle at the foot of create().
+  chromeButtons, chromeBox, chromeObjBox, chromeCollisions, chromeDupLabels,
+} from '../ui/settingsMenu.js';
 import { openTutorial } from '../ui/tutorial.js';
 import { openAchievements } from '../ui/achievements.js';
 import { openSkins } from '../ui/skins.js';
@@ -110,6 +117,12 @@ export class TitleScene extends Phaser.Scene {
         .setBlendMode(Phaser.BlendModes.ADD).setTint(0xffc542).setAlpha(0)
         .setDisplaySize(w * 1.35, h * 2.6);
       const img = this.add.image(x, y, key).setDisplaySize(w, h).setInteractive({ useHandCursor: true });
+      // IT SAYS ITS OWN NAME (2026-08-11). The chrome walk in ui/settingsMenu.js
+      // reports every `btn_` plate on the display list, but a list of six
+      // identical `btn_gray` rectangles tells a driver nothing about WHICH one
+      // is standing on the gear. Same idiom the map HUD and the combat lanes
+      // already use, so one `hfLabel` convention names every plate in the game.
+      img.setData('hfLabel', label);
       const txt = this.add.text(x, y - 4, label, {
         fontFamily: 'Lilita One', resolution: 2, fontSize: `${fs}px`, color: textColor,
       }).setOrigin(0.5);
@@ -183,10 +196,19 @@ export class TitleScene extends Phaser.Scene {
 
     let y = summary ? 580 : 618;
     const step = summary ? 78 : 84;
+    // WHAT THE LADDER TURNED OUT TO BE, for window.__hfTitle. The three states
+    // deal three different stacks (a parked save adds CONTINUE RUN and its
+    // summary line and tightens the step; a stale one adds a line ABOVE the
+    // stack where CONTINUE RUN would have been), so a driver that wants to
+    // assert "nothing on this menu touches the gear" has to be told which menu
+    // it is looking at rather than guessing from the button count.
+    const ladderTop = y;
+    let summaryLine = null;
+    let staleLine = null;
 
     if (summary) {
       makeBtn(y, 'btn_yellow', 'CONTINUE RUN', '#5b3a00', () => this.continueRun());
-      enter(this.add.text(GAME_W / 2, y + 52,
+      summaryLine = enter(this.add.text(GAME_W / 2, y + 52,
         [summary.chrName, summary.actLabel, summary.floorLabel, summary.difficultyLabel].join('  ·  '), {
           fontFamily: '"Baloo 2"', resolution: 2, fontSize: '20px', color: '#e8d8b0',
           fontStyle: 'bold', stroke: '#241505', strokeThickness: 4,
@@ -230,33 +252,61 @@ export class TitleScene extends Phaser.Scene {
       // other in the one case where the player most needs to read one of them.
       // It belongs where CONTINUE RUN would have been anyway: it is the answer
       // to "where did my run go?", so it stands in the missing button's place.
-      legible(enter(this.add.text(GAME_W / 2, 552,
+      staleLine = legible(enter(this.add.text(GAME_W / 2, 552,
         "That run was saved by an older build and can't be read.", {
           fontFamily: '"Baloo 2"', resolution: 2, fontSize: '19px', color: '#c9a2ff',
           fontStyle: 'bold',
         }).setOrigin(0.5), 0));
     }
 
+    // ------------------------------------------------------------------
+    // THE JUKEBOX, PULLED OFF THE CUT CORNER (2026-08-11, the chrome sweep).
+    //
+    // It shipped at (74, GAME_H-74) with a 76px disc, which is a box of
+    // 36..112 x 968..1044. The bottom-left corner bite is a 150px arc centred
+    // on (150, GAME_H-150): the disc's own bottom-left corner sits 161px from
+    // that centre, which is 11px OUTSIDE the glass on JC's phone. It is the
+    // same defect the settings cog was reported for and it went unnoticed for
+    // the same reason — it is the only other thing on this screen that lives in
+    // a corner rather than along an edge, and an edge inset buys a corner
+    // nothing.
+    //
+    // The whole cluster moves as one, so the 48px between the disc's centre and
+    // its caption is exactly the 48px it always was; only the anchor changes,
+    // and only on touch. New box: 96..172 x 952..1028, worst corner 112px from
+    // the arc centre against a 150px radius. Desktop is the coordinate pair it
+    // has always been, because SAFE is {0,0} there and this reads as a literal.
+    // ------------------------------------------------------------------
+    const JUKE_X = TOUCH ? SAFE.x + 38 : 74;
+    const JUKE_Y = TOUCH ? GAME_H - SAFE.y - 66 : GAME_H - 74;
     // The jukebox — click to make the tavern band try something else.
-    const juke = this.add.container(74, GAME_H - 74);
+    const juke = this.add.container(JUKE_X, JUKE_Y);
     const jukeDisc = this.add.image(0, 0, 'btn_circle_gray').setDisplaySize(76, 76);
     const jukeIcon = this.add.image(0, 0, 'icon_music_note').setTint(0x6b4526);
     jukeIcon.setScale(40 / Math.max(jukeIcon.width, jukeIcon.height));
     juke.add([jukeDisc, jukeIcon]);
     this.tweens.add({ targets: jukeIcon, angle: { from: -6, to: 6 }, duration: 900, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
     jukeDisc.setInteractive({ useHandCursor: true });
+    // It names itself, and it MUST: `btn_circle_gray` matches the `btn_` walk
+    // in ui/settingsMenu.chromeButtons, so the disc already arrives in the
+    // audit as a plate. Reporting it a second time by hand would have the
+    // jukebox colliding with itself, which is exactly the kind of false
+    // positive that gets a driver's assertion deleted instead of fixed.
+    jukeDisc.setData('hfLabel', 'JUKEBOX');
     jukeDisc.on('pointerover', () => { sfx(this, 'menu_select', { volume: 0.3, jitter: 0.05 }); this.tweens.add({ targets: juke, scale: 1.12, duration: 110 }); });
     jukeDisc.on('pointerout', () => this.tweens.add({ targets: juke, scale: 1, duration: 110 }));
     jukeDisc.on('pointerdown', () => {
       sfx(this, 'button', { volume: 0.7 });
       this.tweens.add({ targets: juke, angle: 360, duration: 500, ease: 'Cubic.easeOut', onComplete: () => juke.setAngle(0) });
       skipTrack(this);
-      // A few notes float off the box.
+      // A few notes float off the box. Off the DISC's own anchor, not off the
+      // shipped literals, or the notes would keep puffing out of the corner the
+      // jukebox no longer stands in.
       for (let i = 0; i < 3; i++) {
-        const n = this.add.image(74 + Phaser.Math.Between(-14, 14), GAME_H - 96, 'icon_music_note')
+        const n = this.add.image(JUKE_X + Phaser.Math.Between(-14, 14), JUKE_Y - 22, 'icon_music_note')
           .setTint(0xffd23e).setScale(0.14).setAlpha(0.9);
         this.tweens.add({
-          targets: n, y: GAME_H - 190 - i * 22, x: n.x + Phaser.Math.Between(-30, 30),
+          targets: n, y: JUKE_Y - 116 - i * 22, x: n.x + Phaser.Math.Between(-30, 30),
           alpha: 0, angle: Phaser.Math.Between(-40, 40), duration: 1100 + i * 200, onComplete: () => n.destroy(),
         });
       }
@@ -265,18 +315,31 @@ export class TitleScene extends Phaser.Scene {
     // of floorboards, in fact) and the Ken Burns tween slides that ground under
     // them for 22 seconds at a time. Quiet is fine; invisible is not, so they
     // keep their muted colour and take the outline instead.
-    legible(this.add.text(74, GAME_H - 26, 'jukebox', {
+    const jukeLabel = legible(this.add.text(JUKE_X, JUKE_Y + 48, 'jukebox', {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '16px', color: '#9a8a6e',
     })).setOrigin(0.5);
 
-    legible(this.add.text(GAME_W / 2, GAME_H - 26, `a HANDFORGED tale · ${BUILD}`, {
+    const creditLine = legible(this.add.text(GAME_W / 2, GAME_H - 26, `a HANDFORGED tale · ${BUILD}`, {
       fontFamily: '"Baloo 2"', resolution: 2, fontSize: '17px', color: '#9a8a6e',
     })).setOrigin(0.5);
 
-    // Version stamp — bottom-right, quiet. Playtesters quote this in feedback.
-    legible(this.add.text(GAME_W - 22, GAME_H - 20, BUILD, {
-      fontFamily: '"Baloo 2"', resolution: 2, fontSize: '15px', color: '#9a8a6e',
-    })).setOrigin(1, 0.5).setAlpha(0.9);
+    // ------------------------------------------------------------------
+    // Version stamp — bottom-right, quiet. Playtesters quote this in feedback,
+    // which is exactly why it moved on touch: at (GAME_W-22, GAME_H-20) its own
+    // corner sat 189px from the bottom-right arc centre against a 150px radius,
+    // so the one string JC is asked to read back was the one being trimmed by
+    // the glass. It is not interactive, so nothing was UNCLICKABLE — it was
+    // simply unreadable, which for a build number is the same defect.
+    //
+    // Inside the safe frame on both axes now: box right edge GAME_W-110,
+    // bottom GAME_H-14, worst corner 123px from the arc centre. Desktop keeps
+    // its shipped pair.
+    // ------------------------------------------------------------------
+    const versionStamp = legible(this.add.text(
+      TOUCH ? GAME_W - SAFE.x - 14 : GAME_W - 22,
+      TOUCH ? GAME_H - SAFE.y - 20 : GAME_H - 20, BUILD, {
+        fontFamily: '"Baloo 2"', resolution: 2, fontSize: '15px', color: '#9a8a6e',
+      })).setOrigin(1, 0.5).setAlpha(0.9);
 
     // VERIFICATION HOOK. Scalars and plain arrays only — handing a Playwright
     // driver a Phaser object serializes half the scene graph.
@@ -286,7 +349,99 @@ export class TitleScene extends Phaser.Scene {
       open: () => { this.openRecords(); return true; },
     };
 
-    addSettingsButton(this);
+    this.cogBtn = addSettingsButton(this);
+
+    // ==================================================================
+    // THE CHROME AUDIT (JC, 2026-08-11: "the settings cog sometimes overlaps
+    // with main menu elements").
+    //
+    // SOMETIMES is the word that made this hook necessary. This menu deals
+    // three different stacks — a parked save (CONTINUE RUN, its summary line, a
+    // red NEW RUN, and a tighter 78px step), no save (PLAY, 84px step), a stale
+    // save (an extra line at 552 where CONTINUE RUN would have been) — and it
+    // draws them on two touch canvases, 2340 and 1920. That is six layouts, and
+    // "I looked at it on my phone" only ever covers one of them. So the driver
+    // MEASURES: every interactive plate, the jukebox disc and the four captions
+    // come back as boxes in world space, each already carrying its corner-arc
+    // verdict, plus the list of every intersecting target pair.
+    //
+    // `buttons()` is the same walk MapScene.__hf.buttons() publishes, so a
+    // driver that already knows how to name a plate on the map names one here.
+    // The captions are `decor` — they report `clears` (JC quotes the build
+    // number off the version stamp, so a clipped stamp IS a defect) but they
+    // are kept out of the collision pass, because two strings sharing the
+    // bottom strip is the layout and not a bug.
+    //
+    // ONE TIMING NOTE FOR THE DRIVER: the stack deals itself in, 26px from
+    // below, 70ms per row, and every box here is read LIVE. Called during that
+    // 590ms a row still reports up to 26px low — which is true, that is where
+    // it is. Let the entrance land before asserting a coordinate; the
+    // COLLISION verdict is safe at any instant, because the rise is vertical
+    // and uniform and cannot make two rows swap places.
+    // ==================================================================
+    window.__hfTitle = {
+      buttons: () => chromeButtons(this),
+      chrome: () => {
+        const plates = chromeButtons(this);
+        // ------------------------------------------------------------------
+        // BY ROLE, NEVER BY LABEL — the bug the driver caught red (2026-08-11).
+        //
+        // THIS SCREEN HAS TWO OBJECTS THAT SAY 'SETTINGS': the gear in the
+        // corner, and the ladder's own 300x68 plate on the bottom row. Matching
+        // on the caption picked the LADDER plate (it is earlier on the display
+        // list), so `cog.drawn` reported {300, 68} — and the driver's whole
+        // "prove the 66px literal is gone, the gear is really 76" assertion was
+        // reading a completely different button. The `filter` beneath it then
+        // dropped BOTH, which quietly took a live, clickable main-menu plate out
+        // of the collision sweep: the audit written for "the cog overlaps a main
+        // menu element" was blind to the one element named after the cog.
+        //
+        // `hfRole` is set by ui/settingsMenu.addSettingsButton and there is
+        // exactly one per scene. The ladder's SETTINGS plate now enters `boxes`
+        // and `collisions` as the ordinary interactive element it always was.
+        //
+        // The cog's audit box is labelled 'COG', matching
+        // CombatScene.chromeAudit, so `boxes.find(b => b.label === 'COG')`
+        // means the same thing on all four screens and can never be answered by
+        // a plate that merely says the word.
+        //
+        // It is reported as its NOMINAL square (the max dimension settingsMenu
+        // scales the icon into) with the DRAWN rectangle beside it: the icon is
+        // not square, so its drawn box is smaller on one axis, and a clearance
+        // argued from the smaller number stops being true the day somebody
+        // swaps the art.
+        // ------------------------------------------------------------------
+        const cog = chromeBox('COG', COG_HOME.x, COG_HOME.y, COG_HOME.size, COG_HOME.size);
+        const drawn = plates.find(p => p.role === 'cog');
+        cog.drawn = drawn ? { w: drawn.w, h: drawn.h } : null;
+        const boxes = [
+          cog,
+          ...plates.filter(p => p.role !== 'cog')
+            .map(p => chromeBox(p.label ?? p.key, p.x, p.y, p.w, p.h)),
+          chromeObjBox('JUKEBOX LABEL', jukeLabel, { decor: true }),
+          chromeObjBox('CREDIT', creditLine, { decor: true }),
+          chromeObjBox('VERSION', versionStamp, { decor: true }),
+          summaryLine ? chromeObjBox('SAVE SUMMARY', summaryLine, { decor: true }) : null,
+          staleLine ? chromeObjBox('STALE SAVE', staleLine, { decor: true }) : null,
+        ].filter(Boolean);
+        return {
+          gameW: GAME_W, gameH: GAME_H, touch: TOUCH, safe: { ...SAFE },
+          // WHICH of the three menus is on screen. A driver asserting the row
+          // ys has to know which ladder it asked for.
+          state: summary ? 'parked' : (stale ? 'stale' : 'fresh'),
+          ladder: { top: ladderTop, step, last: y - step },
+          cog,
+          boxes,
+          collisions: chromeCollisions(boxes),
+          // THE SCREEN THE AMBIGUITY BUG ACTUALLY LIVED ON did not publish this
+          // — CombatScene did. Reported here too so a driver can ask whether a
+          // caption identifies anything before it resolves by one. See
+          // ui/settingsMenu.chromeDupLabels for why it is a report, not a red.
+          dupLabels: chromeDupLabels(boxes),
+          allClear: boxes.every(b => b.clears),
+        };
+      },
+    };
   }
 
   /** Off to the forge: pick a hero, pick a mode, go. */

@@ -6,7 +6,7 @@
  * DEPTH.overlay+5 so it floats over either scene.
  */
 
-import { GAME_W, GAME_H, DEPTH, PARCH, COLORS, SUIT_COLORS, SUIT_PIP_KEY, SUIT_GLYPH, CARD, TOUCH } from '../config.js';
+import { GAME_W, GAME_H, DEPTH, PARCH, COLORS, SUIT_COLORS, SUIT_PIP_KEY, SUIT_GLYPH, CARD, SAFE, TOUCH } from '../config.js';
 import { woodPanel } from './panels.js';
 // THE TWO-TAP MODEL (ui/choicebox.js, JC 2026-08-10). Every shelf in this file
 // whose information is hidden behind an icon or a painted card now opens a
@@ -15,6 +15,21 @@ import { woodPanel } from './panels.js';
 // below keeps its own `else obj.on('pointerdown', commit)` branch and the two
 // paths run the SAME named closure — they cannot drift.
 import { twoTap } from './choicebox.js';
+// ...and the OTHER half of the same ruling (JC, 2026-08-11). Every surface
+// below already had a two-tap box AND a hover tooltip, and on a phone one touch
+// woke both: the same words, twice, one panel standing on the other. `hoverInfo`
+// binds nothing on a finger, so moving each `miniTip` call onto it deletes the
+// duplicate without touching the desktop tooltip or the box. The VISUAL half of
+// each of those handlers (a cell that swells, a slot that lights up) stays on
+// the raw binding — it describes nothing, and on a finger it reads as the press
+// feedback these shelves otherwise have none of.
+import { hoverInfo, tapBind } from './touch.js';
+// A read-only panel drawn over live content has to EAT the gesture that opened
+// it, or the release lands on whatever it is covering. See handChartOverlay.
+import { swallowGestures } from './pointer.js';
+// THE ONE-PANEL INVARIANT (ui/infoPanels.js): every description surface says so
+// here, and saying so closes whatever was already up.
+import { notePanelOpen, notePanelClosed } from './infoPanels.js';
 import { sfx, suspense } from '../core/sfx.js';
 import { popMessage, rainbowText, legible, glitchText } from './juice.js';
 import { CardSprite } from './CardSprite.js';
@@ -82,10 +97,15 @@ function hitAnchor(obj) {
  * rectangles instead. Reading only: there is no `choose` on this hook, because
  * a driver that could commit without touching the screen would prove nothing.
  */
-function publishShelf(scene, ov, kind, entries) {
+function publishShelf(scene, ov, kind, entries, extra = null) {
   const hook = {
     kind,
     open: true,
+    // The shelf's DERIVED numbers, when it has any (the pack table's cover
+    // size and pitch fall out of the cover count and the canvas width). The
+    // rectangles below are the truth a driver asserts against; this is what
+    // makes a failure message readable instead of two numbers and a shrug.
+    layout: extra,
     // A FUNCTION, not a snapshot. Every shelf in this file tweens in from
     // scale 0 with a per-option delay and then holds a 1.08 hover scale, so a
     // rectangle measured at build time is a rectangle that was never on screen.
@@ -375,30 +395,98 @@ export function typeRibbon(scene, x, y, kind, accent = 0x8a6a3c) {
 }
 
 /**
- * "VIEW DECK" — the informed-decision escape hatch. Opens deckInfoOverlay ABOVE
- * the overlay it was launched from; closing it leaves the decision untouched.
+ * THE INFORMED-DECISION CLUSTER'S OWN SIZE TABLE.
  *
- * IT PLANTS THE "MAP" PLATE TOO (JC, 2026-08-10: "a MAP button available at all
- * times"). Every overlay in the game that already knew to offer the deck is
- * exactly the set that has to offer the road — so the pair is planted by ONE
- * function rather than by eighteen call sites, none of which had to change and
- * none of which can now forget. The map plate stands itself down when there is
- * no board to look at (the title screen's settings panel, a finished run).
+ * VIEW DECK shipped as a pair of magic numbers (170x50, a 19px label) that both
+ * builds shared, which made it the phone's smallest labelled button — the exact
+ * complaint the MAP plate next door was already fixed for (see MAP_PLATE in
+ * ui/mapPeek.js). With HANDS joining the row the spacing had to become
+ * arithmetic anyway, so the sizes came with it: touch gets thumb-sized plates,
+ * desktop keeps the numbers it has always had.
+ *
+ * `x0` is where the row STARTS on touch rather than the shipped 150, because a
+ * 200px plate centred on 150 has its left edge at 50 — inside config.SAFE.x,
+ * which is the frame everything interactive was pulled behind on 2026-08-10.
+ *
+ * `mapW` MIRRORS ui/mapPeek.js MAP_PLATE.w and must move with it. It is a
+ * mirror rather than an import only because that file is another workstream's
+ * this week; the layout is deliberately built so a stale mirror cannot break
+ * anything — MAP is planted LAST, so the only thing a wrong width changes is
+ * the size of the gap to its left.
  */
-export function viewDeckButton(scene, ov, run, x = 150, y = GAME_H - 62) {
-  const img = scene.add.image(x, y, 'btn_dark').setDisplaySize(170, 50).setInteractive({ useHandCursor: true });
-  const txt = scene.add.text(x, y - 2, 'VIEW DECK', {
-    fontFamily: 'Lilita One', resolution: 2, fontSize: '19px', color: '#cfc8e8',
-  }).setOrigin(0.5);
-  ov.add([img, txt]);
-  img.setData('hfLabel', 'VIEW DECK');
-  img.on('pointerover', () => sfx(scene, 'menu_select', { volume: 0.25, jitter: 0.06 }));
-  img.on('pointerdown', () => {
-    sfx(scene, 'button', { volume: 0.7 });
-    deckInfoOverlay(scene, run, { depth: (ov.depth ?? OV_DEPTH) + 6 });
-  });
-  if (hasMapToPeek()) viewMapButton(scene, ov, x + 182, y);
-  return img;
+const INFO_PLATE = {
+  deckW: TOUCH ? 200 : 170,
+  handsW: TOUCH ? 156 : 132,
+  mapW: TOUCH ? 172 : 140,
+  h: TOUCH ? 62 : 50,
+  font: TOUCH ? 24 : 19,
+  gap: TOUCH ? 16 : 12,
+  x0: TOUCH ? SAFE.x + 108 : 150,
+};
+
+/**
+ * "VIEW DECK · HANDS · MAP" — the informed-decision escape hatch, as a row.
+ *
+ * Every plate here opens a READ-ONLY panel ABOVE the overlay it was launched
+ * from, and closing that panel leaves the underlying decision exactly as it
+ * was: nothing commits, nothing is spent, the shelf is still standing there.
+ *
+ * IT PLANTS ALL THREE (JC, 2026-08-10: "a MAP button available at all times";
+ * 2026-08-11: "I need a HANDS button on screens like the smith in case I want
+ * that full info"). Every overlay in the game that already knew to offer the
+ * deck is exactly the set that has to offer the road and the mult chart — so
+ * the row is planted by ONE function rather than by ten call sites, none of
+ * which had to change and none of which can now forget. That is also why the
+ * ORDER is fixed here: DECK · HANDS · MAP reads the same on the Smith's shelf,
+ * in a shop, on the pack table and inside the pause menu.
+ *
+ * THE SMITH IS THE REASON HANDS EXISTS ON THIS ROW. His pack asks you to spend
+ * a permanent upgrade on one hand type, and until now the panel that says what
+ * every hand is currently worth was reachable from combat and the map and
+ * nowhere else — so the one decision in the game that is ABOUT the hand chart
+ * was the one you had to take without it.
+ *
+ * Each plate stands itself down when it has nothing to show: MAP when there is
+ * no board (the title screen's settings panel, a finished run), HANDS when the
+ * caller is the chart itself (see handChartOverlay, which passes hands:false —
+ * a chart offering a button that reopens the chart is a stack of charts).
+ *
+ * ON RELEASE, not on press, for the same reason the MAP plate is: every one of
+ * these opens a full-screen overlay, and an overlay that opens on the PRESS
+ * hands the rest of its own gesture to whatever it just covered. `tapBind` is
+ * plain pointerdown on desktop, so that build is unchanged.
+ */
+export function viewDeckButton(scene, ov, run, x = INFO_PLATE.x0, y = GAME_H - 62,
+  { hands = true } = {}) {
+  const P = INFO_PLATE;
+  // A LEFT-EDGE CURSOR, not a table of centres. Three plates of three different
+  // widths on two builds is six numbers to keep in step by hand; walking the
+  // row is one number that cannot disagree with itself.
+  let left = x - P.deckW / 2;
+  const plate = (w, label, onTap) => {
+    const px = left + w / 2;
+    const img = scene.add.image(px, y, 'btn_dark')
+      .setDisplaySize(w, P.h).setInteractive({ useHandCursor: true });
+    const txt = scene.add.text(px, y - 2, label, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${P.font}px`, color: '#cfc8e8',
+    }).setOrigin(0.5);
+    ov.add([img, txt]);
+    img.setData('hfLabel', label);
+    img.on('pointerover', () => sfx(scene, 'menu_select', { volume: 0.25, jitter: 0.06 }));
+    tapBind(scene, img, () => { sfx(scene, 'button', { volume: 0.7 }); onTap(); });
+    left = px + w / 2 + P.gap;
+    return img;
+  };
+
+  const deck = plate(P.deckW, 'VIEW DECK',
+    () => deckInfoOverlay(scene, run, { depth: (ov.depth ?? OV_DEPTH) + 6 }));
+  if (hands) {
+    plate(P.handsW, 'HANDS',
+      () => handChartOverlay(scene, run, { depth: (ov.depth ?? OV_DEPTH) + 6 }));
+  }
+  // LAST, so a stale `mapW` mirror can only widen its own gap.
+  if (hasMapToPeek()) viewMapButton(scene, ov, left + P.mapW / 2, y);
+  return deck;
 }
 
 // ---------------------------------------------------------------------------
@@ -927,8 +1015,19 @@ export function suitPickerOverlay(scene, { title = 'Choose a suit', exclude = nu
  * first), and every row prints its level — Lv.1 at base, because a blank
  * level column read as "no level" rather than "level nothing yet".
  */
-export function handChartOverlay(scene, run) {
-  const ov = scene.add.container(0, 0).setDepth(OV_DEPTH + 2);
+/**
+ * ...AND IT IS REACHABLE FROM EVERY DECISION NOW (JC, 2026-08-11: "I need a
+ * HANDS button on screens like the smith in case I want that full info").
+ *
+ * `depth` is the same relative trick deckInfoOverlay and mapPeek already use:
+ * the plate that opens this chart passes its OWN overlay's depth + 6, so the
+ * chart lands above the shelf that launched it rather than at a fixed layer
+ * that happened to be above the two scenes it used to be reachable from. The
+ * default is the shipped one, so the combat HANDS plate and the map HUD are
+ * byte-for-byte unchanged.
+ */
+export function handChartOverlay(scene, run, { depth = null } = {}) {
+  const ov = scene.add.container(0, 0).setDepth(depth ?? OV_DEPTH + 2);
   const dim = dimmer(scene, 0.8);
   ov.add(dim);
   const cy = GAME_H / 2;
@@ -956,6 +1055,23 @@ export function handChartOverlay(scene, run) {
   const bot = cy + PANEL_H / 2;
   const parts = woodPanel(scene, cx, cy, 820, PANEL_H, { accent: 0xd07028 });
   ov.add([parts.shadow, parts.panel, parts.line]);
+  // ------------------------------------------------------------------
+  // THE PARCHMENT EATS ITS OWN GESTURES, and it goes in HERE — before CLOSE and
+  // before the plates — so everything added after it sits on top of it in the
+  // container's hit-test order. Same idiom as ui/choicebox.js's box.
+  //
+  // TWO BUGS, ONE RECTANGLE. (1) The chart's dimmer closes on any press, and
+  // the panel itself was never interactive, so pressing the middle of the chart
+  // fell straight through to the dimmer and dismissed the thing you were
+  // reading — harmless with a mouse, infuriating with a thumb. (2) Since this
+  // panel now opens OVER live decision shelves (the Smith's options, the pack
+  // table), a press that reached the parchment and a release that reached a
+  // pack cover would be one gesture spanning two surfaces. ui/pointer.js's
+  // press-set release filter already refuses that release, and `tapBind` would
+  // refuse it again for want of a matching press — this is the third lock, and
+  // it is the one that also fixes (1).
+  // ------------------------------------------------------------------
+  swallowGestures(scene, ov, cx, cy, 820, PANEL_H);
   ov.add(scene.add.text(cx, top + 58, 'YOUR HANDS', {
     fontFamily: 'Lilita One', resolution: 2, fontSize: '40px', color: PARCH.text,
   }).setOrigin(0.5));
@@ -1038,9 +1154,41 @@ export function handChartOverlay(scene, run) {
     }).setOrigin(1, 0.5));
   });
 
-  button(scene, ov, cx, bot - 56, 'CLOSE', () => ov.destroy(true), { w: 240, h: 62 });
-  viewDeckButton(scene, ov, run);
-  dim.on('pointerdown', () => ov.destroy(true));
+  // ------------------------------------------------------------------
+  // ONE DESCRIPTION PANEL AT A TIME, EVER (ui/infoPanels.js).
+  //
+  // This chart is now opened from shelves that may already have a two-tap box
+  // standing open beside an option, and JC's ruling from the double-description
+  // wave is that exactly one description panel may be on screen at a time. So
+  // it announces itself, and announcing closes whatever was up — which in
+  // practice means the shelf's own box is put away as the chart arrives. That
+  // IS the intended behaviour and not a side effect: reading the mult ladder is
+  // a different question from reading one option, and having both open would be
+  // two panels arguing over the same shelf. (In the usual gesture the box has
+  // already gone anyway: the press on the HANDS plate does not land on the box,
+  // so choicebox's own dismiss fires on the way down.)
+  //
+  // The close must be IDEMPOTENT and must not call back into notePanelOpen —
+  // the registry calls it while walking its own map.
+  // ------------------------------------------------------------------
+  let token = null;
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    notePanelClosed(token);
+    ov.destroy(true);
+  };
+  ov.once('destroy', () => { closed = true; notePanelClosed(token); });
+
+  button(scene, ov, cx, bot - 56, 'CLOSE', close, { w: 240, h: 62 });
+  // DECK and MAP, but NOT a second HANDS: this IS the hand chart, and a plate
+  // that reopens the panel you are standing in is the same mistake
+  // deckInfoOverlay declined to make when it dropped its own VIEW DECK.
+  viewDeckButton(scene, ov, run, undefined, undefined, { hands: false });
+  dim.on('pointerdown', close);
+
+  token = notePanelOpen('chart', 'hands', close);
   return ov;
 }
 
@@ -1266,17 +1414,24 @@ export function artifactCeremony(scene, run, def, done, opts = {}) {
         if (blocked) slot.add(noMirrorBadge(scene, 30, -28, 10));
         ov.add(slot);
         box.setInteractive({ useHandCursor: true });
+        // The slot lighting up is POLISH — it says "this one", not what this
+        // one does — so it stays on the raw binding and survives on touch.
         box.on('pointerover', () => {
           box.setFillStyle(0xf6e8c8);
           sfx(scene, 'card_hover', { volume: 0.3, jitter: 0.08 });
+        });
+        box.on('pointerout', () => box.setFillStyle(0xdcc492));
+        // The TOOLTIP is the description, and the two-tap box below prints the
+        // same name and the same `artifactTipBody` string. Desktop keeps both
+        // (a mouse never sees the box); a finger now sees only the box.
+        hoverInfo(box, () => {
           // What am I giving up? Name + the FULL rules text, personalized.
           killTip();
           tip = miniTip(scene, sx, GAME_H / 2 + 214, `${owned.name}  ·  ${ARTIFACT_RARITY[owned.rarity].label}`,
             artifactTipBody(owned),
             ARTIFACT_RARITY[owned.rarity].color, !!ARTIFACT_RARITY[owned.rarity].rainbow);
           tip.setDepth((ov.depth ?? OV_DEPTH) + 4);
-        });
-        box.on('pointerout', () => { box.setFillStyle(0xdcc492); killTip(); });
+        }, killTip);
         const commit = () => {
           // A relic swapped OUT leaves with its grants, exactly as if it had
           // been sold: onSell is what revokes a discard, a slot or a granted
@@ -1511,22 +1666,28 @@ export function relicChoiceOverlay(scene, run, defs, theatre, done) {
     const hit = scene.add.rectangle(0, -20, gap - 40, iconSize * 1.7, 0xffffff, 0.001)
       .setInteractive({ useHandCursor: true });
     cell.add(hit);
+    // The pedestal swelling is POLISH and stays raw: on a finger it is the only
+    // acknowledgement the shelf gives that the press landed on THIS one.
     hit.on('pointerover', () => {
       if (taken) return;
       sfx(scene, 'card_hover', { volume: 0.38, jitter: 0.08 });
       scene.tweens.add({ targets: cell, scale: 1.08, duration: 110 });
+    });
+    hit.on('pointerout', () => {
+      if (taken) return;
+      scene.tweens.add({ targets: cell, scale: 1, duration: 110 });
+    });
+    // ...and the tooltip is the DESCRIPTION, which the two-tap box below now
+    // owns outright on touch — same title, same body, same accent, one panel.
+    hoverInfo(hit, () => {
+      if (taken) return;
       killTip();
       tip = miniTip(scene, xs[i], shelfY + 290, `${def.name}  ·  ${rar.label}`,
         isPotion ? potionTipBody(def, beltFull) : artifactTipBody(def, { own: false }),
         rar.color, !!rar.rainbow);
       tip.setDepth((ov.depth ?? OV_DEPTH) + 8);
       tip.y = shelfY + 290;
-    });
-    hit.on('pointerout', () => {
-      if (taken) return;
-      scene.tweens.add({ targets: cell, scale: 1, duration: 110 });
-      killTip();
-    });
+    }, () => { if (!taken) killTip(); });
     const commit = () => {
       if (taken) return;
       // A FULL belt no longer refuses the pick here (JC, 2026-08-04): the
@@ -1719,15 +1880,20 @@ export function potionCeremony(scene, run, def, done) {
       slot.add(addPotionIcon(scene, 0, 0, owned, 62));
       ov.add(slot);
       box.setInteractive({ useHandCursor: true });
+      // Lighting the slot is POLISH (which bottle, not what it does): raw.
       box.on('pointerover', () => {
         box.setFillStyle(0xf6e8c8);
         sfx(scene, 'card_hover', { volume: 0.3, jitter: 0.08 });
+      });
+      box.on('pointerout', () => box.setFillStyle(0xdcc492));
+      // The rules text is the DESCRIPTION, and the two-tap box below prints the
+      // same `potionTipBody` string. Desktop unchanged; touch gets one panel.
+      hoverInfo(box, () => {
         killTip();
         tip = miniTip(scene, sx, GAME_H / 2 + 214, `${owned.name}  ·  ${oRar.label}`,
           potionTipBody(owned), oRar.color, false);
         tip.setDepth((ov.depth ?? OV_DEPTH) + 4);
-      });
-      box.on('pointerout', () => { box.setFillStyle(0xdcc492); killTip(); });
+      }, killTip);
       const commit = () => {
         // BY IDENTITY, not by the captured `i` — the same trap the relic
         // replace flow carries, and here it was live even on desktop: a bottle
@@ -1838,45 +2004,163 @@ export function packOfferOverlay(scene, run, offer, done) {
     { label: 'The pack table', ensure, missingKeys });
 }
 
+/**
+ * ===========================================================================
+ * THE PACK TABLE'S GEOMETRY (JC, 2026-08-11: "make the card pack selector have
+ * bigger images that take up more of the screen... they look especially small
+ * on mobile")
+ * ===========================================================================
+ * The shelf shipped as three literals — covers at a flat 330, a pitch of 400,
+ * a row at y 540 — and every one of them was a DESKTOP number that the mobile
+ * build inherited without argument. On a 2340-wide phone that is three 330px
+ * wraps floating in 2340px of screen with 400px of dead tavern either side, and
+ * the thing you are being asked to choose between is the smallest object in the
+ * frame. A flat pitch is also why a five-cover shelf (the dev harness pins one;
+ * nothing in the shipped roll deals more than three) hung its outer wrappers
+ * clean off the canvas.
+ *
+ * So both numbers are DERIVED, and from the two constraints that actually
+ * bound them:
+ *
+ *   VERTICALLY, by the band between the subtitle and the SKIP PACKS row, minus
+ *   the label and blurb that hang under each cover. That budget is what sets
+ *   `coverMax` — 480 on touch (up from 330, +45%), 380 on desktop.
+ *
+ *   HORIZONTALLY, by the room left after config.SAFE eats the phone's glass:
+ *   n covers plus (n-1) gutters have to fit, so past three covers the cover
+ *   itself shrinks rather than the row overflowing.
+ *
+ * ---------------------------------------------------------------------------
+ * THE THIRD CONSTRAINT, AND THE ONE THAT ACTUALLY DECIDED `coverMax`
+ * ---------------------------------------------------------------------------
+ * A bigger cover is less empty screen for the TWO-TAP BOX to stand in, and
+ * ui/choicebox.js's `place()` scores its six candidate homes against every
+ * sibling cover's rect inflated by BOX.gap. The driver asserts
+ * `window.__hfBox.box.covered === 0`, so the shelf owes the box a home that
+ * covers nothing.
+ *
+ * The guaranteed one is the FOOT TRAY (y = GAME_H - edge - h/2). It is clean as
+ * long as the box's top clears the covers' inflated bottom, and the box's own
+ * height is capped by the same room: openChoiceBox re-wraps its body until
+ * `body.height + overhead <= max(roomAbove, roomBelow, 280)`, and roomBelow
+ * here is 1080 - coverBottom - 32. At coverMax 480 the covers bottom out at
+ * 734, which gives roomBelow 314, which caps the box at ~264 tall, which puts
+ * the foot tray's top at 806 against an inflated sibling bottom of 746 — 60px
+ * of daylight, on every canvas and at every cover count. Grow `coverMax` past
+ * ~520 and that margin is spent; that is the ceiling, and it is why this number
+ * is not simply "as big as the vertical band allows".
+ *
+ * (The "below it" home, which place() prefers, is clean only when the anchor's
+ * own bob phase is at its lowest — the covers float ±`bob` out of sync, so the
+ * anchor can sit 8px above a sibling. That was true of the shipped 330px shelf
+ * too, and it is why the tray has to be the one that is guaranteed.)
+ */
+const PACK_SHELF = {
+  coverMax: TOUCH ? 480 : 380,
+  gutter: 48,
+  // How close to the glass the outermost cover's edge may come.
+  edge: (TOUCH ? SAFE.x : 0) + 16,
+  // The row's centre line. Fixed rather than derived so a shelf whose covers
+  // shrank (n = 4, 5) keeps its label and blurb on the same baselines as a
+  // three-cover one, instead of the whole page reflowing per pack count.
+  cy: 494,
+  labelGap: 34,     // cover's bottom edge -> the label's centre
+  blurbGap: 46,     // label -> blurb
+  labelFont: TOUCH ? 40 : 33,
+  blurbFont: TOUCH ? 25 : 21,
+  bob: 8,           // the idle float, in px, up from rest
+  minCover: 180,    // a floor, so an absurd n degrades to "small" not "invisible"
+  /**
+   * THE HEADER MOVES UP ON TOUCH to pay for the taller cover. At coverMax the
+   * wrap's top edge is at y 246 and the subtitle's baseline block ended at
+   * ~242 — four pixels, which is a collision the first time a font renders a
+   * descender. Lifting the two lines by 42 buys 44px of air and costs nothing:
+   * SAFE.y is 24 and the title's own top edge lands at 95.
+   *
+   * Desktop keeps 170/228, the pair it has always drawn.
+   */
+  titleY: TOUCH ? 128 : 170,
+  subtitleY: TOUCH ? 186 : 228,
+};
+
+/**
+ * Where n covers stand. Pure arithmetic over GAME_W and n, so the phone, the
+ * tablet and the desktop all read the same function and a driver can predict
+ * the answer without scraping the canvas.
+ */
+function packShelfLayout(n) {
+  const room = GAME_W - 2 * PACK_SHELF.edge;
+  const byWidth = Math.floor((room - (n - 1) * PACK_SHELF.gutter) / Math.max(1, n));
+  const cover = Math.max(PACK_SHELF.minCover, Math.min(PACK_SHELF.coverMax, byWidth));
+  const pitch = cover + PACK_SHELF.gutter;
+  return {
+    cover, pitch,
+    cy: PACK_SHELF.cy,
+    top: PACK_SHELF.cy - cover / 2 - PACK_SHELF.bob,
+    bottom: PACK_SHELF.cy + cover / 2,
+    xs: Array.from({ length: n }, (_, i) => GAME_W / 2 + (i - (n - 1) / 2) * pitch),
+  };
+}
+
 function buildPackOffer(scene, run, offer, done) {
   const ov = scene.add.container(0, 0).setDepth(OV_DEPTH);
   ov.add(dimmer(scene, 0.82));
-  ov.add(bigTitle(scene, 170, 'CHOOSE A PACK'));
-  ov.add(scene.add.text(GAME_W / 2, 228, 'One pack. One prize inside.', {
+  ov.add(bigTitle(scene, PACK_SHELF.titleY, 'CHOOSE A PACK'));
+  ov.add(scene.add.text(GAME_W / 2, PACK_SHELF.subtitleY, 'One pack. One prize inside.', {
     fontFamily: '"Baloo 2"', resolution: 2, fontSize: '25px', color: '#d8c9a8', fontStyle: 'bold',
   }).setOrigin(0.5));
 
-  const xs = offer.map((_, i) => GAME_W / 2 + (i - (offer.length - 1) / 2) * 400);
+  // THE SHELF, MEASURED (see PACK_SHELF above). `xs` and the cover size both
+  // fall out of how many wrappers are actually on the table, so a two-cover
+  // shelf spreads and a five-cover one tightens instead of running off the
+  // canvas — which the flat 400px pitch did at n = 5 on both touch widths.
+  const L = packShelfLayout(offer.length);
+  const xs = L.xs;
   const boxes = [];
   const shelfEntries = [];
   offer.forEach((pack, i) => {
-    const box = scene.add.container(xs[i], 540);
+    const box = scene.add.container(xs[i], L.cy);
     const isForge = pack.kind === 'forge';
     const isRare = isForge || pack.kind === 'curator';
     if (isRare) {
       // The two rare wrappers announce themselves through the paper — the
-      // Forge in ember red, the Curator in old museum gold.
-      const fg = scene.add.image(0, -40, 'fx_glow').setTint(isForge ? 0xe03040 : 0xc9a24a)
-        .setAlpha(0.35).setScale(2.6).setBlendMode(Phaser.BlendModes.ADD);
+      // Forge in ember red, the Curator in old museum gold. The bloom is sized
+      // OFF THE COVER, or a 480px wrap would stand outside its own halo.
+      const fg = scene.add.image(0, 0, 'fx_glow').setTint(isForge ? 0xe03040 : 0xc9a24a)
+        .setAlpha(0.35).setScale(2.6 * L.cover / 330).setBlendMode(Phaser.BlendModes.ADD);
       box.add(fg);
       scene.tweens.add({ targets: fg, alpha: 0.65, duration: 700, yoyo: true, repeat: -1 });
     }
     // Caleb's pack cover IS the panel now. Sized ASPECT-SAFE (see fitWrap), and
     // every cover ships on the same 720x720 canvas so they all stand the same
-    // height on this shelf.
-    const shadow = fitWrap(scene.add.image(10, -30, 'pack_' + pack.kind), 330).setTint(0x000000).setAlpha(0.4);
-    const cover = fitWrap(scene.add.image(0, -42, 'pack_' + pack.kind), 330);
+    // height on this shelf — the Curator's 720x1015 is the one exception and
+    // fitWrap is what keeps it exactly as TALL as its shelf-mates.
+    //
+    // The contact shadow's offset rides the cover's own size: at 330 it was
+    // (10, 12), and a fixed 10px on a 480px wrap reads as a printing error
+    // rather than as paper lying on a table.
+    const sdx = Math.round(10 * L.cover / 330), sdy = Math.round(12 * L.cover / 330);
+    const shadow = fitWrap(scene.add.image(sdx, sdy, 'pack_' + pack.kind), L.cover)
+      .setTint(0x000000).setAlpha(0.4);
+    const cover = fitWrap(scene.add.image(0, 0, 'pack_' + pack.kind), L.cover);
     box.add(shadow); box.add(cover);
-    scene.tweens.add({ targets: cover, y: -50, duration: 1600 + i * 220, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
-    box.add(scene.add.text(0, 156, pack.label, {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '33px',
+    scene.tweens.add({ targets: cover, y: -PACK_SHELF.bob, duration: 1600 + i * 220, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    // The label and the blurb hang off the cover's OWN bottom edge, so the
+    // three-cover shelf and the tightened five-cover one both read as a caption
+    // under a picture rather than as type floating at a remembered offset.
+    const labelY = L.cover / 2 + PACK_SHELF.labelGap;
+    box.add(scene.add.text(0, labelY, pack.label, {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: `${PACK_SHELF.labelFont}px`,
       color: '#' + pack.color.toString(16).padStart(6, '0'), stroke: '#241505', strokeThickness: 6,
     }).setOrigin(0.5));
     // The blurb wears the same outline its label does. A rare pack lights an
     // additive glow behind this whole column, and cream-on-bloom is unreadable.
-    box.add(legible(scene.add.text(0, 212, pack.blurb, {
-      fontFamily: '"Baloo 2"', resolution: 2, fontSize: '21px', color: '#e8dcc0', fontStyle: 'bold',
-      wordWrap: { width: 320 }, align: 'center',
+    // Its wrap is the PITCH minus a gutter, so two neighbouring blurbs can
+    // never run into each other however tight the shelf gets.
+    box.add(legible(scene.add.text(0, labelY + PACK_SHELF.blurbGap, pack.blurb, {
+      fontFamily: '"Baloo 2"', resolution: 2, fontSize: `${PACK_SHELF.blurbFont}px`,
+      color: '#e8dcc0', fontStyle: 'bold',
+      wordWrap: { width: L.pitch - 40 }, align: 'center',
     })).setOrigin(0.5));
     ov.add(box);
 
@@ -1898,13 +2182,17 @@ function buildPackOffer(scene, run, offer, done) {
         scene.tweens.add({ targets: other, alpha: 0, scale: 0.9, duration: 180 });
       }
       // The open: pack slides center, strains, and bursts in its own style.
+      // THE STRAIN IS A FIXED NUMBER OF PIXELS, not a fixed ratio: 1.24 was
+      // tuned against a 330px wrap (79px of swell), and re-using the ratio on a
+      // 480px one would push the cover's top through the title on the way out.
       scene.tweens.add({
-        targets: box, x: GAME_W / 2, y: 520, scale: 1.24, duration: 280, ease: 'Back.easeIn',
+        targets: box, x: GAME_W / 2, y: L.cy - 20, scale: 1 + 79 / L.cover,
+        duration: 280, ease: 'Back.easeIn',
         onComplete: () => {
           packOpenFx(scene, pack.kind);
           scene.tweens.add({ targets: box, angle: { from: -3, to: 3 }, duration: 55, yoyo: true, repeat: 3 });
           scene.time.delayedCall(420, () => {
-            packOpenBurst(scene, GAME_W / 2, 480, pack.kind);
+            packOpenBurst(scene, GAME_W / 2, L.cy - 14, pack.kind);
             ov.destroy(true);
             // THE CURATOR holds no options — he holds a CASE. He skips the
             // pack-contents shelf entirely for his own reveal.
@@ -1918,9 +2206,13 @@ function buildPackOffer(scene, run, offer, done) {
     };
     // TWO TAPS. The label and the blurb are already printed under the wrap, so
     // the box mostly restates them — but it is the CHOOSE button that matters
-    // here: this shelf's covers are 330px of painted paper on a three-across
-    // row, tearing one open is irreversible, and it is the very first thing a
-    // thumb meets after a fight. SKIP PACKS keeps its single tap.
+    // here: this shelf's covers are the biggest painted things on the screen,
+    // tearing one open is irreversible, and it is the very first thing a thumb
+    // meets after a fight. SKIP PACKS keeps its single tap.
+    //
+    // `hitAnchor` reads the cover's LIVE bounds, which is why growing the cover
+    // is a choicebox question as well as an art one — see PACK_SHELF for the
+    // room the box is guaranteed and why `coverMax` stops where it does.
     if (TOUCH) {
       twoTap(scene, cover, {
         key: `pack:${pack.kind}`,
@@ -1938,7 +2230,14 @@ function buildPackOffer(scene, run, offer, done) {
     boxes.push(box);
     shelfEntries.push({ obj: cover, id: pack.kind, label: pack.label });
   });
-  publishShelf(scene, ov, 'packOffer', shelfEntries);
+  publishShelf(scene, ov, 'packOffer', shelfEntries, {
+    n: offer.length, cover: L.cover, pitch: L.pitch,
+    cy: L.cy, top: L.top, bottom: L.bottom,
+    gameW: GAME_W, gameH: GAME_H, touch: TOUCH,
+    // What the two-tap box is guaranteed, in px, under the covers' inflated
+    // bottom rail. A driver that ever sees `covered > 0` should print this.
+    boxRoomBelow: Math.round(GAME_H - 10 - (L.bottom + 12)),
+  });
 
   /**
    * THE BEGGAR'S BOWL (props.skipChips). Walking past a shelf of packs pays.
@@ -2636,16 +2935,27 @@ function buildPackOpen(scene, run, pack, options, done, opts = {}) {
     // fallback had no tip at all and a deal you couldn't cover couldn't even be
     // read. Both are exactly when you most want to know what it would have done.
     hit.setInteractive({ useHandCursor: affordable });
+    // The card lifting is POLISH and stays raw. It matters more here than
+    // anywhere else in the file: THE ORACLE routes through this shelf with
+    // `mandatory: true`, three painted cards and no NEVER MIND, and on a finger
+    // this 6% swell is the whole of the feedback that says which future the
+    // thumb is currently standing on.
     hit.on('pointerover', () => {
-      // An Artisan card is nameless — it IS its own preview, drawn full size on
-      // the shelf, so a tooltip would only repeat it.
-      if (opt.name) showCardTip(opt, xs[i], tipY);
       if (affordable) scene.tweens.add({ targets: box, scale: 1.06, duration: 110 });
     });
     hit.on('pointerout', () => {
-      killCardTip();
       if (affordable) scene.tweens.add({ targets: box, scale: 1, duration: 110 });
     });
+    // ...and the tip is the DESCRIPTION. It was the loudest instance of the
+    // double-description bug: tapping an Oracle card opened the two-tap box AND
+    // printed `optionTipBody` under the row at the same time, the same sentence
+    // rendered twice, at the moment a first-time player is being asked to make
+    // the most permanent decision in a run. One panel now, and it is the box.
+    hoverInfo(hit, () => {
+      // An Artisan card is nameless — it IS its own preview, drawn full size on
+      // the shelf, so a tooltip would only repeat it.
+      if (opt.name) showCardTip(opt, xs[i], tipY);
+    }, killCardTip);
     /**
      * TWO TAPS, AND THIS IS THE FLAGSHIP (JC, 2026-08-10).
      *

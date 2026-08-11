@@ -76,6 +76,7 @@ import { woodPanel } from './panels.js';
 import { sfx } from '../core/sfx.js';
 import { tapBind } from './touch.js';
 import { isRightPointer, swallowGestures } from './pointer.js';
+import { notePanelOpen, notePanelClosed } from './infoPanels.js';
 
 /**
  * THE BOX'S OWN MEASUREMENTS. One table, so "make it bigger" is one edit and
@@ -150,6 +151,13 @@ export function closeChoiceBox(scene, { silent = true } = {}) {
   const box = scene?._choiceBox;
   if (!box) return false;
   scene._choiceBox = null;
+  notePanelClosed(box.panelToken);
+  // WHAT JUST CLOSED, AND WHEN. `tapInfo` reads this to tell the second tap of
+  // a toggle apart from a fresh one: pressing an info chip that is already
+  // describing itself lands OFF the box, so wireDismiss closes it on the press
+  // and tapBind would re-open it on the release. Without this crumb, a surface
+  // you tapped twice would still be talking. See tapInfo.
+  if (scene) scene._choiceClosed = { key: box.boxKey, at: scene.time?.now ?? 0 };
   if (!silent) sfx(scene, 'card_deselect', { volume: 0.42 });
   try { box.onClose?.(); } catch { /* the surface is already gone */ }
   if (box.active) box.destroy(true);
@@ -477,6 +485,11 @@ export function openChoiceBox(scene, spec) {
   ov.setAlpha(0);
   scene.tweens.add({ targets: ov, alpha: 1, duration: 110 });
   scene._choiceBox = ov;
+  // ONE DESCRIPTION PANEL AT A TIME, EVER (see ui/infoPanels.js). Announcing
+  // this box closes the card inspect panel and any surviving desktop tooltip,
+  // so the surfaces that grew independent handles over six months can no
+  // longer be woken two at a time by one gesture.
+  ov.panelToken = notePanelOpen('choice', ov.boxKey, () => closeChoiceBox(scene));
 
   if (spec.owner?.once) spec.owner.once('destroy', () => closeChoiceBox(scene));
   ov.once('destroy', () => { if (scene._choiceBox === ov) scene._choiceBox = null; });
@@ -539,4 +552,59 @@ export function twoTap(scene, obj, spec) {
     spec.onOpen?.();
   });
   return obj;
+}
+
+/**
+ * ===========================================================================
+ * TAP TO LEARN MORE (JC, 2026-08-11) — the replacement for hover
+ * ===========================================================================
+ * `twoTap` is for a surface with a DECISION behind it: read, then press the
+ * labelled plate. `tapInfo` is for a surface with nothing behind it but the
+ * answer — an enemy's intent, a debuff chip on your own row, the SHIELD rule,
+ * a boss medallion's blurb, the oracle's promise. On desktop those were hover
+ * tooltips and hover tooltips only; on touch they had NO path at all once the
+ * hold-to-hover synthesis was removed, and "the player cannot find out what is
+ * about to hit them" is not a mobile port.
+ *
+ * It is the same box, the same placer and the same dismiss as `twoTap`, minus
+ * the commit plates — information asks for no confirmation. What it adds is
+ * TOGGLE: tapping the thing that is already describing itself puts the panel
+ * away, which is what a finger expects and what a mouse got for free by
+ * leaving. That needs the `_choiceClosed` crumb because of the gesture's own
+ * shape: the press lands off the box (the chip is not one of the box's parts),
+ * so wireDismiss closes it on the way down and `tapBind` fires on the way UP —
+ * which would re-open the very panel the tap was asking to put away.
+ *
+ * TOUCH BUILDS ONLY, like `twoTap` and for the same reason: the desktop fork is
+ * `hoverInfo(obj, show, hide)` and it stays visible at the call site.
+ */
+export function tapInfo(scene, obj, spec) {
+  if (!TOUCH) throw new Error('tapInfo is the touch build only: keep the hoverInfo fork at the call site');
+  const key = spec.key ?? true;
+  obj.setData('hfTwoTap', key);
+  tapBind(scene, obj, () => {
+    if (spec.guard && spec.guard() === false) return;
+    // The press already closed this very panel: that gesture was the toggle's
+    // OFF half and the release must not undo it. 400ms is generous — a tap is
+    // ~80ms — and it is keyed, so tapping straight from one chip to the next
+    // still swaps in one gesture.
+    const just = scene._choiceClosed;
+    if (just && just.key === key && (scene.time?.now ?? 0) - just.at < 400) return;
+    sfx(scene, 'menu_select', { volume: 0.28, jitter: 0.06 });
+    openChoiceBox(scene, { ...spec, buttons: [], source: obj });
+    spec.onOpen?.();
+  });
+  return obj;
+}
+
+/**
+ * The info box without a trigger — for a surface whose tap is already spoken
+ * for (an enemy body that retargets, a hero plate that selects) and which
+ * therefore hangs its description off a neighbour, and for the driver hooks
+ * that open a panel by name. Buttons are dropped, deliberately: if a caller
+ * wants a commit plate it wants `openChoiceBox`, and the difference between
+ * the two is the whole point of the model.
+ */
+export function openInfoBox(scene, spec) {
+  return openChoiceBox(scene, { ...spec, buttons: [] });
 }

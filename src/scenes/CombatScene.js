@@ -30,6 +30,9 @@ import {
   benchTriggers, STAMPS, FADE_VANISH_CHANCE, VALUE_BONUS_BY_MOD,
   ROULETTE_GOLD_CHIPS, ROULETTE_RED_MULT, ROULETTE_GREEN_VALUE,
   INFINITY_CAP, isInfinite,
+  // THE TORTOISE STANDARD's rate, so the cascade can re-derive ONE cell's share
+  // of the standing wall instead of reprinting the merged total (2026-08-11).
+  SHIELD_VALUE_STEP,
 } from '../core/scoring.js';
 import {
   tickStatuses, onEnemyAct, brittleMultiplier, addEnemyShield, absorbWithShield,
@@ -76,6 +79,11 @@ import {
 import { difficultyOf, showsHandMath } from '../core/difficulty.js';
 import { progress, recordActClear, recordWin, discoverHand, notePlayedHand, foldRunIntoRecords } from '../core/progress.js';
 import { heroTextureFor, equippedSkin } from '../core/skins.js';
+// THE REGISTER OF PULSED CHANNELS (2026-08-11). Imported so the scene and
+// tests/pulses0811.test.js can never hold two different opinions about which
+// contribution channels have a beat — see core/pulseChannels.js for the bug
+// this pays for.
+import { PULSED_CHANNELS, unknownChannels } from '../core/pulseChannels.js';
 import {
   run, chr, collectMods, collectModList, addHandRepeat, advanceAct, beginEndless, noteEndlessClear,
   effectiveArtifacts, effectiveArtifactSlots,
@@ -111,6 +119,8 @@ import { drawRecap, recapRows, unlockRows, recapHeight, RECAP } from '../ui/runR
 import {
   ARTIFACT_RARITY, ARTIFACT_POOL, acquireArtifact, getProp, WHEEL_OF_DIVINITY_WEDGES,
   artifactLiveLine, chaosMultRoll,
+  // PILGRIM'S FLASK's cap, as a pure function of the instance. See catchOverheal.
+  flaskTake,
   // THE 2026-08-10 WAVE. Only the two numbers COMET IN A JAR quotes are read
   // here: everything else the wave needs arrives as a `prop` on the instance
   // (props.freezeReduce, props.overhealChipCap, props.thunderEvery,
@@ -143,14 +153,33 @@ import { gestureKind, sweepHits, fanSlots, handButtonLanes, SWEEP_TICK_MS } from
 import {
   pitchAt, PITCH_MIN_GAP_MS, repeatSchedule, scoringTimeScale, REPEAT_FULL_BEATS,
 } from '../core/cadence.js';
-import { addSettingsButton } from '../ui/settingsMenu.js';
+// THE GEAR'S ONE HOME AND ONE SIZE (2026-08-11). COG_HOME / COG_SIZE are what
+// addSettingsButton actually draws; `chrome*` are the shared box arithmetic the
+// audit hooks are built from, so this scene, the map, the title and character
+// select all measure the corner the same way. See ui/settingsMenu.js.
+import {
+  addSettingsButton, COG_HOME, COG_SIZE,
+  chromeButtons, chromeBox, chromeObjBox, chromeCollisions,
+} from '../ui/settingsMenu.js';
 import { kineticScroll } from '../ui/kinetic.js';
-import { installLongPress, tapBind } from '../ui/touch.js';
+// `hoverInfo` is THE binder for every hover that shows INFORMATION (2026-08-11).
+// It binds NOTHING on touch — see ui/touch.js for JC's ruling — so a tooltip
+// wired through it simply does not exist on a finger, and the tap that replaces
+// it is `tapInfo` below. Pure visual polish (a scale, a tint, a sfx) stays on a
+// raw `.on('pointerover')`: it is not a second description of anything.
+import { installLongPress, tapBind, hoverInfo } from '../ui/touch.js';
 // THE TWO-TAP DESCRIPTION BOX (JC, 2026-08-10). One idiom for every surface
 // whose information hides behind an icon: first tap reads, second tap commits.
 // `twoTap` is TOUCH-ONLY BY DESIGN — it throws on desktop — so every call site
 // below keeps its own visible `else obj.on('pointerdown', ...)` fork.
-import { openChoiceBox, closeChoiceBox, twoTap } from '../ui/choicebox.js';
+// ...and `tapInfo` is its no-commit twin (2026-08-11): the surfaces whose hover
+// was their ONLY path to the answer — the enemy's intent, the SHIELD rule, your
+// own debuff chips — open a persistent panel on tap and close it on the next.
+import { openChoiceBox, closeChoiceBox, twoTap, tapInfo } from '../ui/choicebox.js';
+// THE ONE-PANEL INVARIANT (2026-08-11). Every description surface in this scene
+// announces itself, so "exactly one panel is on screen" is enforced by a
+// registry rather than by forty call sites remembering to close each other.
+import { notePanelOpen, notePanelClosed, forgetPanels } from '../ui/infoPanels.js';
 import { installPointerPolicy } from '../ui/pointer.js';
 // THE CARD INSPECT BOX (JC, 2026-08-10): long left press or right-click on a
 // hand card prints what it is, what it scores and everything it is wearing.
@@ -469,26 +498,63 @@ const INTENT_ART = {
  *            measured to be; it is now arithmetic, and it is finally right on
  *            a tablet, whose 1500-wide arena the hand-measured number
  *            overlapped by 185px.
+ *
+ * ===========================================================================
+ * THE SIZE WAS A LIE, AND THREE COMMENTS REPEATED IT (2026-08-11)
+ * ===========================================================================
+ * `COG` used to be a private literal here — `size: 66` on both builds — and it
+ * was WRONG on both: ui/settingsMenu.addSettingsButton has drawn `MOBILE ? 76 :
+ * 44` since the day the phone build landed, and has taken a `{size}` option the
+ * whole time, which two comments in this file flatly denied ("there is no size
+ * parameter to pass"). Everything computed off 66 was therefore 10px optimistic
+ * on touch and 22px pessimistic on desktop: the mat's ceiling below, and the
+ * chromeAudit box a driver asserts against.
+ *
+ * So the pair now comes from ui/settingsMenu.js — COG_HOME (the canonical
+ * centre) and COG_SIZE (what actually draws) — which is also the constant
+ * TitleScene, CharacterSelectScene and MapScene adopted in the same wave, so
+ * "where is the gear" finally has ONE answer instead of four. The touch centre
+ * COG_HOME publishes is byte-identical to the one this file used to compute
+ * (GAME_W - SAFE.x - 48, SAFE.y + 54), so nothing moves on a phone; only the
+ * SIZE is corrected, and only the things hanging off the cog's foot move with
+ * it — see POT_MAT.
  */
-const COG = TOUCH
-  ? { x: GAME_W - SAFE.x - 48, y: SAFE.y + 54, size: 66 }
-  // Desktop's shipped corner, to the pixel. `size` mirrors what
-  // ui/settingsMenu.addSettingsButton draws (44 desktop / 66 touch) so the
-  // arithmetic below and the audit hook can both read it without that file
-  // having to grow a parameter.
-  : { x: GAME_W - 44, y: 42, size: 44 };
+const COG = { x: COG_HOME.x, y: COG_HOME.y, size: COG_SIZE };
 
 const POT_MAT = (() => {
-  if (!TOUCH) return { cx: GAME_W - 169, cy: 136, w: 290 };
-  // A fifth of the arena, capped: 0.198 reproduces the shipped 380-ish phone
-  // mat on a 1920 arena and hands a 1500-wide tablet arena a 297 one instead
-  // of the same 350 it has no room for.
-  const w = Math.min(380, Math.round(PLAY_W * 0.198));
+  // ===========================================================================
+  // DESKTOP JOINED ITS OWN CHAIN (2026-08-11: chromeAudit().collisions.cogVsMat
+  // was TRUE on the desktop build, and had been for as long as the audit existed)
+  // ===========================================================================
+  // The chain above was written for the phone and desktop was left as a literal
+  // triple — `{ cx: GAME_W - 169, cy: 136, w: 290 }` — hand-measured against a
+  // 44px gear, which is exactly the rot the chain exists to prevent. The
+  // arithmetic: a 290-wide mat is 100.8 tall, so at cy 136 its leather ran
+  // 86..186 and its brass label band started at 62 — while the desktop gear's
+  // box is 1854..1898 x 20..64. Two pixels of overlap across 42px of shared
+  // width, deepening to ten while the desktop hover tween has the gear rotated
+  // 30 degrees. Nobody caught it because only the MOBILE driver read the audit.
+  //
+  // The fix is not a nudge, it is the same derivation the phone already used:
+  // the mat's LABEL starts below the cog's foot, with the same 26 of brass and
+  // 16 of air. On desktop that lands the leather at 106..207 and the label band
+  // at 82 — 18px of daylight under a 64px gear foot, on both builds, by
+  // construction rather than by measurement. It costs the desktop mat a 20px
+  // drop down an otherwise empty right margin; the boss marquee is 26px clear
+  // of the mat HORIZONTALLY (strip right 1580 vs mat left 1606) so it cannot
+  // care, and the enemy shield chip reads potMatZone rather than a literal, so
+  // it follows the leather instead of quietly disagreeing with it.
+  const w = TOUCH
+    // A fifth of the arena, capped: 0.198 reproduces the shipped 380-ish phone
+    // mat on a 1920 arena and hands a 1500-wide tablet arena a 297 one instead
+    // of the same 350 it has no room for.
+    ? Math.min(380, Math.round(PLAY_W * 0.198))
+    : 290;
   const h = w * POTION_MAT.aspect;
   // 26 for the brass label that straddles the leather's top edge, 16 of air
   // above that, and the cog's foot above THAT.
   return {
-    cx: Math.round(GAME_W - 80 - w / 2),
+    cx: TOUCH ? Math.round(GAME_W - 80 - w / 2) : GAME_W - 169,
     cy: Math.round(COG.y + COG.size / 2 + 26 + 16 + h / 2),
     w,
   };
@@ -529,12 +595,25 @@ const BOSS_BAR = {
  *         on the bottom row is 7px further into the phone's corner bite.
  */
 const USE_TAG = {
+  // ...AND IT MUST FIT ITS OWN COLUMN (2026-08-11). `w` is the tag's WISH, not
+  // its width: the mat re-columns to four across the moment the belt can hold
+  // more than six (see `cols`/`spread` in renderArtifactPanel), and at that size
+  // class the columns are 96px apart on touch and 78 on desktop — narrower than
+  // this 104/72 tag. Two adjacent actives therefore drew two brass tabs
+  // overlapping by 8px and 0px respectively, which is exactly the "two things
+  // placed by two people who never measured each other" family JC reported
+  // against the settings cog. `fit` clamps the tag to the room its column
+  // actually has; on the 3-across mat (126/102 pitch) it is a no-op, so nothing
+  // that already read well moves.
   w: TOUCH ? 104 : 72,
   h: TOUCH ? 40 : 26,
   font: TOUCH ? 21 : 16,
   spentFont: TOUCH ? 19 : 14,
   lip: TOUCH ? -6 : 1,
   nookY: TOUCH ? 53 : 46,
+  /** Daylight kept between one column's tag and the next one's. */
+  gutter: 10,
+  fit(spread) { return spread > 0 ? Math.min(this.w, Math.round(spread - this.gutter)) : this.w; },
 };
 
 /**
@@ -932,6 +1011,16 @@ export class CombatScene extends Phaser.Scene {
   /** Every EFFECTIVE artifact carrying a prop — mirrors listed once per copy. */
   propHolders(key) { return this.liveArtifacts().filter(a => (a.props?.[key] ?? 0) > 0); }
 
+  /**
+   * ...and the same list with each copy's CELL attached, for everything that
+   * has to make the holder SWELL. A mirrored Voidcaller answers two rolls and
+   * has to light two sockets; propHolders() alone could only ever light one.
+   * @returns {{art: object, slot: number}[]}
+   */
+  propHolderSlots(key) {
+    return this.liveArtifactSlots().filter(e => (e.art.props?.[key] ?? 0) > 0);
+  }
+
   hasArtifact(id) { return run.artifacts.some(a => a.id === id); }
 
   /**
@@ -1045,9 +1134,22 @@ export class CombatScene extends Phaser.Scene {
   }
 
   artHook(name, ctx) {
-    for (const a of this.liveArtifacts()) {
+    // THE HOOK'S OWN CELL, parked for the length of the call (2026-08-11). A
+    // hook is handed the RESOLVED instance and has no idea which socket it was
+    // reached through, so anything it pulsed used to land on the source's first
+    // cell and a mirrored relic's hook lit the wrong relic — twice. The walk
+    // already knows the answer, so it leaves it where pulseArtifact() can find
+    // it. Hooks are synchronous and the pin is cleared in a finally; it is
+    // ALSO tied to the instance (`_hookArt`), so a hook that pulses some OTHER
+    // relic cannot accidentally inherit a cell that is not that relic's, and a
+    // hook that DEFERS its own pulse (midasTouch) reads the pin synchronously
+    // and carries the answer into its own delayedCall.
+    for (const { art: a, slot } of this.liveArtifactSlots()) {
+      this._hookArt = a;
+      this._hookSlot = slot;
       try { a.hooks?.[name]?.(this, a, ctx); }
       catch (e) { console.error(`artifact hook ${a.id}.${name}`, e); }
+      finally { this._hookArt = null; this._hookSlot = null; }
     }
   }
 
@@ -1259,8 +1361,17 @@ export class CombatScene extends Phaser.Scene {
     if (leftoverPct && this._leftoverUnits > 0) {
       const f = 1 + (leftoverPct / 100) * this._leftoverUnits;
       mods.benchFactor *= f;
+      // EVERY CELL THAT TESTIFIED (2026-08-11). props.leftoverPct is SUMMED
+      // across holders, so a mirrored Court in Session is genuinely one +40%
+      // ruling and not two +20% ones — there is a single ×f to apply. What was
+      // wrong was the bow: the job kept ONE relic and pulseArtifact resolved it
+      // through indexOf, so the mirror's socket never moved even though the
+      // mirror is half of why the number is that big. Both cells swell, the
+      // mult still moves exactly once, in leftoverPhase().
+      const holders = this.propHolderSlots('leftoverPct');
       this._leftoverJob = {
-        art: this.propHolders('leftoverPct')[0],
+        art: holders[0]?.art ?? null,
+        holders,
         factor: Math.round(f * 100) / 100,
       };
     }
@@ -1271,12 +1382,15 @@ export class CombatScene extends Phaser.Scene {
     this._benchBeat = [];
     const benchRelic = (benched, prop, color, tint) => {
       if (!benched.length) return;
-      for (const a of this.propHolders(prop)) {
+      // `slot` rides every entry (2026-08-11): a mirrored Rigged Wheel pays the
+      // bench TWICE and has to light two sockets, one per resolution, or the
+      // player watching four ×1.25s land sees two of them come from nowhere.
+      for (const { art: a, slot } of this.propHolderSlots(prop)) {
         const per = a.props[prop];
         for (const cs of benched) {
           for (let t = triggersOf(cs); t > 0; t--) {
             mods.benchFactor *= per;
-            this._benchBeat.push({ cs, art: a, factor: per, color, tint });
+            this._benchBeat.push({ cs, art: a, slot, factor: per, color, tint });
           }
         }
       }
@@ -1303,18 +1417,24 @@ export class CombatScene extends Phaser.Scene {
     // They flow through mods.cardValue so scoring.js decomposes them exactly
     // like a suit bonus, and the card's number morphs in the lane on screen.
     // this._valueGrants remembers WHO paid, so the right relic swells with it.
+    // ...and WHICH CELL paid, not just which relic: a mirrored Blunt Dagger
+    // grants twice and has to light both sockets (2026-08-11).
     this._valueGrants = [];
-    const grant = (a, card, add) => {
+    // ...and WHICH CHANNEL paid, so the swell files a named ledger row rather
+    // than an anonymous one (2026-08-11, second pass). Both channels are in
+    // PULSED_CHANNELS citing "_valueGrants" as their beat; until pulseArtifact
+    // became the ledger's writer, neither had ever actually written a row.
+    const grant = (a, slot, card, add, channel) => {
       if (!card || add <= 0) return;
       mods.cardValue[card.id] = (mods.cardValue[card.id] ?? 0) + add;
-      this._valueGrants.push({ a, id: card.id, add });
+      this._valueGrants.push({ a, slot, id: card.id, add, channel });
     };
     if (n === 1 && cards?.length === 1) {
       // Blunt Dagger: one card, committed grip.
-      for (const a of this.propHolders('oneCardValue')) grant(a, cards[0], a.props.oneCardValue);
+      for (const { art: a, slot } of this.propHolderSlots('oneCardValue')) grant(a, slot, cards[0], a.props.oneCardValue, 'oneCardValue');
       // Crown of the High Roller: the opening lone Ace is crowned.
       if (this.handsThisFight === 0 && cards[0].rank === 14) {
-        for (const a of this.propHolders('aceCrown')) grant(a, cards[0], ACE_CROWN_VALUE);
+        for (const { art: a, slot } of this.propHolderSlots('aceCrown')) grant(a, slot, cards[0], ACE_CROWN_VALUE, 'aceCrown');
       }
     }
 
@@ -1450,6 +1570,16 @@ export class CombatScene extends Phaser.Scene {
     // shutdown teardown the first time one opens; this covers the handle THIS
     // scene keeps, which nothing else knows about.
     this.events.once('shutdown', () => { closeChoiceBox(this); this._potConfirm = null; });
+    // ...and the PANEL REGISTRY's entries, which are the same problem one level
+    // up: the display list is destroyed wholesale, so every tip is already gone,
+    // but a registration surviving the scene holds a close callback pointing at
+    // a dead one — and the next panel anywhere in the game would invoke it.
+    // Dropping the registrations closes nothing; it just stops the registry
+    // believing in tips that no longer exist. See ui/infoPanels.forgetPanels.
+    this.events.once('shutdown', () => {
+      this._intentTipToken = this._pstatTipToken = this._potTipToken = null;
+      forgetPanels();
+    });
     this._potConfirm = null;
     this.pstatTip = null;      // hover tip from the previous fight died with the display list
     // ...and the Oracle chip and ITS tip, for exactly the same reason: both
@@ -2177,27 +2307,47 @@ export class CombatScene extends Phaser.Scene {
        * either is ever moved back into the other.
        */
       chromeAudit: () => {
-        const B = (label, x, y, w, h) => {
-          const b = {
-            label, x, y, w, h,
-            left: x - w / 2, right: x + w / 2, top: y - h / 2, bottom: y + h / 2,
-          };
-          b.clears = clearsCorners(b);
+        // THE BOX ARITHMETIC IS SHARED NOW (2026-08-11). chromeBox / chromeObjBox
+        // / chromeCollisions live in ui/settingsMenu.js beside the control they
+        // exist to protect, so this scene, MapScene.__hf.chrome(), TitleScene and
+        // CharacterSelectScene all measure a rectangle the same way and a driver
+        // can hold one assertion against four screens. `cornerOK` — the stricter
+        // all-four-corners-inside-the-arc verdict — stays local, because it is
+        // this file's own second opinion and is reported beside `clears` rather
+        // than instead of it.
+        const B = (label, x, y, w, h, opts) => {
+          const b = chromeBox(label, x, y, w, h, opts);
           b.cornerOK = cornersInsideArc(b);
+          return b;
+        };
+        const OB = (label, obj, opts) => {
+          const b = chromeObjBox(label, obj, opts);
+          if (b) b.cornerOK = cornersInsideArc(b);
           return b;
         };
         const hit = (a, c) => !!a && !!c
           && a.left < c.right && a.right > c.left && a.top < c.bottom && a.bottom > c.top;
         const mz = this.potMatZone();
-        // COG.size is the NOMINAL box (the max dimension settingsMenu scales the
+        // COG_SIZE is the NOMINAL box (the max dimension settingsMenu scales the
         // gear into). `drawn` is what the image actually measures, which is
-        // smaller on the short axis and grows again while the hover tween has
-        // it rotated — so the audit asserts the nominal square and reports the
-        // real one beside it.
+        // smaller on the short axis — and on DESKTOP grows again while the hover
+        // tween has it rotated 30 degrees, which inflates a square's AABB by
+        // 1.366. So the audit asserts the nominal square and reports both the
+        // real one and the rotated worst case beside it. (The tilt is
+        // desktop-only since 2026-08-11; on touch `drawn` never moves.)
+        // RESOLVED BY HANDLE AND TAGGED BY ROLE, never matched by its label
+        // (2026-08-11). TitleScene's audit looked the gear up by the word
+        // 'SETTINGS', which two of its objects wear, so it measured the wrong
+        // one AND dropped the plate beside the cog out of the collision sweep.
+        // `hfLabel` is what a control SAYS; `hfRole` is what it IS.
         const cog = B('COG', COG.x, COG.y, COG.size, COG.size);
+        cog.role = 'cog';
         cog.drawn = this.cogBtn?.active
           ? { w: Math.round(this.cogBtn.displayWidth), h: Math.round(this.cogBtn.displayHeight) }
           : null;
+        cog.tweened = MOBILE ? cog.drawn : (cog.drawn && {
+          w: Math.round(cog.drawn.w * 1.366), h: Math.round(cog.drawn.h * 1.366),
+        });
         // The mat's box INCLUDES its brass label band: the label is what the
         // cog would land on first, and a check that only knew about the leather
         // would call a collision a clearance.
@@ -2217,19 +2367,61 @@ export class CombatScene extends Phaser.Scene {
         // so the audit REPORTS it rather than quietly failing the build.
         potMat.decor = true;
         artMat.decor = true;
-        const map = this.mapBtn?.active
-          ? B('MAP', this.mapBtn.x, this.mapBtn.y, this.mapBtn.displayWidth, this.mapBtn.displayHeight)
-          : null;
-        const plate = (btn) => (btn?.active
-          ? B(btn.getData('hfLabel') ?? '?', btn.x, btn.y, btn.displayWidth, btn.displayHeight)
-          : null);
+        const map = OB('MAP', this.mapBtn);
+        const plate = (btn) => OB(btn?.getData?.('hfLabel') ?? '?', btn);
         const rows = BTN_LANE.rowY.map((y, i) => ({
           row: i, y, plateH: BTN_LANE.plateH,
           plates: (i === 0
             ? [this.playBtn, this.discardBtn]
             : [this.handsBtn, this.deckBtn, this.sortBtn]).map(plate).filter(Boolean),
         }));
-        const all = [cog, potMat, artMat, map, ...rows.flatMap(r => r.plates)].filter(Boolean);
+        // ===================================================================
+        // THE HUD'S OTHER TARGETS, so "nothing stands on the gear" is a SWEEP
+        // rather than a hand-picked pair (2026-08-11).
+        // ===================================================================
+        // The old audit compared the cog to exactly one neighbour — the potion
+        // mat — which is how it passed for months on desktop while being TRUE
+        // (see POT_MAT). The defect class is "two things placed by two people
+        // who never measured each other", so the audit now walks the same list
+        // the finger does: every named plate (chromeButtons, which finds the
+        // choice box's plates and the end screen's for free), every bottle on
+        // the mat, every relic cell, every USE tag and every debuff chip.
+        const potHits = (this.potionBeltG?.list ?? [])
+          .filter(o => o.input?.enabled)
+          .map((o, i) => OB(`BOTTLE${i}`, o))
+          .filter(Boolean);
+        /**
+         * ONE BOX PER CELL, SIZED TO EVERYTHING THE CELL DRAWS (2026-08-11).
+         *
+         * The relic painting and the brass USE tag hanging off its lower lip
+         * are two hit areas over ONE control — the tag is pinned to the icon by
+         * construction (`icon bottom + USE_TAG.lip`, so it overlaps the art by
+         * 26px on touch by design) and on a phone both open the same relic box.
+         * Reporting them as peers manufactured a guaranteed
+         * `('RELIC<i>','USE:<id>')` pair for every active relic held, which is
+         * the same unsatisfiable-invariant trap MapScene's belt sockets fell
+         * into. A control's box is what the CONTROL occupies, so the cell's box
+         * is their union and the tag is reported inside it.
+         */
+        const tagFor = (i) => (this.activeTags ?? [])
+          .find(t => t.img?.active && run.artifacts.indexOf(t.art) === i);
+        const relicCells = (this.artifactIcons ?? []).map((ic, i) => {
+          if (!ic?.input?.enabled) return null;
+          const tag = tagFor(i);
+          const parts = [ic, tag?.img].filter(o => o?.active).map(o => o.getBounds());
+          const l = Math.min(...parts.map(b => b.left)), r = Math.max(...parts.map(b => b.right));
+          const t = Math.min(...parts.map(b => b.top)), bt = Math.max(...parts.map(b => b.bottom));
+          const box = B(`RELIC${i}`, (l + r) / 2, (t + bt) / 2, r - l, bt - t);
+          box.art = run.artifacts[i]?.id ?? null;
+          box.tag = tag ? { id: tag.art.id, spent: !!tag.spent, label: tag.label.text } : null;
+          return box;
+        }).filter(Boolean);
+        const pstatHits = (this.pstatUI?.list ?? [])
+          .filter(o => o.input?.enabled)
+          .map((o, i) => OB(`PSTAT${i}`, o))
+          .filter(Boolean);
+        const hud = [cog, potMat, artMat, map, ...rows.flatMap(r => r.plates),
+          ...potHits, ...relicCells, ...pstatHits].filter(Boolean);
         // The boss marquee is not corner-pinned, but it is the third party in
         // the top-right argument and the only one whose width is derived from
         // the other two — so it is reported as the span it will occupy.
@@ -2237,20 +2429,76 @@ export class CombatScene extends Phaser.Scene {
           w: BOSS_BAR.stripW,
           left: ARENA_CX - BOSS_BAR.stripW / 2, right: ARENA_CX + BOSS_BAR.stripW / 2,
           arenaCx: ARENA_CX,
+          // Is the marquee actually up right now? A driver sweeping "boss
+          // marquee state" needs to know it got the state it asked for.
+          up: (this.enemies ?? []).some(e => e.bossBar && e.alive),
         };
+        /**
+         * ...AND EVERY INTERACTIVE OBJECT ON THE SCENE, whatever it is.
+         *
+         * `boxes`/`collisions` above are the CHROME contract — the assertion a
+         * driver makes zero. This is the wider net: a display-list walk for
+         * anything with a live hit area, so a control added in six months that
+         * nobody thought to list is still measured against the gear. It is
+         * reported rather than folded into `collisions` because it legitimately
+         * catches painted ART as well as controls (a tall boss's sprite bounds
+         * can reach the top-right corner), and a driver has to be able to tell
+         * "a plate is on the gear" from "the gear is over a monster's shoulder".
+         */
+        const everyTarget = [];
+        const walk = (o) => {
+          if (!o) return;
+          // By IDENTITY (the handle) or by ROLE — never by the label, which is
+          // not unique across a scene. See the note on `cog` above.
+          const isCog = o === this.cogBtn || o.getData?.('hfRole') === 'cog';
+          if (o.input?.enabled && o.visible !== false && !isCog) {
+            const b = OB(o.getData?.('hfLabel') ?? o.texture?.key ?? o.type ?? '?', o);
+            if (b && b.w > 0 && b.h > 0) {
+              b.role = o.getData?.('hfRole') ?? null;
+              everyTarget.push(b);
+            }
+          }
+          (o.list ?? []).forEach(walk);
+        };
+        this.children.list.forEach(walk);
+        // Every label this screen prints on more than one control, so a driver
+        // reaching for `boxes.find(b => b.label === 'X')` can tell whether X
+        // actually identifies anything. This is the check that would have
+        // caught TitleScene's two SETTINGS the first time it ran.
+        const seenLabels = new Map();
+        for (const b of [...hud, ...everyTarget]) seenLabels.set(b.label, (seenLabels.get(b.label) ?? 0) + 1);
+        const dupLabels = [...seenLabels].filter(([, n]) => n > 1).map(([l, n]) => ({ label: l, n }));
         return {
           gameW: GAME_W, gameH: GAME_H, playW: PLAY_W, sidebarW: SIDEBAR_W,
           touch: TOUCH, safe: { ...SAFE, gutter: BTN_LANE.gutter },
           cog, potMat, artMat, map, rows, strip,
           potZone: mz,
-          collisions: {
+          handCount: this.handCards?.length ?? 0,
+          // THE GRID THE MAT ACTUALLY LAID OUT (2026-08-11). `gridW` against
+          // `fieldW` is the one number that would have made "the 4-column class
+          // overruns the leather" obvious without measuring a single cell, and
+          // `overflowCells` says how many belt relics are drawing on top of an
+          // earlier cell (the mat's ceiling is cols x 2). Assert both.
+          mat: { ...(this._matGrid ?? {}) },
+          boxes: hud,
+          // Label-against-label, non-decor only, over the WHOLE hud list — the
+          // pairwise sweep, not a cog-against-one-neighbour spot check.
+          collisions: chromeCollisions(hud),
+          // The named pairs the old hook reported, kept so the drivers that
+          // already read them do not have to change on the same day the shape
+          // grew. cogVsMat is the desktop defect this wave fixed.
+          named: {
             cogVsMat: hit(cog, potMat),
             mapVsStrip: !!map && map.right > strip.left,
             matVsStrip: potMat.left < strip.right,
             rowsOverlap: rows[0].plates.some(a => rows[1].plates.some(c => hit(a, c))),
           },
-          allClear: all.every(b => b.clears),
-          allCornerOK: all.every(b => b.cornerOK),
+          // Everything the gear's own box lands on, chrome or not.
+          cogVsAny: everyTarget.filter(b => hit(cog, b)).map(b => b.label),
+          plates: chromeButtons(this),
+          dupLabels,
+          allClear: hud.every(b => b.clears),
+          allCornerOK: hud.every(b => b.cornerOK),
         };
       },
       /** What the CURRENT selection evaluates to, straight from the evaluator. */
@@ -2534,6 +2782,20 @@ export class CombatScene extends Phaser.Scene {
           // the ceiling is a finite number that travels over the wire intact.
           // A driver asks isInfinite() / INFINITY_CAP, not a magic negative.
           zealCap: (r.zealCap ?? ZEAL_CAP),
+          // THE SIDEBAR'S OWN STRING, verbatim (2026-08-11). The cap clause was
+          // dropped from the readout — it says 'ZEAL 84' now, full stop, and
+          // never '/ ∞' — so a driver that used to assert the ∞ glyph was
+          // checking for exactly the thing JC asked to remove. It reads the
+          // rendered text rather than rebuilding it, because the whole point of
+          // the assertion is that the label and the model agree.
+          zealReadout: this.resourceText?.text ?? '',
+          // ...and the RAW integer behind it, because the readout is abbreviated
+          // now ('ZEAL 4.2M') and a driver asserting a payout needs the number
+          // the engine actually holds, not the one the sidebar can fit.
+          zealRaw: this.player.zeal,
+          // ...and what the scene believes the ceiling to be, which is the one
+          // remaining reason zealCap() exists now that nothing paints it.
+          zealCapNow: this.zealCap(),
           shieldMultRead: r.shieldMultRead ?? 0,
           shieldMultFactor: r.shieldMultFactor ?? 1,
           benchedEthereal: this._benchedEthereal ?? 0,
@@ -2625,6 +2887,49 @@ export class CombatScene extends Phaser.Scene {
         pulses: this._pulseLog ?? [],
       }),
       /**
+       * THE CASCADE LEDGER ALONE, as a JSON-safe copy (2026-08-11).
+       *
+       * order() answers "was the row walked left to right"; this answers "did
+       * every relic that changed the number take a bow", which is the question
+       * JC's Drusky hand could not be answered with. Each row carries:
+       *   id       — WHOSE ABILITY resolved (a mirror reports its SOURCE, the
+       *              same convention multOrder uses)
+       *   slot     — WHICH CELL swelled
+       *   slotId   — what is physically in that cell. `id !== slotId` is the
+       *              proof a MIRROR took the bow rather than the original.
+       *   channel  — the engine channel that paid for the beat
+       *   add/mult — what it moved the equation by
+       * It is a COPY: a driver that holds it across a hand is not watching the
+       * next hand's array mutate under it.
+       */
+      pulseLog: () => (this._pulseLog ?? []).map(r => ({ ...r })),
+      /**
+       * WHICH CHANNELS FIRED THIS HAND, and whether any of them is one nobody
+       * has ruled on (core/pulseChannels.js). A driver proving a formerly silent
+       * relic asserts `channels.includes('chipMultFactor')`; `unknown` is empty
+       * on every shipping build and names the offender the moment it is not.
+       */
+      pulseChannels: () => {
+        // EVERY channel on every row, not just the first (2026-08-11). A single
+        // beat can be paid for by more than one — a card that is both the right
+        // suit and carries a mod takes ONE swell built out of `suitValue` and
+        // `modValue` — and folding those into a scalar is how `cardValue` could
+        // be present in the register, present on the card, and absent from this
+        // list. `channel` survives as the row's headline for the drivers that
+        // already read it.
+        const fired = (this._pulseLog ?? [])
+          .flatMap(r => (r.channels?.length ? r.channels : [r.channel]))
+          .filter(Boolean);
+        return {
+          channels: [...new Set(fired)].sort(),
+          unknown: unknownChannels(fired),
+          known: [...PULSED_CHANNELS].sort(),
+          // Which BEATS of the hand filed rows, so a driver can tell "the
+          // cascade fired" from "a post-equation prop beat fired". See logPulse.
+          phases: [...new Set((this._pulseLog ?? []).map(r => r.phase).filter(Boolean))].sort(),
+        };
+      },
+      /**
        * Move the belt relic at `from` to index `to` — the drag, without a
        * pointer. Writes back through the BELT SLOTS exactly as dragend does, so
        * a nook relic (the glove) keeps its absolute position in run.artifacts.
@@ -2680,16 +2985,23 @@ export class CombatScene extends Phaser.Scene {
     this.buildPotionBelt();
     this.startFight();
     // THE COG COMES IN OFF THE GLASS (JC, 2026-08-10: "the settings cog is
-    // basically clipped"). Its shipped home put a 66px icon centred 44px from
-    // a corner whose glass is cut by a ~55pt radius — the deepest bite on the
-    // whole screen is the one it was sitting in. COG holds both builds' homes;
-    // desktop's is passed as literally the same pair the default arguments
-    // are, so that build cannot move.
+    // basically clipped"). Its shipped home put the icon centred 44px from a
+    // corner whose glass is cut by a ~55pt radius — the deepest bite on the
+    // whole screen is the one it was sitting in.
     //
-    // ui/settingsMenu.addSettingsButton takes (scene, x, y, depth) and sizes
-    // itself 66/44 off MOBILE — there is no size parameter to pass, so the
-    // touch cog stays 66px. See the report: growing it needs one line there.
+    // IT IS NOW addSettingsButton's OWN DEFAULT (2026-08-11): COG is COG_HOME,
+    // and COG_HOME's touch pair is byte-identical to the one this file used to
+    // compute, so passing it changes nothing on either build. The correction was
+    // to the SIZE — see COG above — which this call has never had to state,
+    // because `size` defaults to COG_SIZE, which is what the gear draws at.
+    // (The old comment here claimed "there is no size parameter to pass". There
+    // always was one; believing otherwise is what left the potion mat's ceiling
+    // computed against a 66px gear that has always drawn at 76.)
     this.cogBtn = addSettingsButton(this, COG.x, COG.y);
+    // An IDENTITY, not a name. See chromeAudit: `hfLabel` says what a control
+    // says ('SETTINGS'), and more than one control on a screen may say it;
+    // `hfRole` is worn by exactly one object and is what an audit matches on.
+    this.cogBtn.setData('hfRole', 'cog');
     // THE MAP, FROM INSIDE THE FIGHT (JC, 2026-08-10). Top-left of the arena:
     // clear of the boss marquee (centred on ARENA_CX, 900 desktop / 960 phone /
     // 706 tablet) and clear of the potion mat in the opposite corner, on both
@@ -3184,8 +3496,29 @@ export class CombatScene extends Phaser.Scene {
     // AND the number, because the number is the thing a player points at.
     const shHit = this.add.rectangle(38, 468, 110, 44, 0x000000, 0)
       .setOrigin(0, 0.5).setInteractive({ useHandCursor: true });
-    shHit.on('pointerover', () => this.showRuleTip(SIDEBAR_W - 20, 452, 'SHIELD', this.shieldRuleText()));
-    shHit.on('pointerout', () => this.hideIntentTip());
+    // ...AND ON TOUCH IT IS A TAP (2026-08-11). This was hover-only, which means
+    // that after the hover removal it was NOTHING on a phone: the sidebar showed
+    // a shield glyph and a number and the three surprising facts about them (no
+    // decay, no cap, poison walks through) had no surface at all. Nothing else
+    // commits on this rectangle, so the tap can simply be the read. The fork
+    // stays visible here rather than inside a helper — ui/choicebox.js's idiom.
+    if (TOUCH) {
+      tapInfo(this, shHit, {
+        key: 'rule:shield',
+        anchor: { x: 38 + 55, y: 468, w: 110, h: 44 },
+        title: 'SHIELD',
+        // The SAME text the tooltip prints, from the same function, so the two
+        // builds can never describe one rule two ways. It is a function because
+        // shieldRuleText grows lines live (MELTS, SHATTERED, BRITTLE).
+        body: () => this.shieldRuleText(),
+        accent: 0x1a6a8c,
+        depth: DEPTH.overlay + 3,
+      });
+    } else {
+      hoverInfo(shHit,
+        () => this.showRuleTip(SIDEBAR_W - 20, 452, 'SHIELD', this.shieldRuleText()),
+        () => this.hideIntentTip());
+    }
     g.add(shHit);
 
     this.pstatUI = this.add.container(0, 0).setDepth(DEPTH.panel + 1);
@@ -3386,17 +3719,104 @@ export class CombatScene extends Phaser.Scene {
     // carries the grid, the ordinals, the chain grooves, the USE tags, the
     // empty sockets and the drag code's row boundary with it in one edit.
     const cols = capacity > 6 ? 4 : 3;
-    const spread = MOBILE ? (cols === 4 ? 96 : 126) : (cols === 4 ? 78 : 102);
     const iconSize = MOBILE ? (cols === 4 ? 84 : 108) : (cols === 4 ? 72 : 92);
     const socketR = MOBILE ? (cols === 4 ? 28 : 34) : (cols === 4 ? 23 : 28);
+    // ========================================================================
+    // THE 4-COLUMN CLASS WAS CUT FOR THE OTHER BUILD'S LEATHER (2026-08-11)
+    // ========================================================================
+    // The block above still says "the mat's inner field is 318px, which is
+    // exactly what the 4x78 layout fills". That sentence is true — of the
+    // DESKTOP mat. The phone's field is MAT.bodyW = 376 and its 4-column pitch
+    // was hand-set to 96, so the grid spans 384: eight pixels WIDER than the
+    // hide it is drawn on, with the overhang landing on the left-hand cells.
+    //
+    // Which is how the verification driver found RELIC4 — the bottom-left cell —
+    // sitting 154px from the bottom-left corner arc's centre against a 150px
+    // radius, i.e. CLIPPED by the phone's rounded glass. The 0806 note beside
+    // MAT explicitly licensed the leather's own bitten corner on the grounds
+    // that "nothing interactive is within 30px of it"; the 4-column re-column
+    // put a live relic cell there and nobody re-read the licence.
+    //
+    // The pitch is therefore CLAMPED to the leather it is actually drawn on,
+    // and only in the class that overran it: `cols === 4`. Desktop's 78 already
+    // fits its 318 field (4x78 = 312), so `Math.min` returns it unchanged and
+    // that build cannot move. The 3-across class keeps its shipped 126/102.
+    const spreadWish = MOBILE ? (cols === 4 ? 96 : 126) : (cols === 4 ? 78 : 102);
+    const spread = cols === 4 ? Math.min(spreadWish, Math.floor(MAT.bodyW / cols)) : spreadWish;
     // The phone's leather grew 24px taller (see MAT), and the row pair opens up
     // with it rather than leaving the extra room as a stripe of empty hide.
-    const rowGap = MOBILE ? 64 : 62;
+    const rowGapWish = MOBILE ? 64 : 62;
+    /**
+     * ...AND THE BOTTOM ROW IS LIFTED OUT OF THE CORNER BITE.
+     *
+     * Narrowing the pitch alone is not enough: at 4 across the leftmost cell's
+     * left edge lands ~21px from the canvas wall whatever the pitch, which is
+     * 129px from the arc centre (150, GAME_H-150) — and 129px of the 150 radius
+     * spent horizontally leaves only ~70px of vertical budget, against a bottom
+     * row that hangs 110px below the mat's middle. So the row gap is DERIVED
+     * from the arc rather than hand-set, and it is derived against the cell's
+     * WORST footprint: a hovered cell draws at HOVER_SWELL, and a clearance that
+     * is only true when nobody is pointing at the thing is not a clearance.
+     * (That is also why the driver measured 96x92 for an 84px icon.)
+     *
+     * Desktop returns the shipped gap untouched by construction: SAFE.corner is
+     * 0 there, so there is no bite to dodge and the first branch takes it.
+     */
+    const HOVER_SWELL = 1.15;      // icon.on('pointerover') below; keep in step
+    const CORNER_MARGIN = 4;       // px of daylight demanded inside the arc
+    const rowGap = (() => {
+      const r = SAFE.corner - CORNER_MARGIN;
+      if (!(r > 0)) return rowGapWish;
+      const swollen = iconSize * HOVER_SWELL;
+      const left = MAT.cx - ((cols - 1) / 2) * spread - swollen / 2;
+      const dx = SAFE.corner - left;
+      if (dx <= 0 || dx >= r) return rowGapWish;      // clear of the bite, or hopeless
+      // The lowest the cell's FOOT may sit and still be inside the arc...
+      const maxFoot = (GAME_H - SAFE.corner) + Math.sqrt(r * r - dx * dx);
+      const maxGap = Math.floor(maxFoot - swollen / 2 - MAT.cy);
+      // ...against the closest the two rows may ever sit. The floor uses the
+      // RESTING icon: only one cell can be hovered at a time, so two swollen
+      // boxes never meet.
+      const floor = Math.round(iconSize / 2) + 6;
+      // IF THE ROW CANNOT BE LIFTED FAR ENOUGH, IT IS NOT LIFTED AT ALL.
+      // The 3-ACROSS class is that case on touch: a 108px cell 128px left of the
+      // arc centre would need the two rows 37px apart to clear the bite, and
+      // they are 108 tall. Clamping to the floor there would move a shipped
+      // layout by 4px and still be clipped — a change that buys nothing is
+      // worse than none, because the next person reads it as a fix. So the
+      // shipped gap stands and chromeAudit REPORTS the cell instead (its
+      // `clears` / `cornerOK` are measured live off the real box). Closing it
+      // needs a design call — a smaller 3-across icon, or MAT.bottom — and both
+      // undo work JC asked for in the 0806 pass. At rest that cell has ~3.5px
+      // of arc to spare; it is only the 15% hover swell that overruns, i.e.
+      // only while the player's own finger or cursor is on top of it.
+      if (maxGap < floor) return rowGapWish;
+      return Math.max(floor, Math.min(rowGapWish, maxGap));
+    })();
     const cellOf = i => ({
       x: MAT.cx + ((i % cols) - (cols - 1) / 2) * spread,
       y: MAT.cy + (i < cols ? -rowGap : rowGap),
     });
+    // THE MAT'S HARD CEILING IS TWO ROWS, and `shown` is where it stops drawing
+    // furniture (grooves, chevrons, ordinals, empty sockets). The RELICS below
+    // are not clamped by it, so a belt of nine draws its ninth relic exactly on
+    // top of its fifth — cellOf(8) and cellOf(4) are the same point. Reachable
+    // only past `cols * 2 = 8` belt relics, which needs several slot-granting
+    // relics at once; it is REPORTED by chromeAudit as `overflowCells` rather
+    // than silently hidden, because the answer ("a third row", "a smaller size
+    // class", "a scroll") is a design call and not this function's to make.
     const shown = Math.min(capacity, cols * 2);
+    // The grid the mat actually laid out, for chromeAudit. Everything here used
+    // to be a local that no driver could see, which is why "the 4-column class
+    // overruns the leather" had to be found by measuring a cell rather than by
+    // reading the layout that produced it.
+    this._matGrid = {
+      cols, spread, iconSize, rowGap, shown, capacity,
+      spreadWish, rowGapWish,
+      fieldW: MAT.bodyW, gridW: cols * spread,
+      // Belt relics past `shown` are drawn ON TOP of an earlier cell. See above.
+      overflowCells: Math.max(0, belt.length - shown),
+    };
 
     // ------------------------------------------------------------------------
     // THE CHAIN, ENGRAVED (2026-08-02). The row RESOLVES left to right, and a
@@ -3573,24 +3993,41 @@ export class CombatScene extends Phaser.Scene {
       // while charged, cold iron and ✓ once spent. It is the button. The offset
       // is read off the ICON's own size so the tab keeps hanging off the lip
       // rather than climbing onto the painting as the row's size class changes.
-      if (art.active) this.buildActiveTag(art, icon, x, y + iconSize / 2 + USE_TAG.lip);
+      // The tag is clamped to its COLUMN's pitch (USE_TAG.fit): on the 4-across
+      // mat the columns are narrower than the tag's wish, and two adjacent
+      // actives drew two overlapping brass tabs. The nook below passes nothing,
+      // because the glove has no neighbour to collide with.
+      if (art.active) this.buildActiveTag(art, icon, x, y + iconSize / 2 + USE_TAG.lip, USE_TAG.fit(spread));
       const entry = { art, icon, shadow, dragging: false };
       entries.push(entry);
 
       icon.setInteractive({ useHandCursor: true, draggable: true });
       icon.setData('baseScale', icon.scale);
+      // THE POLISH AND THE TIP ARE TWO BINDINGS NOW (2026-08-11). The 1.15 pop
+      // is a cell reacting to a pointer — it describes nothing, and on a finger
+      // it reads as press feedback — so it stays on the raw event and touch
+      // keeps it. The TOOLTIP is a description, and this cell already has a
+      // two-tap box carrying the same words (relicBoxSpec, below), so the tip
+      // goes through `hoverInfo` and simply does not exist on touch. That pair —
+      // one gesture, one panel — is the double-description bug's whole fix.
+      //
+      // A carried relic sweeps over its neighbours, and every one of them would
+      // pop and speak underneath the drag: while something is in the air the row
+      // holds still and says nothing. The guard is on BOTH halves.
       icon.on('pointerover', () => {
-        // A carried relic sweeps over its neighbours, and every one of them
-        // would pop its own tooltip and hover-grow underneath the drag. While
-        // something is in the air the row holds still and says nothing.
         if (this._artifactDragging) return;
-        this.showArtifactTip(icon.x, Math.min(icon.y, GAME_H - 170), art);
         this.tweens.add({ targets: icon, scale: icon.getData('baseScale') * 1.15, duration: 110 });
       });
       icon.on('pointerout', () => {
         if (this._artifactDragging) return;
-        this.hideIntentTip();
         this.tweens.add({ targets: icon, scale: icon.getData('baseScale'), duration: 110 });
+      });
+      hoverInfo(icon, () => {
+        if (this._artifactDragging) return;
+        this.showArtifactTip(icon.x, Math.min(icon.y, GAME_H - 170), art);
+      }, () => {
+        if (this._artifactDragging) return;
+        this.hideIntentTip();
       });
       // A CLICK (not a drag) opens the relic's OPTIONS, exactly as the map belt
       // does. getDistance() is the gap between pointer-down and pointer-up, so
@@ -3736,14 +4173,18 @@ export class CombatScene extends Phaser.Scene {
       this.artifactIcons[run.artifacts.indexOf(art)] = icon;
       icon.setData('baseScale', icon.scale);
       icon.setInteractive({ useHandCursor: true });
+      // Same split as the belt cells above: the pop is polish and stays raw on
+      // both builds, the tooltip is a description and rides `hoverInfo`, so on
+      // touch the glove is described by its two-tap box and by nothing else.
       icon.on('pointerover', () => {
-        this.showArtifactTip(x, Math.min(y - 40, GAME_H - 170), art);
         this.tweens.add({ targets: icon, scale: icon.getData('baseScale') * 1.15, duration: 110 });
       });
       icon.on('pointerout', () => {
-        this.hideIntentTip();
         this.tweens.add({ targets: icon, scale: icon.getData('baseScale'), duration: 110 });
       });
+      hoverInfo(icon,
+        () => this.showArtifactTip(x, Math.min(y - 40, GAME_H - 170), art),
+        () => this.hideIntentTip());
       // The glove is worn, not slotted, so it never drags — but it sells like
       // anything else, and the same click opens the same confirm. Same
       // started-here guard as the row: a USE tag's gesture must not fall
@@ -4003,24 +4444,32 @@ export class CombatScene extends Phaser.Scene {
    * the charge. A one-per-fight irreversible active had been committing on a
    * raw pointerDOWN, on a 72x26 plate, beside a 108px icon.
    */
-  buildActiveTag(art, icon, x, y) {
-    const img = this.add.image(x, y, 'hud_tag_use').setDisplaySize(USE_TAG.w, USE_TAG.h);
+  buildActiveTag(art, icon, x, y, w = USE_TAG.w) {
+    const img = this.add.image(x, y, 'hud_tag_use').setDisplaySize(w, USE_TAG.h);
     const label = this.add.text(x, y - 2, art.active.label ?? 'USE', {
       fontFamily: 'Lilita One', resolution: 2, fontSize: `${USE_TAG.font}px`, color: '#3d2a08',
     }).setOrigin(0.5);
     this.artifactPanelG.add(img);
     this.artifactPanelG.add(label);
-    const tag = { art, icon, img, label, breath: null };
+    // `w` is remembered, because syncActiveTag re-sizes this image every time
+    // the charge state flips and a bare USE_TAG.w there would silently undo the
+    // column clamp the moment the relic was spent.
+    const tag = { art, icon, img, label, breath: null, w };
     (this.activeTags ??= []).push(tag);
     img.setInteractive({ useHandCursor: true });
+    // The tag's swell is polish (and a charged tag is already breathing under
+    // it), so it stays raw on both builds; the relic's rules are a description
+    // and ride `hoverInfo`. On touch the tag's own twoTap below opens the relic
+    // box, which prints those rules once — see buildActiveTag's note.
     img.on('pointerover', () => {
-      this.showArtifactTip(icon.x, Math.min(icon.y, GAME_H - 170), art);
       if (!this.activeSpent(art)) this.tweens.add({ targets: [img, label], scale: 1.14, duration: 100 });
     });
     img.on('pointerout', () => {
-      this.hideIntentTip();
       this.tweens.add({ targets: [img, label], scale: 1, duration: 100 });
     });
+    hoverInfo(img,
+      () => this.showArtifactTip(icon.x, Math.min(icon.y, GAME_H - 170), art),
+      () => this.hideIntentTip());
     if (TOUCH) twoTap(this, img, this.relicBoxSpec(art, this.relicAnchor(icon)));
     else img.on('pointerdown', () => this.useActiveArtifact(art));
     this.syncActiveTag(tag);
@@ -4042,12 +4491,17 @@ export class CombatScene extends Phaser.Scene {
     // sprite is still findable there; the fallback is the played row's centre.
     const cs = (this.handCards ?? []).find(c => c?.card?.id === card.id) ?? null;
     const at = cs ?? { x: ARENA_CX, y: CARD.playedY };
+    // THE GAUNTLET'S CELL, read NOW rather than in the tween below: artHook's
+    // pin is only good for the length of the synchronous hook call, and this
+    // bow lands a quarter second later. A mirrored Midas has to light the
+    // mirror (2026-08-11).
+    const slot = this._hookArt === art ? this._hookSlot : undefined;
     this.time.delayedCall(this.spd(260), () => {
       sfx(this, 'minor_upgrade', { volume: 0.7, rate: 1.2 });
       burst(this, at.x, at.y - 30, 0xffd23e, 16);
       popNumber(this, at.x, at.y - 110, '✨ MIDAS: it comes away SHINY',
         { color: '#ffd23e', size: 30, rise: 46 });
-      this.pulseArtifact(art, { text: '✨ SHINY', color: '#ffd23e' });
+      this.pulseArtifact(art, { text: '✨ SHINY', color: '#ffd23e', slot });
     });
   }
 
@@ -4066,7 +4520,7 @@ export class CombatScene extends Phaser.Scene {
     tag.breath?.remove();
     tag.breath = null;
     if (spent) {
-      tag.img.setTexture('hud_tag_spent').setDisplaySize(USE_TAG.w, USE_TAG.h).setAlpha(0.92);
+      tag.img.setTexture('hud_tag_spent').setDisplaySize(tag.w ?? USE_TAG.w, USE_TAG.h).setAlpha(0.92);
       // Cold, not gone: #b8ada0 on the pale spent brass was unreadable rather
       // than merely dim, and "have I used this?" is a question worth answering.
       tag.label.setText('✓ SPENT').setColor('#6b6055').setFontSize(`${USE_TAG.spentFont}px`);
@@ -4079,7 +4533,7 @@ export class CombatScene extends Phaser.Scene {
       // stops the biggest target on the cell going quietly numb.
       if (!TOUCH) tag.img.disableInteractive();
     } else {
-      tag.img.setTexture('hud_tag_use').setDisplaySize(USE_TAG.w, USE_TAG.h).setAlpha(1);
+      tag.img.setTexture('hud_tag_use').setDisplaySize(tag.w ?? USE_TAG.w, USE_TAG.h).setAlpha(1);
       tag.label.setText(tag.art.active.label ?? 'USE').setColor('#3d2a08').setFontSize(`${USE_TAG.font}px`);
       tag.icon.setAlpha(1);
       tag.img.setInteractive({ useHandCursor: true });
@@ -4275,7 +4729,44 @@ export class CombatScene extends Phaser.Scene {
     if (typeof job === 'string') job = { text: job };
     // job.slot lets a MIRROR swell its OWN cell rather than the source's: the
     // copy resolved at the mirror's position, so that is the cell that lights.
-    const i = job.slot ?? run.artifacts.indexOf(art);
+    //
+    // THE COLLAPSE LINE (JC, 2026-08-11). indexOf() is the fallback and it is a
+    // LIE for any mirrored relic: it answers the SOURCE's first cell, so a
+    // Forgery copying the Solid Gold Sack made the Sack swell twice and never
+    // touched the mirror. Every caller that walks the belt now hands its slot
+    // in (see liveArtifactSlots / propHolderSlots) and every hook inherits one
+    // from artHook's pin; indexOf survives only for the ad-hoc callers that
+    // already hold a run.artifacts instance, where it is exact.
+    const i = job.slot
+      ?? (art && art === this._hookArt ? this._hookSlot : null)
+      ?? run.artifacts.indexOf(art);
+    // =====================================================================
+    // EVERY SWELL IS A LEDGER ROW (2026-08-11 — the second half of the Sack)
+    // =====================================================================
+    // The 08-11 pass moved the ledger's writer into `logPulse` and then wired
+    // exactly THREE callers to it: the cascade, the leftover phase and the
+    // bench. Everything that swells a cell from somewhere else — the per-card
+    // value beat (pulseValueArtifacts), the retrigger beat, and all twenty-odd
+    // post-equation prop beats (pulseByProp) — swelled the icon and wrote
+    // nothing. The verification driver caught it exactly where the register
+    // said to look: holding THE CAMPSTOOL, the honed card really is worth 14
+    // instead of 9, the cell really does grow (`_pulseTotals` records the +5),
+    // and `pulseLog()` was EMPTY while `pulseChannels().channels` omitted
+    // `cardValue`. A register that says a channel has a beat, plus a ledger
+    // that cannot see that beat, is the Sack bug wearing a different hat.
+    //
+    // So the row is filed HERE, at the ONE function every beat in the game
+    // goes through to make a cell grow. `logPulse` is idempotent per job
+    // object, so the three callers that file their row FIRST (to control its
+    // position, or because their beat has no artifact at all — the zeal job)
+    // keep doing exactly that and this call is a no-op for them.
+    //
+    // BEFORE the icon guard below, deliberately: the ledger records what the
+    // ENGINE did, and a contribution from a relic whose cell is mid-rebuild
+    // (or sold, or in the nook with the mat repainting) is still a
+    // contribution. That is also the behaviour the three original callers
+    // already had, since they logged unconditionally.
+    this.logPulse(art, job, i);
     const icon = this.artifactIcons?.[i];
     if (!icon?.active) return;
     const totals = (this._pulseTotals ??= {});
@@ -4331,6 +4822,44 @@ export class CombatScene extends Phaser.Scene {
     });
   }
 
+  /**
+   * EVERY RELIC CELL BACK ON ITS FEET.
+   *
+   * A cell can be left SWOLLEN, and it is not a tween bug — it is Phaser's hit
+   * test being event-driven. `pointerover` grows the icon 15% and `pointerout`
+   * puts it back, but pointerout only fires when the pointer MOVES off. Drop a
+   * full-screen overlay under a stationary cursor — which is exactly what the
+   * end of a fight does — and the cell under it never hears that it is no
+   * longer hovered, so it stays 15% bigger for as long as the screen is up.
+   *
+   * That is how the verification driver found the bottom-left cell 154px from
+   * the corner arc's centre AT THE VICTORY SCREEN while the same eight-relic
+   * belt measured clean mid-fight: not a different layout, the same layout with
+   * one cell puffed. The geometry fix in renderArtifactPanel means a swollen
+   * cell now clears the arc anyway — this is the other half, so the mat also
+   * LOOKS settled behind an end screen instead of holding one relic mid-lift.
+   */
+  settleArtifactIcons() {
+    for (const icon of this.artifactIcons ?? []) {
+      if (!icon?.active) continue;
+      const base = icon.getData('baseScale');
+      if (base == null) continue;
+      this.tweens.killTweensOf(icon);
+      icon.setScale(base);
+    }
+    for (const tag of this.activeTags ?? []) {
+      if (!tag.img?.active) continue;
+      // A charged tag BREATHES on a loop, so it is re-armed rather than frozen:
+      // syncActiveTag owns that tween and rebuilds it from the charge state.
+      this.tweens.killTweensOf([tag.img, tag.label]);
+      tag.img.setScale(1); tag.label.setScale(1);
+      tag.breath?.remove();
+      tag.breath = null;
+      tag.spent = null;              // force syncActiveTag to re-dress it
+      this.syncActiveTag(tag);
+    }
+  }
+
   /** New hand incoming: leftover labels wipe, running totals reset. */
   resetArtifactPulses(instant = false) {
     for (const k of Object.keys(this._pulseTotals ?? {})) {
@@ -4346,39 +4875,163 @@ export class CombatScene extends Phaser.Scene {
   }
 
   /**
+   * ONE WRITER FOR THE CASCADE LEDGER (2026-08-11).
+   *
+   * _pulseLog used to be written in exactly one place — inside
+   * scheduleArtifactPulses — which is why the two beats that resolve AFTER the
+   * cascade (the repeat's leftover phase and the bench) left no trace at all: a
+   * driver reading order().pulses could see the whole belt fire and had no way
+   * to prove COURT IN SESSION or the RIGGED WHEEL had swelled, because the
+   * ledger simply stopped before they did. Every beat that swells a relic files
+   * a row through here now, in the order it actually happened.
+   *
+   * `slotId` is the mirror fix's whole point: `id` is the relic whose ABILITY
+   * resolved (a Forgery reports its source, exactly as multOrder does, which is
+   * what keeps tools/verify_order.py's assertions honest), and `slotId` is what
+   * is physically SITTING in that cell. They differ for precisely one reason —
+   * a mirror contributed — so `id !== slotId` IS the proof that the copy, not
+   * the original, took the bow.
+   */
+  logPulse(art, job, slotHint = null) {
+    // ONCE PER BEAT, WHOEVER ASKS FIRST. `pulseArtifact` files every swell now
+    // (see its own note), and three callers still file their row by hand ahead
+    // of it — the cascade, so the row lands at its scheduled ordinal and so the
+    // artifact-less ZEAL beat is recorded at all, and the two post-repeat beats,
+    // which were written before pulseArtifact learned to log. The flag lives on
+    // the JOB, so "the same beat" means the same job object rather than a
+    // heuristic on its fields, and the callers pass one object to both calls.
+    if (job._logged) return;
+    job._logged = true;
+    const log = (this._pulseLog ??= []);
+    const slot = slotHint ?? job.slot ?? (art ? run.artifacts.indexOf(art) : -1);
+    // WHICH ENGINE CHANNELS paid for this beat. A single beat can be paid for by
+    // more than one — a card that is both the right SUIT and carries a MOD lands
+    // one swell built out of `suitValue` and `modValue` — so the row carries the
+    // whole set and `channel` is the first of them, kept as a scalar because
+    // three drivers already read it that way.
+    const channels = job.channels?.length ? [...job.channels]
+      : (job.channel ? [job.channel] : []);
+    log.push({
+      i: job.i ?? log.length,
+      id: art?.id ?? null,
+      slot,
+      // WHO IS ACTUALLY IN THE SOCKET: 'counterfeit' / 'phantomCast' when the
+      // contribution arrived through a mirror, the same id as `id` otherwise.
+      slotId: run.artifacts[slot]?.id ?? null,
+      // WHICH ENGINE CHANNEL paid for this beat. Named so a driver can assert
+      // "the chipMultFactor channel fired" rather than pattern-matching a label,
+      // and so the dev check below can catch a channel nobody has ruled on.
+      channel: channels[0] ?? null,
+      channels,
+      // WHICH BEAT OF THE HAND this row belongs to. Added the day pulseArtifact
+      // became the writer, because the ledger stopped being cascade-only: a
+      // 'card' row (a value morph, a retrigger) fires BEFORE the cascade and a
+      // 'prop' row can fire after the equation has closed. A driver asserting
+      // the cascade's left-to-right order filters on phase === 'cascade' rather
+      // than assuming the array holds nothing else.
+      //   card     per-card value / retrigger beats, during the score ticks
+      //   cascade  the joker cascade proper
+      //   leftover COURT IN SESSION's phase, after the repeat
+      //   bench    the held-back cards' beats
+      //   prop     a post-equation pulseByProp beat
+      //   pulse    anything ad hoc (a relic hook taking its own bow)
+      phase: job.phase ?? 'pulse',
+      add: job.eqAdd ?? job.add ?? 0,
+      mult: job.eqMul ?? job.mult ?? 1,
+      text: job.text ?? null,
+      passive: job.passive?.id ?? null,
+      passiveAmount: job.passive?.amount ?? 0,
+    });
+    // DEV TRIPWIRE. A job whose channel is not in the register means somebody
+    // added a contribution path and only half-wired it; say so loudly in the
+    // console rather than letting it ship silent the way the Sack did.
+    for (const ch of channels) {
+      if (!PULSED_CHANNELS.has(ch)) {
+        console.warn(`pulse job on an unregistered channel: ${ch} (see core/pulseChannels.js)`);
+      }
+    }
+  }
+
+  /**
    * Pulse exactly the artifacts that moved THIS card's value, so the gold "+3"
    * floating off the card and the relic that caused it swell as one event.
    * (The joker cascade no longer announces value adds — it would repeat the
    * same number a beat later.)
    */
   pulseValueArtifacts(b) {
-    for (const a of this.liveArtifacts()) {
+    for (const { art: a, slot } of this.liveArtifactSlots()) {
       const m = typeof a.mods === 'function' ? a.mods(a, run) : a.mods;
       if (!m) continue;
-      const add = (b.valueBonusSuit ? (m.suitValue?.[b.suit] ?? 0) : 0)
-        + (b.valueBonusFace ? (m.faceValue ?? 0) : 0)
-        + (b.valueBonusMod && b.mod ? (m.modValue?.[b.mod] ?? 0) : 0);
-      if (add > 0) this.pulseArtifact(a, { add, color: '#e8dcc0' });
+      // THE CAMPSTOOL'S CHANNEL (JC, 2026-08-11). mods.cardValue lands in
+      // scoring's `modBonus` alongside modValue and is reported as
+      // valueBonusMod — but this loop only ever asked modValue, and only for a
+      // card carrying a MOD, so a honed plain card silently gained +5 with
+      // nothing swelling. It is credited HERE and not with a cascade job of its
+      // own: the value is already flying onto the score side under the card
+      // whose number just morphed, and a second eqAddScore would count it twice.
+      //
+      // ...AND IT IS NAMED, ONE CHANNEL PER TERM (the same day, second pass).
+      // The four terms used to be summed into one anonymous `add` tagged
+      // `channel: 'cardValue'` — which was a lie the moment a SUIT bonus and a
+      // hone landed on the same card, and which is what a driver asking "did
+      // the cardValue channel fire" has to be able to trust. Each term keeps
+      // its own name and the row carries the set (see logPulse).
+      const parts = [
+        ['suitValue', b.valueBonusSuit ? (m.suitValue?.[b.suit] ?? 0) : 0],
+        ['faceValue', b.valueBonusFace ? (m.faceValue ?? 0) : 0],
+        ['modValue', b.valueBonusMod && b.mod ? (m.modValue?.[b.mod] ?? 0) : 0],
+        ['cardValue', b.valueBonusMod ? (m.cardValue?.[b.id] ?? 0) : 0],
+      ];
+      const add = parts.reduce((s, [, v]) => s + v, 0);
+      if (add > 0) {
+        this.pulseArtifact(a, {
+          add, color: '#e8dcc0', slot, phase: 'card',
+          channels: parts.filter(([, v]) => v > 0).map(([k]) => k),
+        });
+      }
     }
     // Per-hand, per-card grants (Blunt Dagger, the Crown's Ace) — the scene
-    // handed these out in buildScoreState, so it also owns the credit.
+    // handed these out in buildScoreState, so it also owns the credit. The
+    // grant remembers which PROP paid for it, so the ledger names that prop
+    // rather than filing an anonymous row nobody can assert against.
     for (const g of this._valueGrants ?? []) {
-      if (g.id === b.id) this.pulseArtifact(g.a, { add: g.add, color: '#e8dcc0' });
+      if (g.id === b.id) {
+        this.pulseArtifact(g.a, {
+          add: g.add, color: '#e8dcc0', slot: g.slot,
+          phase: 'card', channel: g.channel ?? null,
+        });
+      }
     }
   }
 
   /** Pulse every relic that retriggers a card (the Ouroboros family). */
   pulseRetriggerArtifacts(n) {
-    for (const a of this.liveArtifacts()) {
+    for (const { art: a, slot } of this.liveArtifactSlots()) {
       const m = typeof a.mods === 'function' ? a.mods(a, run) : a.mods;
-      if ((m?.retriggerTop ?? 1) > 1) this.pulseArtifact(a, { text: `↻ ×${n}`, color: '#50b888' });
+      if ((m?.retriggerTop ?? 1) > 1) {
+        this.pulseArtifact(a, {
+          text: `↻ ×${n}`, color: '#50b888', slot,
+          phase: 'card', channel: 'retriggerTop',
+        });
+      }
     }
   }
 
-  /** Pulse every effective artifact carrying a given prop. */
+  /**
+   * Pulse every effective artifact carrying a given prop, at ITS OWN cell.
+   *
+   * THE PROP IS THE CHANNEL, so the row names it without a single call site
+   * having to repeat itself: every name passed here (`shieldFactor`,
+   * `handStrikes`, `execute`, …) is a prop key, and every one of them is
+   * already in PULSED_CHANNELS with this very function cited beside it. Before
+   * 2026-08-11 none of these beats reached the ledger at all, so the register's
+   * "each has a pulseByProp" section was unfalsifiable.
+   */
   pulseByProp(prop, label, color) {
-    for (const a of this.liveArtifacts()) {
-      if ((a.props?.[prop] ?? 0) > 0) this.pulseArtifact(a, { text: label, color });
+    for (const { art: a, slot } of this.liveArtifactSlots()) {
+      if ((a.props?.[prop] ?? 0) > 0) {
+        this.pulseArtifact(a, { text: label, color, slot, phase: 'prop', channel: prop });
+      }
     }
   }
 
@@ -4398,6 +5051,10 @@ export class CombatScene extends Phaser.Scene {
     // repeatBeat(), which pulses them once per activation so the cause of a ×25
     // is visible twenty five times rather than asserted once.
     this._repeatCause = [];
+    // ...and WHO DOUBLED THE BENCH. Same idea one beat further on: collected in
+    // the walk (the only place that reads every relic's mods) and spent in
+    // benchBeat(), where the extra triggers actually happen.
+    this._benchRepeatCause = [];
     const scoringSuits = new Set(res.breakdown.filter(b => b.scoring).map(b => b.suit));
     const n = cards.length;
     // THE CHAOS ORB's roll is banked on the scene, not in a mods bag, so it is
@@ -4417,6 +5074,56 @@ export class CombatScene extends Phaser.Scene {
       passive, text: passive.label, color: passive.color,
       eqAdd: passive.eqAdd || undefined, eqMul: passive.eqMul !== 1 ? passive.eqMul : undefined,
     }];
+    /**
+     * THE RELICS THAT CHANGED WHICH HAND YOU PLAYED (JC, 2026-08-11).
+     *
+     * THE UNDERSTUDY, the BROKEN COMPASS, the ROPE LADDER and TRUE COLORS were
+     * the strangest silence of the lot: they are the most powerful relics in the
+     * pool and the ONLY ones that move BOTH halves of the equation at once — a
+     * bigger printed base AND a bigger printed mult — and not one of them ever
+     * swelled. The number simply arrived larger and the banner said a hand name
+     * the cards on the table did not spell.
+     *
+     * They take a TEXT bow, not a number. There is no honest figure to print:
+     * the contribution is not "+12", it is "this is a FOUR OF A KIND", and it
+     * was already paid before the equation opened. So they fire FIRST, ahead of
+     * even Drusky's hoard, which is the position in the pipeline they actually
+     * occupy — classification happens before a single mult is counted.
+     *
+     * AND ONLY WHEN IT MATTERED. A Broken Compass in a build that just played a
+     * full house did nothing, and a relic that bows on a hand it sat out is the
+     * same lie in the other direction (it is exactly the rule the passive chip
+     * is held to). So each bend is re-asked with that ONE channel switched off:
+     * if the hand classifies the same either way, the relic stays quiet.
+     */
+    const benders = { ofAKindMinus1: [], flushMinus1: [], straightMinus1: [], trueColors: [] };
+    for (const { art: a, slot } of this.liveArtifactSlots()) {
+      const m = typeof a.mods === 'function' ? a.mods(a, run) : a.mods;
+      for (const k of Object.keys(benders)) if (m?.[k]) benders[k].push({ art: a, slot });
+    }
+    // THE ONE DERIVATION, again: the bag comes from handEvalOpts() — the same
+    // reader the preview and scoreHand use, dev pin included — so this check can
+    // never classify the hand by a rule the engine did not actually apply.
+    const bendOpts = this.handEvalOpts();
+    for (const k of ['ofAKindMinus1', 'flushMinus1', 'straightMinus1']) {
+      if (!bendOpts[k] || !benders[k].length || !cards?.length) continue;
+      // Same cards, same reader, this one rule withdrawn: did the hand change?
+      const without = bestHandOf(cards, { ...bendOpts, [k]: false })?.type;
+      if (without === res.handType) continue;
+      for (const { art: a, slot } of benders[k]) {
+        jobs.push([a, { text: res.handName?.toUpperCase() ?? 'A BIGGER HAND', color: '#ff8c28', slot, channel: k }]);
+      }
+    }
+    // TRUE COLORS rewrites the RULE suit of every scoring card. It mattered iff
+    // at least one card actually fought as something other than what it shows —
+    // a hero playing a hand of their own suit was already doing this for free.
+    if (res.ruleSuit && benders.trueColors.length
+        && res.breakdown.some(b => b.scoring && b.suit !== res.ruleSuit)) {
+      for (const { art: a, slot } of benders.trueColors) {
+        jobs.push([a, { text: `ALL ${String(res.ruleSuit).toUpperCase()}`, color: '#ff8c28', slot, channel: 'trueColors' }]);
+      }
+    }
+
     // DRUSKY's hoard is flat mult paid at step 3 — BEFORE the relic walk, which
     // is exactly the position the Solid Gold Sack exists to trade away — so his
     // is the first thing that happens in the cascade.
@@ -4424,7 +5131,7 @@ export class CombatScene extends Phaser.Scene {
     // THE CHAIN, left to right. This is the exact list scoring.js walked, cell
     // by cell (mirrors sitting at the MIRROR's position), so what the player
     // watches climb is the order that produced the number.
-    for (const { art: a, slot } of effectiveArtifactSlots()) {
+    for (const { art: a, slot } of this.liveArtifactSlots()) {
       const mark = jobs.length;   // everything this cell pushes belongs to this cell
       // THE CHAOS ORB shows its work: the rolled number IS the relic's whole
       // personality, so it announces the actual figure it just gambled. It is a
@@ -4435,38 +5142,63 @@ export class CombatScene extends Phaser.Scene {
       if (ci >= 0) {
         const roll = chaosQueue.splice(ci, 1)[0][1];
         jobs.push([a, roll > 0
-          ? { add: roll, suffix: ' mult', color: '#b45cff', eqAdd: roll }
-          : { text: 'CHAOS: nothing', color: '#a898c4' }]);
+          ? { add: roll, suffix: ' mult', color: '#b45cff', eqAdd: roll, channel: 'chaosMult' }
+          : { text: 'CHAOS: nothing', color: '#a898c4', channel: 'chaosMult' }]);
       }
       const m = typeof a.mods === 'function' ? a.mods(a, run) : a.mods;
-      // NB: suitValue / faceValue are deliberately absent here — those fire
-      // per-card during the score ticks (pulseValueArtifacts), where the
-      // number they changed is actually on screen.
-      if (m?.handMult?.[res.handType]) jobs.push([a, { add: m.handMult[res.handType], suffix: ' mult', color: '#ffd23e', eqAdd: m.handMult[res.handType] }]);
+      // NB: suitValue / faceValue / cardValue are deliberately absent here —
+      // those fire per-card during the score ticks (pulseValueArtifacts), where
+      // the number they changed is actually on screen.
+      if (m?.handMult?.[res.handType]) jobs.push([a, { add: m.handMult[res.handType], suffix: ' mult', color: '#ffd23e', eqAdd: m.handMult[res.handType], channel: 'handMult' }]);
       // THE SCALERS. flatMult is the banked total a relic has grown to
       // (Kingmaker's crowns, the Rising Tide, Lucky Deuce, the Ace's Legacy,
       // Wolfsbane's wolves) — it pays on EVERY hand, so it takes a bow on
       // every hand, and the mult side jumps by exactly what it banked.
       if (m?.flatMult > 0) {
-        jobs.push([a, { add: m.flatMult, suffix: ' mult', color: '#ffd23e', eqAdd: m.flatMult }]);
+        jobs.push([a, { add: m.flatMult, suffix: ' mult', color: '#ffd23e', eqAdd: m.flatMult, channel: 'flatMult' }]);
       }
       // Kingmaker: +5 mult for every J/Q/K that scored.
       if (m?.faceMult && res.faceCount > 0) {
         const add = m.faceMult * res.faceCount;
-        jobs.push([a, { add, suffix: ' mult', color: '#d8b830', eqAdd: add }]);
+        jobs.push([a, { add, suffix: ' mult', color: '#d8b830', eqAdd: add, channel: 'faceMult' }]);
       }
       // Prayer Beads and friends: flat mult per scoring card of a suit.
       if (m?.suitMult) {
         const add = Object.keys(m.suitMult)
           .reduce((s, k) => s + m.suitMult[k] * (res.suitCounts?.[k] ?? 0), 0);
-        if (add > 0) jobs.push([a, { add, suffix: ' mult', color: '#ff9aa4', eqAdd: add }]);
+        if (add > 0) jobs.push([a, { add, suffix: ' mult', color: '#ff9aa4', eqAdd: add, channel: 'suitMult' }]);
       }
       // THE STRAIGHTEDGE'S BANK: flat pre-mult VALUE for a whole hand type. It
       // moves the SCORE side, so it announces itself there and the equation
       // climbs by exactly what the relic banked.
       if (m?.handValue?.[res.handType] > 0) {
         const v = m.handValue[res.handType];
-        jobs.push([a, { add: v, suffix: ' value', color: '#c8c8d8', eqAddScore: v }]);
+        jobs.push([a, { add: v, suffix: ' value', color: '#c8c8d8', eqAddScore: v, channel: 'handValue' }]);
+      }
+      /**
+       * THE TORTOISE STANDARD (JC, 2026-08-11) — the second score-side channel
+       * to land in baseSum with no job at all. The wall you were standing behind
+       * bought flat pre-mult value (scoring.js: shieldValueBonus), the equation
+       * grew, and the banner never said why.
+       *
+       * res.shieldValueBonus is the TOTAL the merged bag paid, so a mirrored
+       * standard must not print it twice: this cell's own share is re-derived
+       * from ITS rate against the same standing wall scoring.js read, which
+       * makes two copies two honest halves rather than one number claimed twice.
+       */
+      if (m?.shieldValue > 0 && (res.shieldValueBonus ?? 0) > 0) {
+        const v = Math.floor((res.shieldStanding ?? 0) / SHIELD_VALUE_STEP) * m.shieldValue;
+        if (v > 0) jobs.push([a, { add: v, suffix: ' value', color: '#60a848', eqAddScore: v, channel: 'shieldValue' }]);
+      }
+      /**
+       * THE TUNGSTEN CUBE. Flat Shield folded into the hand's shield pool
+       * (scoring.js, gated on the hand plating something at all). It moves an
+       * OUTPUT and not the equation's two halves, so it takes the same ◆ bow the
+       * hero-exclusive shield rewrites take rather than a false eqAddScore — the
+       * score side never held this number and must not be made to.
+       */
+      if (m?.flatShield > 0 && (res.flatShieldBonus ?? 0) > 0 && res.shield > 0) {
+        jobs.push([a, { text: `◆ +${m.flatShield}`, color: '#9aa0a8', channel: 'flatShield' }]);
       }
       // FLAT VALUE ON EVERY HAND (the Golden Spud): same idiom as the
       // Straightedge above. This was the ONE score-side channel with no job —
@@ -4474,61 +5206,72 @@ export class CombatScene extends Phaser.Scene {
       // 2026-08-04). The gate mirrors scoring.js exactly: the bonus is only
       // PAID when the hand made a score to add it to.
       if (m?.flatValue > 0 && (res.baseSum ?? 0) + (res.baseFlat ?? 0) > 0) {
-        jobs.push([a, { add: m.flatValue, suffix: ' value', color: '#ffd23e', eqAddScore: m.flatValue }]);
+        jobs.push([a, { add: m.flatValue, suffix: ' value', color: '#ffd23e', eqAddScore: m.flatValue, channel: 'flatValue' }]);
       }
-      if (m?.handFactor?.[res.handType] && m.handFactor[res.handType] !== 1) jobs.push([a, { mult: m.handFactor[res.handType], color: '#ff8c28', eqMul: m.handFactor[res.handType] }]);
+      if (m?.handFactor?.[res.handType] && m.handFactor[res.handType] !== 1) jobs.push([a, { mult: m.handFactor[res.handType], color: '#ff8c28', eqMul: m.handFactor[res.handType], channel: 'handFactor' }]);
       // Alchemist's Still: one × per modified card that scored, compounding.
       // The label SHOWS THE COUNT (JC, 2026-08-04: a hand of roulette cards
       // left him unsure each one had fired the still) — the maths were always
       // per scored card, but a bare ×1.61 never said "that is five ×1.1s".
       if (m?.modCardFactor && m.modCardFactor !== 1 && res.modCount > 0) {
         const f = Math.round(Math.pow(m.modCardFactor, res.modCount) * 100) / 100;
-        jobs.push([a, { text: `${res.modCount} MODDED: ×${f}`, color: '#58c0a8', eqMul: f }]);
+        jobs.push([a, { text: `${res.modCount} MODDED: ×${f}`, color: '#58c0a8', eqMul: f, channel: 'modCardFactor' }]);
       }
-      if (m?.globalMultFactor && m.globalMultFactor !== 1) jobs.push([a, { mult: Math.round(m.globalMultFactor * 100) / 100, color: '#ff8c28', eqMul: m.globalMultFactor }]);
+      if (m?.globalMultFactor && m.globalMultFactor !== 1) jobs.push([a, { mult: Math.round(m.globalMultFactor * 100) / 100, color: '#ff8c28', eqMul: m.globalMultFactor, channel: 'globalMultFactor' }]);
       // Ouroboros: the loop already tripled a card on the SCORE side — this is
       // the relic taking a bow for it, no mult moved.
-      if (m?.retriggerTop > 1 && res.retriggerId) jobs.push([a, { text: `↻ ×${res.retrigger}`, color: '#50b888' }]);
+      if (m?.retriggerTop > 1 && res.retriggerId) jobs.push([a, { text: `↻ ×${res.retrigger}`, color: '#50b888', channel: 'retriggerTop' }]);
       // REPEATING POCKETWATCH: the whole hand happens again. It takes its bow
       // here and then CAUSES the repeat beat that follows the cascade, where the
       // hand is actually replayed activation by activation and the score side
       // climbs a step at a time. No eqMulScore: repeatBeat() owns that ×N now,
       // and two owners would double the total.
       if (m?.handRepeat > 1) {
-        jobs.push([a, { text: `↻ ×${m.handRepeat}`, color: '#d8c070' }]);
+        jobs.push([a, { text: `↻ ×${m.handRepeat}`, color: '#d8c070', channel: 'handRepeat' }]);
         this._repeatCause.push(a);
       }
+      /**
+       * THE LATENT REPEATER (JC, 2026-08-11). It multiplies how many times every
+       * LEFTOVER effect fires, which is worth more than most ×mult relics in the
+       * pool — and it had no beat of any kind. It cannot bow HERE, because the
+       * bench has not happened yet and the mult it doubles arrives minutes
+       * (well, four beats) later; a bow here would credit a number the equation
+       * is not holding. So it is remembered and takes its bow inside benchBeat(),
+       * beside the very triggers it doubled. Nothing on a bench-less hand: the
+       * relic genuinely did nothing, and silence is the honest answer.
+       */
+      if (m?.benchRepeat > 1) this._benchRepeatCause.push({ art: a, slot, factor: m.benchRepeat });
       // THE FORGE HAMMER, first swing: every VALUE the hand made, doubled.
       // (Its second swing is the globalMultFactor job above/below — two pulses
       // on one relic, because it genuinely moves both sides.)
-      if (m?.valueFactor > 1) jobs.push([a, { text: `×${m.valueFactor} VALUE`, color: '#ff5a3c', eqMulScore: m.valueFactor }]);
+      if (m?.valueFactor > 1) jobs.push([a, { text: `×${m.valueFactor} VALUE`, color: '#ff5a3c', eqMulScore: m.valueFactor, channel: 'valueFactor' }]);
       // The hero-exclusive rewrites: the mult is now spent on shield / heal /
       // poison, so the relic announces what it multiplied and by how much.
-      if (m?.shieldByMult && res.shield > 0) jobs.push([a, { text: `◆ ×${res.effMult}`, color: '#7fe0f4' }]);
-      if (m?.healByMult && res.heal > 0) jobs.push([a, { text: `♥ ×${res.effMult}`, color: '#ff9aa4' }]);
-      if (m?.gemDamageFactor && scoringSuits.has('gems') && res.damage > 0) jobs.push([a, { text: 'diamonds bite', color: '#7fe0f4' }]);
+      if (m?.shieldByMult && res.shield > 0) jobs.push([a, { text: `◆ ×${res.effMult}`, color: '#7fe0f4', channel: 'shieldByMult' }]);
+      if (m?.healByMult && res.heal > 0) jobs.push([a, { text: `♥ ×${res.effMult}`, color: '#ff9aa4', channel: 'healByMult' }]);
+      if (m?.gemDamageFactor && scoringSuits.has('gems') && res.damage > 0) jobs.push([a, { text: 'diamonds bite', color: '#7fe0f4', channel: 'gemDamageFactor' }]);
 
       const pr = a.props ?? {};
-      if (pr.oneCardFactor && n === 1) jobs.push([a, { mult: pr.oneCardFactor, color: '#ff5060', eqMul: pr.oneCardFactor }]);
-      if (pr.lowHpFactor && this.player.hp / this.player.maxHp < 0.5) jobs.push([a, { mult: 1.5, color: '#ff5060', eqMul: 1.5 }]);
+      if (pr.oneCardFactor && n === 1) jobs.push([a, { mult: pr.oneCardFactor, color: '#ff5060', eqMul: pr.oneCardFactor, channel: 'oneCardFactor' }]);
+      if (pr.lowHpFactor && this.player.hp / this.player.maxHp < 0.5) jobs.push([a, { mult: 1.5, color: '#ff5060', eqMul: 1.5, channel: 'lowHpFactor' }]);
       // Ambusher's Hourglass — handsThisFight is already incremented here.
-      if (pr.firstHandFactor && this.handsThisFight === 1) jobs.push([a, { mult: pr.firstHandFactor, color: '#d0a040', eqMul: pr.firstHandFactor }]);
+      if (pr.firstHandFactor && this.handsThisFight === 1) jobs.push([a, { mult: pr.firstHandFactor, color: '#d0a040', eqMul: pr.firstHandFactor, channel: 'firstHandFactor' }]);
       // COURT IN SESSION is deliberately ABSENT here since 0803-B: like the two
       // benches below it now resolves at the very END of the mult, so it takes
       // its bow in leftoverPhase() after the hand has finished repeating. A job
       // here as well would move the mult twice for the same held-back cards.
-      if (pr.nthHandEvery && this.handsThisFight % pr.nthHandEvery === 0) jobs.push([a, { mult: pr.nthHandFactor, color: '#60c8d8', eqMul: pr.nthHandFactor }]);
+      if (pr.nthHandEvery && this.handsThisFight % pr.nthHandEvery === 0) jobs.push([a, { mult: pr.nthHandFactor, color: '#60c8d8', eqMul: pr.nthHandFactor, channel: 'nthHandEvery' }]);
       // THE TWO BENCHES (RIGGED WHEEL · VOIDCALLER) are deliberately ABSENT
       // here. Until 0803 each fired one combined ×1.95 pulse in the cascade and
       // the arithmetic simply appeared. They now get a beat of their own before
       // the cascade — benchBeat() — where each held-back card is emphasised in
       // the fan, one at a time, showing its own ×1.25 while the mult climbs. A
       // job here as well would move the mult twice for the same cards.
-      if (pr.allIn) jobs.push([a, { mult: 3, color: '#d04870', eqMul: 3 }]);
+      if (pr.allIn) jobs.push([a, { mult: 3, color: '#d04870', eqMul: 3, channel: 'allIn' }]);
       // THE SHARPEST DAGGER: one card, five times. Same deal as the Pocketwatch
       // above — the bow is here, the ×N is repeatBeat()'s.
       if (pr.oneCardRepeat && n === 1) {
-        jobs.push([a, { text: `↻ ×${pr.oneCardRepeat}`, color: '#ff5ce1' }]);
+        jobs.push([a, { text: `↻ ×${pr.oneCardRepeat}`, color: '#ff5ce1', channel: 'oneCardRepeat' }]);
         this._repeatCause.push(a);
       }
       // THE DEAD MAN'S HAND takes two bows, because it genuinely moves both
@@ -4537,8 +5280,8 @@ export class CombatScene extends Phaser.Scene {
       // ZERO for the very hand buildScoreState saw one left on — the same
       // question asked one tick later.
       if (pr.deadMansHand && this.handsLeft === 0) {
-        jobs.push([a, { mult: pr.deadMansFactor, color: '#ff8c28', eqMul: pr.deadMansFactor }]);
-        jobs.push([a, { text: `↻ ×${pr.deadMansRepeat}`, color: '#ff8c28' }]);
+        jobs.push([a, { mult: pr.deadMansFactor, color: '#ff8c28', eqMul: pr.deadMansFactor, channel: 'deadMansFactor' }]);
+        jobs.push([a, { text: `↻ ×${pr.deadMansRepeat}`, color: '#ff8c28', channel: 'deadMansRepeat' }]);
         this._repeatCause.push(a);
       }
       // Stamp the CELL onto every job this iteration produced, so a mirrored
@@ -4572,19 +5315,90 @@ export class CombatScene extends Phaser.Scene {
     // would be the same damage claimed twice.
     if (passive?.when === 'late') jobs.push(passiveJob());
 
-    // THE ANCIENT SHIELD spends the wall on the mult. It resolves AFTER the
-    // ordered walk in scoring.js (Zeal's exact position in the pipeline), so it
-    // takes its bow here rather than in the loop above — a relic that pulsed at
-    // its own cell while multiplying after the walk would show the player a
-    // running total the arithmetic never held.
-    for (const a of this.liveArtifacts()) {
-      const m = typeof a.mods === 'function' ? a.mods(a, run) : a.mods;
-      if (!m?.shieldMult || (res.shieldMultFactor ?? 1) <= 1) continue;
-      const f = Math.round(res.shieldMultFactor * 100) / 100;
-      jobs.push([a, {
-        text: `◆ ${res.shieldMultRead}  ×${f}`, color: '#7fe0f4', eqMul: res.shieldMultFactor,
-      }]);
-      break;   // one wall, one bow: mirrors do not re-read the same shield
+    // (A `mods.shieldMult` block stood here until 2026-08-11, labelled THE
+    // ANCIENT SHIELD. It was dead: the Ancient Shield writes `shieldByMult` —
+    // which bows in the walk above — and NOTHING in the pool has ever written
+    // `shieldMult`, so `res.shieldMultFactor` is 1 on every hand the game can
+    // deal and the loop could not fire. Deleted rather than left as a comforting
+    // shape, because a dead block that LOOKS like coverage is exactly how the
+    // Solid Gold Sack went a fortnight without anyone noticing it had none.
+    // scoring.js still applies the channel; the first relic to write it will
+    // trip tests/pulses0811.test.js and get a beat designed for the number it
+    // actually moves.)
+
+    /**
+     * THE SOLID GOLD SACK — DRUSKY'S SILENT MULTIPLY (JC, 2026-08-11, verbatim:
+     * his exclusive multiplied "at the end without any obvious trigger").
+     *
+     * This is the bug that started the audit. chipMultFactor is applied at
+     * scoring.js step 8 — DEAD LAST, after the bench, after Zeal, after
+     * everything — and the cascade emitted no job for it whatsoever. A hoard of
+     * 1,000 chips turned a ×40 into a ×400 and the only thing that moved on
+     * screen was the total.
+     *
+     * IT BOWS HERE, not at the Sack's own cell, for the same reason Zeal does:
+     * it multiplies the FINISHED number. A pulse at its cell would show a
+     * running total the arithmetic never held. `eqMul` is the real factor
+     * scoring.js applied — read off res, never re-derived — so the mult side
+     * lands on exactly what the engine computed.
+     *
+     * THE HOARD IS PRINTED ALONGSIDE IT because the relic's whole personality is
+     * "how much money are you sitting on": ×10 with no explanation is a magic
+     * number, "1,000 chips ×10" is a decision the player made three shops ago.
+     *
+     * AND ONLY ONE BOW, however many Sacks resolve. collectMods SUMS the rate
+     * and scoring reads the pile ONCE, so there is exactly one ×N in the
+     * arithmetic — but every cell that contributed to that rate swells, because
+     * a mirrored Sack is half of why the number is that big. (The mult moves on
+     * the first job only; the rest are pure swells with no eq move.)
+     */
+    if ((res.chipMultFactor ?? 1) !== 1) {
+      const f = Math.round(res.chipMultFactor * 100) / 100;
+      const holders = this.liveArtifactSlots().filter(({ art }) => {
+        const m = typeof art.mods === 'function' ? art.mods(art, run) : art.mods;
+        return (m?.chipMultFactor ?? 0) > 0;
+      });
+      holders.forEach(({ art, slot }, k) => {
+        jobs.push([art, {
+          text: `${fmtNum(res.chipsRead ?? 0)} CHIPS  ×${f}`, color: '#ff5ce1', slot,
+          // ONE OWNER FOR THE ×: the first cell moves the equation, the rest
+          // only swell. Two owners would multiply the mult twice for one spend.
+          eqMul: k === 0 ? res.chipMultFactor : undefined,
+          channel: 'chipMultFactor',
+        }]);
+      });
+    }
+
+    /**
+     * SIX OF A KIND SQUARES THE FINISHED MULT (scoring.js step 8b) — the single
+     * biggest number the game can produce, and until now the relic that made it
+     * possible watched from the sidelines. eqSlam printed 'MULT SQUARED' at the
+     * impact, but THE UNDERSTUDY never swelled and the square landed inside the
+     * slam's reconciliation rather than as a beat of its own.
+     *
+     * The square is a property of the HAND, not of any one cell, so it takes a
+     * relic-less job (`a` is null) exactly the way Zeal does — and it is
+     * appended AFTER the Sack because that is the order scoring.js resolves them
+     * in: bench, then hoard, then the square over the top of both.
+     */
+    if (res.handSquared && (res.multBeforeSquare ?? 0) > 1) {
+      const square = fmtNum(Math.round(res.multBeforeSquare * 100) / 100);
+      // ATTRIBUTED TO THE RELIC THAT MADE THE HAND POSSIBLE. Six of a Kind is
+      // only reachable under ofAKindMinus1, so THE UNDERSTUDY is why the mult
+      // is about to be squared and its cell is where the eye should be. With no
+      // holder on the belt (the __hfCombat.forceSixOfKind pin, a hung relic) the
+      // beat still happens with no cell to swell — the number must never move
+      // in silence, whatever put it there.
+      const understudies = benders.ofAKindMinus1;
+      const beat = (a, slot, first) => [a, {
+        text: `SIX OF A KIND  ×${square}`, color: '#7cf9ff', slot,
+        eqMul: first ? res.multBeforeSquare : undefined, channel: 'ofAKindMinus1',
+      }];
+      if (understudies.length) {
+        understudies.forEach(({ art, slot }, k) => jobs.push(beat(art, slot, k === 0)));
+      } else {
+        jobs.push(beat(null, undefined, true));
+      }
     }
 
     // ZELUS DISCHARGES. The battery is not a relic and has no cell to swell, so
@@ -4599,7 +5413,9 @@ export class CombatScene extends Phaser.Scene {
       jobs.push([null, {
         zeal: res.zealConsumed,
         passive: passive?.when === 'zeal' ? passive : null,
-        text: `ZEAL ${res.zealConsumed}  ×${Math.round(res.zealFactor * 100) / 100}`,
+        // The SPEND is a total and is abbreviated; the ×factor beside it is a
+        // factor and is not. See zealPulse and core/passives.js for the rule.
+        text: `ZEAL ${fmtNum(res.zealConsumed)}  ×${Math.round(res.zealFactor * 100) / 100}`,
         color: COLORS.zeal, eqMul: res.zealFactor,
       }]);
     }
@@ -4608,25 +5424,28 @@ export class CombatScene extends Phaser.Scene {
     // point of the whole feature is that the row the player WATCHES climb is
     // the row that produced the number, and that is only provable if the
     // animation's own order can be read back.
+    //
+    // (The row's own shape — including `slotId`, the proof a MIRROR took the
+    // bow, and `channel`, the engine channel that paid for it — lives in
+    // logPulse, which every beat in the hand now files through.)
     this._pulseLog = [];
     jobs.forEach(([a, job], i) => {
       this.time.delayedCall(startAt + i * this.spd(195), () => {
-        this._pulseLog.push({
-          i, id: a?.id ?? null,
-          slot: job.slot ?? (a ? run.artifacts.indexOf(a) : -1),
-          add: job.eqAdd ?? job.add ?? 0, mult: job.eqMul ?? job.mult ?? 1,
-          text: job.text ?? null,
-          // THE PASSIVE'S ROW, so a verification run can prove the chip swelled
-          // on the beat the mult moved — and, just as importantly, that it did
-          // not swell on a hand the passive sat out.
-          passive: job.passive?.id ?? null,
-          passiveAmount: job.passive?.amount ?? 0,
-        });
+        // ONE OBJECT, TWO CALLS (2026-08-11). The row is filed HERE rather than
+        // being left to pulseArtifact for two reasons that both still hold: it
+        // pins the row's ordinal to the cascade's own `i`, and the ZEAL beat has
+        // no artifact at all, so nothing downstream would ever file it. The
+        // object handed to logPulse is the SAME one handed to pulseArtifact —
+        // it used to be a fresh `{...job, i}` spread — because logPulse's
+        // once-per-beat flag lives on the job, and two objects would file the
+        // row twice the moment pulseArtifact learned to log.
+        const row = { ...job, i, phase: 'cascade' };
+        this.logPulse(a, row);
         // ONE LADDER: the cascade used to restart its own ramp at 1.05 here,
         // which is what made a big hand sound like "rise, restart, rise".
         this.handTick('score_tick', { volume: 0.5 });
         if (job.passive) pulsePassive(this, job.passive.label, { color: job.passive.color });
-        if (a) this.pulseArtifact(a, job);
+        if (a) this.pulseArtifact(a, row);
         else if (job.zeal) this.zealPulse(job.zeal, res.zealFactor);
         if (job.eqAdd) this.eqAddMult(job.eqAdd);
         else if (job.eqMul) this.eqMulMult(job.eqMul);
@@ -4675,19 +5494,68 @@ export class CombatScene extends Phaser.Scene {
     return lines.join('\n');
   }
 
-  /** The shield chip over a body: hover either half of it for the rule. */
+  /**
+   * The enemy shield chip: hover either half of it for the rule, or TAP it.
+   *
+   * HOVER-ONLY BEFORE 2026-08-11, and therefore unreachable on a phone once the
+   * hold-to-hover synthesis was removed — there is no other surface anywhere in
+   * the fight that explains what a ◆ plate does. The chip is small (a 24px glyph
+   * and a numeral), but it is the only thing on screen that names the rule, so
+   * it carries its own tapInfo rather than being folded into the body's tap,
+   * which is spoken for by retargeting.
+   *
+   * The `if (TOUCH) … else …` fork is deliberately at the call site, per the
+   * note at the top of ui/choicebox.js: what happens on each build is readable
+   * where it is bound rather than hidden inside a helper.
+   */
   bindShieldChipTip(enemy) {
     for (const part of [enemy.shieldIcon, enemy.shieldText]) {
       if (!part || part.input) continue;
       part.setInteractive();
       // The chip is drawn at alpha 0 until the body actually plates itself, so
-      // the guard is what stops an invisible glyph answering a hover.
-      part.on('pointerover', () => {
-        if (!(enemy.shield > 0) || !enemy.alive) return;
-        this.showRuleTip(part.x, part.y - 22, `SHIELD  ◆ ${enemy.shield}`, this.enemyShieldRuleText());
-      });
-      part.on('pointerout', () => this.hideIntentTip());
+      // the guard is what stops an invisible glyph answering a hover — or a tap.
+      const live = () => enemy.shield > 0 && enemy.alive;
+      if (TOUCH) {
+        tapInfo(this, part, {
+          key: `eshield:${enemy.slotIndex ?? enemy.homeX}`,
+          anchor: () => ({ x: part.x, y: part.y, w: 60, h: 44 }),
+          // ONE TEXT, TWO SURFACES. Same rule the relics already follow (see
+          // the "WHAT A RELIC SAYS, WRITTEN ONCE" block below): the title and
+          // the body are the very strings the tooltip prints, so a player can
+          // never be told two different things about one plate.
+          title: () => `SHIELD  ◆ ${enemy.shield}`,
+          body: () => this.enemyShieldRuleText(),
+          accent: 0x7fe0f4,
+          depth: DEPTH.overlay + 3,
+          guard: live,
+        });
+      } else {
+        hoverInfo(part, () => {
+          if (!live()) return;
+          this.showRuleTip(part.x, part.y - 22, `SHIELD  ◆ ${enemy.shield}`, this.enemyShieldRuleText());
+        }, () => this.hideIntentTip());
+      }
     }
+  }
+
+  /**
+   * ONE TIP SLOT, ONE REGISTRATION (2026-08-11).
+   *
+   * showRuleTip, showArtifactTip and showIntentTip all build a parchment panel
+   * into `this.intentTip` and are all torn down by the single hideIntentTip, so
+   * the ui/infoPanels registration is taken HERE — the one line all three pass
+   * through — instead of three times over. Announcing a panel closes whatever
+   * else was drawn, which is the whole fix for JC's "tapping a thing opened the
+   * box AND the old tooltip".
+   *
+   * On touch none of these ever open (their binders are `hoverInfo`, which
+   * binds nothing on a finger). Registering them anyway is precisely what lets
+   * the driver ASSERT `__hfPanels.count() === 0` rather than assume it.
+   */
+  adoptIntentTip(tip, key) {
+    this.intentTip = tip;
+    this._intentTipToken = notePanelOpen('tip', key, () => this.hideIntentTip());
+    return tip;
   }
 
   /**
@@ -4713,8 +5581,7 @@ export class CombatScene extends Phaser.Scene {
       Phaser.Math.Clamp(x, w / 2 + 8, GAME_W - w / 2 - 8),
       Phaser.Math.Clamp(y - h - 10, 10, GAME_H - h - 10),
     );
-    this.intentTip = tip;
-    return tip;
+    return this.adoptIntentTip(tip, `rule:${title}`);
   }
 
   // =========================================================================
@@ -4865,7 +5732,7 @@ export class CombatScene extends Phaser.Scene {
     if (warn) tip.add(warn);
     if (order) tip.add(order);
     tip.setPosition(Math.max(w / 2 + 8, x), y - h - 40);
-    this.intentTip = tip;
+    this.adoptIntentTip(tip, `relic:${art.id}`);
   }
 
   // ---------------- Hero portrait reactions ----------------
@@ -4925,8 +5792,14 @@ export class CombatScene extends Phaser.Scene {
           && this.resourceText.setColor(PARCH.accent).setStroke(INK_DARK, 0),
       });
     }
+    // ABBREVIATED, LIKE EVERY OTHER TOTAL (JC, 2026-08-11). He ran the Infinite
+    // Heart engine on Mythril and the battery genuinely reaches e6+, at which
+    // point a raw integer is both unreadable and wider than the lane it is
+    // printed in. `spent` is a TOTAL, so it goes through fmtNum (4.2M); the
+    // percentages beside it are FACTORS and stay exact — the same distinction
+    // core/passives.js draws between fmtNum and fmtF.
     popMessage(this, ARENA_CX, 268,
-      `ZEAL SPENT: ${spent} × ${Math.round(ZEAL_DAMAGE_PCT * 100)}% = +${pct}% DAMAGE`,
+      `ZEAL SPENT: ${fmtNum(spent)} × ${Math.round(ZEAL_DAMAGE_PCT * 100)}% = +${pct}% DAMAGE`,
       { color: COLORS.zeal, size: 32 });
     burst(this, SIDEBAR_W / 2, 380, 0xffd166, 14);
   }
@@ -4934,17 +5807,28 @@ export class CombatScene extends Phaser.Scene {
   // ---------------- Artifact-facing helpers (hooks call these) ----------------
 
   /**
-   * PILGRIM'S FLASK. Healing you cannot HOLD becomes chips, 1 for 1, capped per
+   * PILGRIM'S FLASK. Overhealing grants chips at a rate of 1:1, capped per
    * FIGHT. `amount` is what was offered and `applied` is what the HP bar
-   * actually took, so the waste is simply the difference and the flask never
+   * actually took, so the overheal is simply the difference and the flask never
    * has to know where the heal came from.
    *
-   * THE ZEALOT IS OUT, and it is a deliberate ruling (it is the def's own, in
-   * artifacts.js): his overheal banks as ZEAL, which is his entire kit. It is
-   * not WASTED healing, it is his resource — and since zealCapFor took the
-   * ceiling off there is nothing left over for the flask to catch anyway. So
-   * the relic is dead weight in his hands rather than a second engine bolted
-   * onto the one he already has.
+   * ==========================================================================
+   * THE ZEALOT DOUBLE-DIPS, AND IT IS INTENDED (JC, 2026-08-11)
+   * ==========================================================================
+   * This method used to open with `if (this.chr.id === 'zealot') return 0;` and
+   * a paragraph defending it: his spill banks as ZEAL, so it is his resource
+   * rather than waste, so the flask has nothing to catch. JC has overridden the
+   * ruling and the line is gone.
+   *
+   * On Zelus one point of overheal now pays TWICE — once into the battery
+   * (scoring.js hands the whole spill to `zealGained`; that path is untouched by
+   * this file and stays untouched) and once into the flask, at the same 1:1 and
+   * under the same FLASK_CHIP_CAP as every other hero. Nothing about his kit is
+   * scaled down to pay for it: the relic is simply a relic, and a rare that
+   * silently does nothing in one hero's hands is a trap, not a design.
+   *
+   * The old rationale is deleted rather than argued down. A rationale that
+   * outlives its code reads as the current ruling to whoever finds it next.
    *
    * @returns {number} chips actually paid.
    */
@@ -4952,14 +5836,16 @@ export class CombatScene extends Phaser.Scene {
     if (this.prop('overhealChips') <= 0) return 0;
     const waste = Math.max(0, Math.round((amount ?? 0) - (applied ?? 0)));
     if (waste <= 0) return 0;
-    if (this.chr.id === 'zealot') return 0;
     let paid = 0;
     // PER HOLDER, per fight: a mirrored flask catches its own twenty, banks its
     // own ledger and its tooltip reads its own number, exactly like every other
     // capped scaler in the pool.
     for (const a of this.propHolders('overhealChips')) {
-      const room = Math.max(0, (a.props.overhealChipCap ?? 0) - (a.state.fight ?? 0));
-      const take = Math.min(room, waste * a.props.overhealChips);
+      // The cap arithmetic itself is core/artifacts.flaskTake — pure, so the
+      // unit tests can prove "twenty per copy per fight" against a mirrored
+      // pair without a renderer. What is left here is the theatre: who holds a
+      // flask, and paying the chips through the one gainChips door.
+      const take = flaskTake(a, waste);
       if (take <= 0) continue;
       a.state.fight = (a.state.fight ?? 0) + take;
       const got = this.gainChips(take, 'FLASK');
@@ -5105,6 +5991,12 @@ export class CombatScene extends Phaser.Scene {
    * Where Zelus's battery stops: NOWHERE, since 2026-08-04. The ceiling came
    * off for everyone (JC: "we change zeal to be uncapped all the time"), so
    * this simply relays scoring's one authority.
+   *
+   * NOTHING PAINTS IT ANY MORE (2026-08-11). The sidebar's readout dropped its
+   * cap clause, so this survives as the DRIVER's question — __hfCombat.handMath
+   * reports it as `zealCapNow` — and as the single seam a reintroduced ceiling
+   * would come back through. Deleting it would only move `zealCapFor` into the
+   * hook, which is the indirection this method already is.
    */
   zealCap() { return zealCapFor(); }
 
@@ -6744,6 +7636,23 @@ export class CombatScene extends Phaser.Scene {
   }
 
   /**
+   * THE SAME BELT, WITH EVERY RESOLUTION'S CELL ATTACHED (2026-08-11).
+   *
+   * effectiveArtifacts() answers WHAT resolved and throws away WHERE, which is
+   * the single line that made a mirror invisible: every pulse path that read it
+   * ended up calling run.artifacts.indexOf(art) and landing on the SOURCE's
+   * first cell, so a Forgery copying the Solid Gold Sack swelled the Sack —
+   * twice — and the mirror itself never moved. Everything that pulses reads
+   * THIS now, and carries the slot into the job.
+   *
+   * @returns {{art: object, slot: number}[]}
+   */
+  liveArtifactSlots() {
+    if (!this.disabledRelics?.size) return effectiveArtifactSlots();
+    return effectiveArtifactSlots({ ...run, artifacts: hangArtifacts(run.artifacts, this.disabledRelics) });
+  }
+
+  /**
    * ...and the same for the two readers that cannot take a list: collectMods()
    * and collectModList() read the live `run` by design. The swap is SYNCHRONOUS
    * and restored in a finally, so nothing — not a save, not a tween, not
@@ -8102,9 +9011,25 @@ export class CombatScene extends Phaser.Scene {
     enemy.sprite.setFlipX(!!def.flipX);
     enemy.sprite.setInteractive({ useHandCursor: true });
     tapBind(this, enemy.sprite, () => this.setTarget(index));
+    // ------------------------------------------------------------------
+    // THE BODY: POLISH ON A RAW HOVER, THE TIP THROUGH `hoverInfo`.
+    //
+    // Two things used to ride one `pointerover` here and they have opposite
+    // fates on a phone (2026-08-11). The TINT and the target indicators are
+    // pure visual polish — on a finger they read as press feedback, they cost
+    // nothing and they describe nothing — so they stay on the raw event. The
+    // INTENT PANEL is information, so it goes through `hoverInfo`, which binds
+    // nothing on touch.
+    //
+    // AND THE BODY GETS NO tapInfo, deliberately: its tap is already spoken
+    // for by `tapBind` above (tapping a body RETARGETS, which is the one
+    // gesture a multi-body fight cannot do without). The telegraph over its
+    // head carries the tap-to-read instead — see enemy.intentHit below — which
+    // is also the surface a player actually points at when the question is
+    // "what is about to hit me".
+    // ------------------------------------------------------------------
     enemy.sprite.on('pointerover', () => {
       if (enemy.alive && index !== this.targetIndex) enemy.sprite.setTint(0xffe2a8);
-      if (enemy.alive) this.showIntentTip(enemy);
       // The target indicators GHOST until a body is hovered, then bolden
       // (JC, 2026-08-04): full ink while you are deciding, out of the way
       // the rest of the time.
@@ -8113,10 +9038,12 @@ export class CombatScene extends Phaser.Scene {
     });
     enemy.sprite.on('pointerout', () => {
       if (enemy.alive) enemy.sprite.clearTint();
-      this.hideIntentTip();
       if (this._hoverEnemy === enemy) this._hoverEnemy = null;
       this.syncTargetIndicators();
     });
+    hoverInfo(enemy.sprite,
+      () => { if (enemy.alive) this.showIntentTip(enemy); },
+      () => this.hideIntentTip());
 
     // Info stack rides high above the creature so nothing covers the art.
     // Every offset and every size comes out of ENEMY_HUD; the phone's rows are
@@ -8222,9 +9149,47 @@ export class CombatScene extends Phaser.Scene {
     if (def.startShield > 0) {
       addEnemyShield(enemy, shieldGrantFor(enemy, def.startShield));
     }
+    // ------------------------------------------------------------------
+    // THE INTENT ICON — THE MOST IMPORTANT READ IN A FIGHT.
+    //
+    // "What is about to hit me" is the question every turn of this game is an
+    // answer to, and until 2026-08-11 the only way to ask it was to HOVER: this
+    // hit box and the body under it were both hover-only, and the body's tap was
+    // already retargeting. So on a phone, once hold-to-hover was removed (see
+    // ui/touch.js), the telegraph became a row of icons with numbers beside them
+    // and no way at all to find out what the icons MEAN. That is not a port.
+    //
+    // So the icon row carries the tapInfo. It is the natural target — it is
+    // 380x88 of hit box on touch (INTENT_ART), it is what a player points at,
+    // and it is the one surface in the arena whose tap was not already spoken
+    // for. Both surfaces print `intentTipLines`, so the phone's panel and the
+    // desktop's tooltip say exactly the same words about the same turn.
+    //
+    // The spec's fields are FUNCTIONS: intents advance, signatures count down
+    // and AS YOU DID re-prices itself every hand, so the panel is built from the
+    // fight as it stands when the finger lands, not as it stood at spawn.
+    // ------------------------------------------------------------------
     enemy.intentHit.setInteractive({ useHandCursor: true });
-    enemy.intentHit.on('pointerover', () => this.showIntentTip(enemy));
-    enemy.intentHit.on('pointerout', () => this.hideIntentTip());
+    if (TOUCH) {
+      tapInfo(this, enemy.intentHit, {
+        key: `intent:${enemy.slotIndex}`,
+        anchor: () => ({
+          x: enemy.homeX, y: enemy.intentY ?? intentY,
+          w: INTENT_ART.hitW, h: INTENT_ART.hitH,
+        }),
+        title: () => this.intentTipLines(enemy).title,
+        body: () => this.intentTipLines(enemy).body,
+        accent: 0xff9a4a,
+        depth: DEPTH.overlay + 3,
+        // A corpse has no intent. The row is emptied on death, so without this
+        // the tap would open a panel with a title and nothing under it.
+        guard: () => !!enemy.alive,
+      });
+    } else {
+      hoverInfo(enemy.intentHit,
+        () => this.showIntentTip(enemy),
+        () => this.hideIntentTip());
+    }
 
     // STATUS CHIPS ON THE HEALTH BAR (JC, 2026-08-04: "poison needs a visual
     // indicator on the enemies... near their health pool"). These used to sit
@@ -10756,7 +11721,18 @@ export class CombatScene extends Phaser.Scene {
           color: '#e8dcc0', hold: this.spd(1100),
         });
         this.eqMulMult(job.factor);
-        this.pulseArtifact(job.art, { mult: job.factor, color: '#ff8c28' });
+        // EVERY CELL THAT TESTIFIED, and a ledger row for each (2026-08-11).
+        // This beat used to swell one relic through indexOf and write NOTHING
+        // to _pulseLog, so a driver could watch the whole cascade fire and had
+        // no way to prove Court in Session had ever taken its bow. The explicit
+        // logPulse that used to follow is gone: `pulseArtifact` is the ledger's
+        // writer now, and a second call on the same job object is a no-op.
+        for (const { art, slot } of job.holders ?? []) {
+          this.pulseArtifact(art, {
+            mult: job.factor, color: '#ff8c28', slot,
+            channel: 'leftoverPct', phase: 'leftover',
+          });
+        }
       });
       ms += this.spd(340);
     }
@@ -10776,7 +11752,24 @@ export class CombatScene extends Phaser.Scene {
       });
     });
 
-    cast.forEach(({ cs, art, factor, color, tint }, i) => {
+    /**
+     * THE LATENT REPEATER TAKES ITS BOW HERE (JC, 2026-08-11) — once, at the
+     * head of the beat it doubled, rather than once per trigger. The cast below
+     * ALREADY contains the extra entries it bought (buildScoreState pushed one
+     * per trigger), so a pulse per entry would credit the same doubling as many
+     * times as there are held-back cards. One bow, naming the multiplier, in
+     * front of the run of ×1.25s it is responsible for.
+     */
+    for (const { art, slot, factor } of this._benchRepeatCause ?? []) {
+      this.time.delayedCall(startAt, () => {
+        this.pulseArtifact(art, {
+          text: `LEFTOVERS ×${factor}`, color: '#7fe0d0', slot,
+          channel: 'benchRepeat', phase: 'bench',
+        });
+      });
+    }
+
+    cast.forEach(({ cs, art, slot, factor, color, tint }, i) => {
       this.time.delayedCall(startAt + starts[i], () => {
         if (!cs?.active) return;
         this._benchFired = (this._benchFired ?? 0) + 1;
@@ -10810,7 +11803,14 @@ export class CombatScene extends Phaser.Scene {
           { color, size: 34, rise: 52, hold: 40 });
         // ...and the mult climbs by exactly this one card's worth, now.
         this.eqMulMult(factor);
-        this.pulseArtifact(art, { mult: factor, color });
+        // The bench relic swells at ITS OWN cell — a mirrored Rigged Wheel pays
+        // the bench twice and now lights both sockets — and files a ledger row,
+        // so `benchFactor` is finally provable from order().pulses instead of
+        // being the one ×N in the hand that left no trace at all.
+        this.pulseArtifact(art, {
+          mult: factor, color, slot, phase: 'bench',
+          channel: art?.props?.etherealBenchFactor ? 'etherealBenchFactor' : 'riggedWheelFactor',
+        });
       });
     });
     return totalMs;
@@ -11474,7 +12474,14 @@ export class CombatScene extends Phaser.Scene {
       if (plate > 0) {
         const plated = this.addShield(plate);
         shieldThisHand += plated;
-        if (plated > 0) popNumber(this, 70, 500, `◆+${plated}`, { color: '#ffd23e', size: 26, delay: 200 });
+        if (plated > 0) {
+          popNumber(this, 70, 500, `◆+${plated}`, { color: '#ffd23e', size: 26, delay: 200 });
+          // ...and the HEART swells for it (2026-08-11). It turns every point of
+          // card value into armour, which is as big a number as most relics on
+          // the mat move, and the plate used to appear beside the hero with
+          // nothing on the belt to explain it.
+          this.pulseByProp('aurum', `◆ +${plated}`, '#ffd23e');
+        }
       }
     }
     if (res.heal) { sfx(this, 'heal', { volume: 0.75 }); this.heroHeal(); }
@@ -11597,6 +12604,9 @@ export class CombatScene extends Phaser.Scene {
             sfx(this, 'hit_big', { volume: 0.9 });
             this.damageEnemy(t2, Math.round(res.damage * brittleMultiplier(t2)), '#88b0c8', 60);
             popMessage(this, ARENA_CX, 300, 'THE ENGINE TURNS', { color: '#88b0c8', size: 34 });
+            // The whole hand's damage, again — and the relic that bought it now
+            // swells for it like everything else (2026-08-11).
+            this.pulseByProp('firstHandRepeat', 'THE ENGINE TURNS', '#88b0c8');
           }
         });
       }
@@ -11634,15 +12644,15 @@ export class CombatScene extends Phaser.Scene {
     // picked at random, is burned out of the RUN DECK — not the discard, not
     // for this fight: gone. That is the price of the ×3 already banked.
     const burned = new Set();
-    const visors = this.propHolders('allIn');
+    const visors = this.propHolderSlots('allIn');
     if (visors.length && played.length) {
       const pool = [...played];
-      for (const a of visors) {
+      for (const { art: a, slot } of visors) {
         if (!pool.length) break;
         const victim = Phaser.Utils.Array.RemoveRandomElement(pool);
         burned.add(victim);
         this.burnCardForever(victim.card);
-        this.pulseArtifact(a, { text: 'ALL IN', color: '#d04870' });
+        this.pulseArtifact(a, { text: 'ALL IN', color: '#d04870', slot });
         this.time.delayedCall(this.spd(420), () => this.shatterCard(victim));
         this.gainChips(30, 'ALL IN', { quiet: true });
       }
@@ -11660,7 +12670,7 @@ export class CombatScene extends Phaser.Scene {
     // stays, and the relic takes the ⊘ bow for it.
     const vanished = new Set();
     if (res.etherealIds?.length) {
-      const voidcallers = this.propHolders('voidcaller');
+      const voidcallers = this.propHolderSlots('voidcaller');
       let saved = 0;
       for (const id of res.etherealIds) {
         const cs = played.find(c => c.card.id === id);
@@ -11679,7 +12689,7 @@ export class CombatScene extends Phaser.Scene {
         if (!doomed) continue;
         if (voidcallers.length) {
           saved += 1;
-          for (const a of voidcallers) this.pulseArtifact(a, { text: '⊘ VOID', color: '#7fe0d0' });
+          for (const { art: a, slot } of voidcallers) this.pulseArtifact(a, { text: '⊘ VOID', color: '#7fe0d0', slot });
           continue;
         }
         vanished.add(cs);
@@ -12176,6 +13186,9 @@ export class CombatScene extends Phaser.Scene {
       if (enemy.hp <= enemy.maxHp * threshold) {
         enemy.hp = 0;
         popMessage(this, enemy.homeX, enemy.homeY - 180, 'EXECUTED!', { color: '#ff5a5a', size: 40 });
+        // The Seal deleted a health bar. That is the largest number a relic can
+        // change, and it took no bow at all until 2026-08-11.
+        this.pulseByProp('execute', 'EXECUTED', '#ff5a5a');
       }
     }
     if (enemy.hp <= 0 && enemy.alive) {
@@ -12293,6 +13306,8 @@ export class CombatScene extends Phaser.Scene {
         sfx(this, 'heal', { volume: 1 });
         flashVignette(this, 0xf0f0f0, 0.7);
         popNumber(this, SIDEBAR_W / 2, 380, `SECOND WIND!  +${this.player.hp} HP`, { color: '#ffffff', size: 44 });
+        // ...and the relic that refused the death swells for it (2026-08-11).
+        this.pulseByProp('secondWind', `+${this.player.hp} HP`, '#ffffff');
       }
     }
     shake(this, 0.006, 180);
@@ -12541,6 +13556,11 @@ export class CombatScene extends Phaser.Scene {
     else if (this.node.type !== 'boss') sfxCapped(this, 'general_victory', { volume: 0.5, rate: 1.12 }, 1600);
     this.artHook('fightEnd', this.node);
     this.refreshAll();
+    // THE MAT SETTLES BEFORE THE REWARDS LAND ON TOP OF IT. Every reward path
+    // from here opens a full-screen overlay under a cursor that is not going to
+    // move, and a cell that was being hovered when the last blow landed would
+    // otherwise stay 15% swollen behind it — see settleArtifactIcons.
+    this.settleArtifactIcons();
     // The victory sweep. UNTOUCHED asks whether a single point of HP was ever
     // lost, whatever took it; everything else on the shelf that reads plain run
     // state (a full belt, a full row, a hatched egg) rides along with it.
@@ -13123,6 +14143,9 @@ export class CombatScene extends Phaser.Scene {
     // ------------------------------------------------------------------
     if (this._endShown) return;
     this._endShown = true;
+    // Same reason as fightWon's: the veil below goes up under a stationary
+    // cursor, so anything the cursor was hovering never hears pointerout.
+    this.settleArtifactIcons();
     if (this.heartbeat) { this.heartbeat.stop(); this.heartbeat.destroy(); this.heartbeat = null; }
     run.active = false;
     // THE RUN IS OVER, whichever way it ended — HP death, the clock, a seal
@@ -13363,8 +14386,14 @@ export class CombatScene extends Phaser.Scene {
       }
       const hit = this.add.circle(x, y, r, 0xffffff, 0.001).setInteractive({ useHandCursor: true });
       this.potionBeltG.add(hit);
-      hit.on('pointerover', () => { sfx(this, 'menu_select', { volume: 0.2, jitter: 0.06 }); this.showPotionTip(x, y, pot); });
-      hit.on('pointerout', () => this.hidePotionTip());
+      // The little select tick is polish (and a free bit of press feedback on a
+      // finger), so it stays raw; the bottle's DESCRIPTION rides `hoverInfo` and
+      // is therefore desktop-only, because on touch `confirmPotionTap` below
+      // already opens a box printing the same name and the same rules text.
+      // Both used to fire from one `pointerover`, and on a phone that meant the
+      // tooltip and the confirm box landed on top of each other.
+      hit.on('pointerover', () => sfx(this, 'menu_select', { volume: 0.2, jitter: 0.06 }));
+      hoverInfo(hit, () => this.showPotionTip(x, y, pot), () => this.hidePotionTip());
       // TWO STEPS ON TOUCH (JC, 2026-08-04: "if I want to learn about my
       // potion but I accidentally tap too short, boom its gone into the
       // void"). Mobile: the first tap opens the description with a USE plate;
@@ -13394,9 +14423,18 @@ export class CombatScene extends Phaser.Scene {
       wordWrap: { width: w - 40 }, align: 'center',
     }).setOrigin(0.5, 0));
     this.potTip = tip;
+    // The bottle tip has its own slot too (`this.potTip`), so it announces
+    // itself in its own right — see ui/infoPanels.js. On touch it never opens:
+    // its binder is `hoverInfo` and the bottle's tap goes to confirmPotionTap's
+    // box instead. Registering it is what makes "count === 0" an assertion.
+    this._potTipToken = notePanelOpen('tip', `potion:${pot.id}`, () => this.hidePotionTip());
   }
 
-  hidePotionTip() { if (this.potTip) { this.potTip.destroy(true); this.potTip = null; } }
+  hidePotionTip() {
+    if (this.potTip) { this.potTip.destroy(true); this.potTip = null; }
+    notePanelClosed(this._potTipToken);
+    this._potTipToken = null;
+  }
 
   /**
    * THE POTION MAT'S FOOTPRINT AS THE REST OF THE ARENA SEES IT.
@@ -13408,9 +14446,18 @@ export class CombatScene extends Phaser.Scene {
    * that rots in silence.
    *
    *   blockLeft / blockBottom  the leather plus the air a chip needs beside it.
-   *     The -16 / +24 are not decoration: on the DESKTOP mat (cx 1751, w 290,
-   *     cy 136) they reproduce the shipped pair EXACTLY — 1606-16 = 1590 and
-   *     186+24 = 210 — so this rewrite cannot move a single desktop chip.
+   *     The -16 / +24 are not decoration: they were chosen because on the
+   *     desktop mat as it stood in 2026-08-10 (cx 1751, w 290, cy 136) they
+   *     reproduced the two literals they replaced EXACTLY — 1606-16 = 1590 and
+   *     186+24 = 210 — so that rewrite could not move a single desktop chip.
+   *     The mat itself then moved 20px DOWN on 2026-08-11 (see POT_MAT: desktop
+   *     finally joined the cog chain, because its hand-measured cy put its
+   *     brass label 2px INSIDE the gear), so blockBottom is 230 there now. That
+   *     is the point of deriving it: the chip follows the leather instead of
+   *     agreeing with a mat that has moved out from under it. The only visible
+   *     consequence is that a right-hand enemy whose health bar sits between
+   *     y 210 and 230 now mirrors its shield chip to the far side of the bar,
+   *     which is correct — the mat really is over it.
    *   labelTop  the brass 'POTIONS' band above the leather, which is part of
    *     the mat as far as anything trying to clear it is concerned.
    */
@@ -14068,13 +15115,28 @@ export class CombatScene extends Phaser.Scene {
     }
   }
 
-  showIntentTip(enemy) {
-    this.hideIntentTip();
+  /**
+   * ===========================================================================
+   * WHAT AN INTENT SAYS, WRITTEN ONCE (2026-08-11)
+   * ===========================================================================
+   * Two surfaces print "what is about to hit me" now — the desktop hover panel
+   * (showIntentTip) and the TOUCH build's tap panel (the tapInfo on the intent
+   * icon, see makeEnemy) — and a player who taps a telegraph on a phone and
+   * hovers the same one on a desktop must not be told two different things. So
+   * the title and the body are built HERE and both surfaces read them, exactly
+   * as this file already does for relics (see "WHAT A RELIC SAYS, WRITTEN ONCE"
+   * and artifactBodyText). Adding a line is one edit, in one place.
+   *
+   * It is a live read, not a snapshot: an intent advances, a signature counts
+   * down and AS YOU DID re-prices itself against the last hand played, so the
+   * tap panel's spec passes these as FUNCTIONS and gets the current answer.
+   */
+  intentTipLines(enemy) {
     const intent = currentIntent(enemy);
     const sig = this.signature(enemy);
     // THE SIGNATURE COMES FIRST. It is a passive — it never appears in the
     // effect list — so without this line the one rule that shapes the whole
-    // fight would be the only thing the intent hover did not explain.
+    // fight would be the only thing the intent panel did not explain.
     // AS YOU DID, PRICED FOR THIS TICK (2026-08-10). describeEffect is pure and
     // knows nothing about the fight, so the general sentence ("bigger hands hit
     // back harder") comes from there and the ACTUAL NUMBER — the answer to the
@@ -14088,12 +15150,20 @@ export class CombatScene extends Phaser.Scene {
         ? `${line}\n    you last played a ${mirror.name}: it answers for ${mirror.damage}`
         : `${line}\n    you have played nothing yet: it has nothing to answer`;
     };
-    const lines = [
-      ...(sig ? [`◆  ${sig.rule}`, ''] : []),
-      ...intent.effects.map(priced),
-    ].join('\n');
+    return {
+      title: sig ? `${intent.label}   (${sig.name})` : intent.label,
+      body: [
+        ...(sig ? [`◆  ${sig.rule}`, ''] : []),
+        ...intent.effects.map(priced),
+      ].join('\n'),
+    };
+  }
+
+  showIntentTip(enemy) {
+    this.hideIntentTip();
+    const { title: titleText, body: lines } = this.intentTipLines(enemy);
     const tip = this.add.container(0, 0).setDepth(DEPTH.overlay + 3);
-    const title = this.add.text(0, 0, sig ? `${intent.label}   (${sig.name})` : intent.label, {
+    const title = this.add.text(0, 0, titleText, {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '22px', color: PARCH.text,
     }).setOrigin(0.5, 0);
     const body = this.add.text(0, 30, lines, {
@@ -14113,11 +15183,16 @@ export class CombatScene extends Phaser.Scene {
       ? (enemy.intentY ?? 160) + 42
       : Math.max(14, (enemy.uiName?.y ?? 120) - h - 46);
     tip.setPosition(tx, ty);
-    this.intentTip = tip;
+    this.adoptIntentTip(tip, `intent:${enemy.def?.id ?? '?'}`);
   }
 
   hideIntentTip() {
     if (this.intentTip) { this.intentTip.destroy(true); this.intentTip = null; }
+    // ...and it stops counting as a drawn panel. Idempotent, and safe for a
+    // stale token — see ui/infoPanels.notePanelClosed. This must NEVER call
+    // back into notePanelOpen: the registry invokes this as a close callback.
+    notePanelClosed(this._intentTipToken);
+    this._intentTipToken = null;
   }
 
   /**
@@ -14515,9 +15590,19 @@ export class CombatScene extends Phaser.Scene {
     tip.add([parts.shadow, parts.panel, parts.line, title, body]);
     tip.setPosition(Math.max(w / 2 + 10, en.x), 500 - h - 34);
     this.pstatTip = tip;
+    // ITS OWN SLOT, ITS OWN TOKEN. The debuff row is the one tooltip in this
+    // scene that does NOT share `this.intentTip`, so it registers separately —
+    // and it has to register at all for the same reason the others do: it is
+    // the count, not the absence of a call site, that proves the one-panel
+    // invariant on touch. See ui/infoPanels.js.
+    this._pstatTipToken = notePanelOpen('tip', `pstat:${en.title}`, () => this.hidePstatTip());
   }
 
-  hidePstatTip() { if (this.pstatTip) { this.pstatTip.destroy(true); this.pstatTip = null; } }
+  hidePstatTip() {
+    if (this.pstatTip) { this.pstatTip.destroy(true); this.pstatTip = null; }
+    notePanelClosed(this._pstatTipToken);
+    this._pstatTipToken = null;
+  }
 
   refreshAll() {
     const p = this.player;
@@ -14531,14 +15616,40 @@ export class CombatScene extends Phaser.Scene {
     this.hpBarFill.setFillStyle(hpFrac < 0.3 ? 0xd82838 : hpFrac < 0.5 ? 0xe8a03c : COLORS.hp);
     this.hpText.setText(`${p.hp} / ${p.maxHp}`);
     this.shieldText.setText(`${p.shield}`);
-    // THE INFINITE HEART's uncap is the whole reason to want the relic, so the
-    // readout says so: 'ZEAL 84 / ∞' instead of a number nobody can size.
-    // ...and the test is isInfinite(), not `=== Infinity`: zealCapFor answers
-    // INFINITY_CAP (1e30) since 0810, so an identity check against Infinity is
-    // never true and the sidebar printed the literal 'ZEAL 84 / 1e+30'.
-    const zCap = this.chr.id === 'zealot' ? this.zealCap() : ZEAL_CAP;
-    this.resourceText.setText(this.chr.id === 'zealot'
-      ? `ZEAL ${p.zeal} / ${isInfinite(zCap) ? '∞' : zCap}` : '');
+    // =====================================================================
+    // 'ZEAL 84'. NO CAP CLAUSE (JC, 2026-08-11)
+    // =====================================================================
+    // This line has printed a denominator for three different reasons and been
+    // wrong for two of them. It was 'ZEAL 84 / 40' while a ceiling existed; the
+    // 0804 uncap made the ceiling everyone's baseline and it became
+    // 'ZEAL 84 / Infinity'; the 0810 pass swapped Infinity for INFINITY_CAP to
+    // keep a non-finite number off `res.zealCap` and the sidebar started
+    // printing the literal 'ZEAL 84 / 1e+30'; the ship gate turned THAT into
+    // 'ZEAL 84 / ∞'. JC's ruling ends the chain: DROP THE CLAUSE. There is no
+    // need to advertise that the battery is unbounded — an infinity sign as a
+    // denominator is a number the player is invited to size themselves against
+    // and it sizes against nothing.
+    //
+    // AND IT IS UNCONDITIONAL, because a finite cap is not reachable. This was
+    // checked rather than assumed: core/scoring.zealCapFor has no branches at
+    // all — `return INFINITY_CAP;` on every call, ignoring its own `_mods`
+    // argument — and the one lever that used to change it (mods.zealUncap, THE
+    // INFINITE HEART's old sale) has been disconnected since 2026-08-04 and is
+    // documented RETIRED at its declaration. No mode, relic, difficulty or
+    // endless lap can produce a number here, so there is no `isInfinite()` fork
+    // to keep: a branch whose other arm cannot run is a comment pretending to
+    // be code. If a ceiling is ever reintroduced it belongs in zealCapFor, and
+    // this is where the '/ cap' half comes back.
+    //
+    // ...AND IT IS ABBREVIATED (JC, 2026-08-11). He ran the Infinite Heart to
+    // its logical end on Mythril: with the cap gone the battery really does
+    // reach e6 and beyond, and `ZEAL 4200000` is both unreadable and wider than
+    // the 420px sidebar lane it shares with the shield readout. It goes through
+    // the game's ONE number formatter — core/fmt.fmtNum, the same k/M/B/e ladder
+    // the damage totals, the chip counts and the passive chip use — so the
+    // sidebar cannot invent a second way of saying a big number. `p.zeal` is a
+    // TOTAL; factors elsewhere in this file keep their exact ×N.
+    this.resourceText.setText(this.chr.id === 'zealot' ? `ZEAL ${fmtNum(p.zeal)}` : '');
     const free = this.prop('freeDiscards') > 0;
     this.discardText.setText(free ? 'Discards: ∞' : `Discards: ${this.discardsLeft}`);
     this.deckText.setText(`Deck: ${this.deck.length}`);
@@ -14625,8 +15736,30 @@ export class CombatScene extends Phaser.Scene {
         // generous invisible hit box that owns the icon AND its counter.
         const hit = this.add.rectangle(en.x + en.gap / 2 - 12, 500, en.gap, 52, 0x000000, 0)
           .setInteractive({ useHandCursor: true });
-        hit.on('pointerover', () => this.showPstatTip(en));
-        hit.on('pointerout', () => this.hidePstatTip());
+        // WHAT IS WRONG WITH ME, ON A PHONE (2026-08-11). This row was the other
+        // hover-only surface with no second path: a strip of sub-30px pips that
+        // named nothing, in a HUD where BLINDED, CONDEMNED, HANGED and a suit
+        // seal can all be live at once. `pstatEntries` already yields exactly
+        // the spec a panel needs — {title, desc, accent, x, gap} — so the tap
+        // panel and the hover tooltip print the same two strings by
+        // construction, from the same entry object.
+        if (TOUCH) {
+          tapInfo(this, hit, {
+            key: `pstat:${en.key}:${en.title}`,
+            anchor: { x: en.x + en.gap / 2 - 12, y: 500, w: en.gap, h: 52 },
+            title: en.title,
+            body: en.desc,
+            accent: en.accent,
+            depth: DEPTH.overlay + 2,
+            // refreshAll rebuilds this whole row on every damage number, and a
+            // panel still describing a debuff that just wore off is exactly the
+            // "told two different things" failure. The hit rect dies with the
+            // row, and choicebox takes the panel down with its owner.
+            owner: hit,
+          });
+        } else {
+          hoverInfo(hit, () => this.showPstatTip(en), () => this.hidePstatTip());
+        }
         this.pstatUI.add(hit);
       }
     }

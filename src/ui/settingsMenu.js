@@ -1,4 +1,4 @@
-import { GAME_W, GAME_H, DEPTH, PARCH, MOBILE, SAFE } from '../config.js';
+import { GAME_W, GAME_H, DEPTH, PARCH, MOBILE, SAFE, clearsCorners } from '../config.js';
 import { tapBind } from './touch.js';
 import { settings, saveSettings, DEV_SLIDER_STEPS, settingsPanelHeight } from '../core/settings.js';
 import { refreshMusicVolume } from '../core/music.js';
@@ -52,6 +52,53 @@ function stepperBtn(scene, ov, bx, cy, glyph, onTap, { d = 44, fs = 28 } = {}) {
 }
 
 /**
+ * ===========================================================================
+ * THE GEAR HAS ONE HOME AND ONE SIZE (JC, 2026-08-11: "the settings cog
+ * sometimes overlaps with main menu elements")
+ * ===========================================================================
+ * FOUR scenes hang a gear, and until this wave they hung it in four different
+ * places: `GAME_W - 140` from this file's own defaults, `GAME_W - 144` from
+ * CombatScene, `GAME_W - 148` from MapScene, at y 66 or y 78 depending on who
+ * you asked. Three of those were somebody hand-nudging ONE control against ONE
+ * neighbour and the fourth was the default nobody went back to update — so
+ * "move the gear" was a four-file edit and "is anything standing on the gear"
+ * had four different answers, which is precisely how CharacterSelect ended up
+ * printing SKINS across the top 55% of its face on every touch build.
+ *
+ * WORSE, THE SIZE WAS A LIE THAT THREE COMMENTS REPEATED. CombatScene declared
+ * `COG.size = 66`, derived the potion mat's ceiling from it, and stated in
+ * prose that "there is no size parameter to pass" — while `addSettingsButton`
+ * below has drawn `MOBILE ? 76 : 44` since the day the phone build landed AND
+ * has taken a `size` option the whole time. Every clearance computed off 66 was
+ * 10px optimistic against a gear that was really 76.
+ *
+ * So both numbers live HERE and are exported. A scene that wants the gear
+ * somewhere else DERIVES from this pair rather than retyping it, and the corner
+ * audit, the mat that hangs under it and the driver hooks all read the same
+ * two numbers as the thing that actually draws.
+ *
+ * WHERE IT LANDS ON TOUCH, measured rather than eyeballed: 48px in from the
+ * safe frame's right edge and 54px down from its top puts a 76px square at
+ * [GAME_W-182 .. GAME_W-106] x [40 .. 116] — identical on the 2340 phone and
+ * the 1920 tablet, because both terms are GAME_W-relative. The test that
+ * matters is the CORNER ARC (r=150, centred GAME_W-150,150), because a
+ * corner-pinned icon lives on the diagonal where the glass bite is deepest:
+ * the box's worst corner is (GAME_W-106, 40), 118px from that centre against a
+ * 150px radius. 32px of margin — it was 0.7px while the hover tween had the
+ * gear rotated 30 degrees, which is why that tween is now desktop-only.
+ */
+export const COG_SIZE = MOBILE ? 76 : 44;
+
+/**
+ * The gear's canonical centre and nominal square. Desktop's pair is
+ * byte-for-byte the corner every desktop build has drawn (SAFE is {0,0} there),
+ * so flipping every call site onto this constant cannot move that build.
+ */
+export const COG_HOME = MOBILE
+  ? { x: GAME_W - SAFE.x - 48, y: SAFE.y + 54, size: COG_SIZE }
+  : { x: GAME_W - 44, y: 42, size: COG_SIZE };
+
+/**
  * Small gear button for any scene's corner.
  *
  * `depth` matters more than it looks (JC, 2026-08-04: "settings are not
@@ -60,37 +107,205 @@ function stepperBtn(scene, ov, bx, cy, glyph, onTap, { d = 44, fs = 28 } = {}) {
  * click-swallowing dimmers, and a gear at overlay-1 sat UNDER every one of
  * them — present, visible-ish, and unclickable. MapScene passes a depth above
  * its whole overlay stack so the gear stays live in every room.
- */
-/**
- * THE GEAR, AND THE CORNER IT WAS LOSING (JC, 2026-08-10, on an iPhone as a
- * home-screen app: "the settings cog is basically clipped").
  *
- * It was not the EDGE that ate it — the potion mat sits 9pt from the same glass
- * and reads fine. It was the CORNER. A phone's corners are cut by a ~55pt radius
- * and the cut bites hardest on the diagonal, which is the one direction a
- * corner-pinned icon lives in. So the default home is now pulled in on BOTH axes
- * by config's SAFE frame — 96 game px across, 24 down, which puts the whole
- * icon comfortably inside the arc (verified by config.clearsCorners, which the
- * mobile driver asserts on this button by name).
- *
- * On desktop SAFE is {0,0} and this is the coordinate it has always been.
- *
- * `size` is a parameter now rather than a ternary because the two scenes that
+ * `size` has always been a parameter and is still one, because the scenes that
  * hang a gear have different neighbours: combat's shares the top-right strip
- * with the potion mat, the map's has the whole corner to itself.
+ * with the potion mat, the map's has the whole corner to itself. It simply
+ * defaults to the exported truth now instead of to a private ternary.
  */
-export function addSettingsButton(scene, x = GAME_W - 44 - SAFE.x, y = 42 + SAFE.y,
-  depth = DEPTH.overlay - 1, { size = MOBILE ? 76 : 44 } = {}) {
+export function addSettingsButton(scene, x = COG_HOME.x, y = COG_HOME.y,
+  depth = DEPTH.overlay - 1, { size = COG_HOME.size } = {}) {
   const btn = scene.add.image(x, y, 'icon_setting')
     .setDepth(depth).setInteractive({ useHandCursor: true }).setAlpha(0.85);
   btn.setScale(size / Math.max(btn.width, btn.height));
   btn.setData('hfLabel', 'SETTINGS');
-  btn.on('pointerover', () => scene.tweens.add({ targets: btn, angle: 30, alpha: 1, duration: 150 }));
-  btn.on('pointerout', () => scene.tweens.add({ targets: btn, angle: 0, alpha: 0.85, duration: 150 }));
+  // ------------------------------------------------------------------
+  // IDENTITY, NOT A LABEL (2026-08-11, found red by the verification driver).
+  //
+  // `hfLabel` names what a control SAYS, and two different controls are allowed
+  // to say the same word. On the title screen exactly that happens: this gear
+  // and the ladder's own 300x68 SETTINGS plate both answer to 'SETTINGS', and
+  // the ladder plate is EARLIER on the display list — so a chrome audit doing
+  // `plates.find(p => p.label === 'SETTINGS')` measured the wrong object, and a
+  // `filter(p => p.label !== 'SETTINGS')` dropped BOTH, which took the ladder's
+  // real, live, clickable plate out of the collision sweep entirely. The audit
+  // built to answer "does the cog overlap a main-menu element" had a blind spot
+  // on the one main-menu element named after it.
+  //
+  // So the gear carries a ROLE as well as a label. A role is about what a thing
+  // IS; there is exactly one cog per scene and no plate can ever accidentally
+  // claim to be it. Every audit resolves the gear through this, never through
+  // its caption. (MapScene and CombatScene keep their own copies of the walk —
+  // another workstream's files this week — and should adopt `hfRole` for the
+  // same reason; their NAMED table has the identical weakness the day anything
+  // else on those screens is labelled SETTINGS.)
+  // ------------------------------------------------------------------
+  btn.setData('hfRole', 'cog');
+  // ------------------------------------------------------------------
+  // THE TILT IS DESKTOP-ONLY, AND THE REASON IS GEOMETRY, NOT THE HOVER RULE.
+  //
+  // A 30-degree rotation inflates a square's axis-aligned bounding box by
+  // cos30+sin30 = 1.366, which turns the touch gear's honest 76px box into a
+  // 103.8px one WHILE THE MOUSE IS ON IT. Every clearance in this corner —
+  // the arc test above, the gap SKINS keeps on character select, the potion
+  // mat's ceiling in combat — would have to be computed against the inflated
+  // box or be wrong exactly when somebody is pointing at the thing. On the arc
+  // it was the difference between 32px of margin and 0.7px.
+  //
+  // On a finger the tween buys nothing anyway: it is a hover flourish on a
+  // build with no hover, and the only thing it would ever do is spin under a
+  // thumb on the way into the panel. So the touch build's gear is a 76px
+  // square that stays a 76px square, and every number written about it is true
+  // at every instant. (This is NOT the hover-INFORMATION removal of ui/touch.js
+  // hoverInfo — the tilt describes nothing and would have been allowed to stay.)
+  // ------------------------------------------------------------------
+  if (!MOBILE) {
+    btn.on('pointerover', () => scene.tweens.add({ targets: btn, angle: 30, alpha: 1, duration: 150 }));
+    btn.on('pointerout', () => scene.tweens.add({ targets: btn, angle: 0, alpha: 0.85, duration: 150 }));
+  }
   // ON RELEASE on touch (see ui/pointer.js): a panel that opens on the PRESS
   // hands the rest of its own gesture to whatever it lands on top of.
   tapBind(scene, btn, () => openSettings(scene));
   return btn;
+}
+
+// ===========================================================================
+// THE CHROME AUDIT, AS THREE SHARED FUNCTIONS
+// ---------------------------------------------------------------------------
+// JC's report was "the settings cog sometimes overlaps with main menu
+// elements", and the only honest answer to a SOMETIMES is a driver that
+// MEASURES every screen at both touch widths rather than a person squinting at
+// one. MapScene.__hf.buttons() and CombatScene.__hf.chromeAudit() already do
+// exactly that for the two in-run scenes; TitleScene and CharacterSelectScene
+// had no geometry hook at all, which is why nobody noticed SKINS sitting on the
+// gear on every touch build since the day SKINS was added to that screen.
+//
+// The walker and the box arithmetic live HERE — beside the control they exist
+// to protect — rather than being typed out a third and fourth time. The two
+// in-run scenes keep their own copies for now (another workstream owns those
+// files); the shapes are deliberately identical so they can be merged later
+// without a driver noticing.
+// ===========================================================================
+
+/**
+ * EVERY NAMED PLATE ON A SCENE, IN WORLD SPACE.
+ *
+ * The canonical walk, matched to MapScene.__hf.buttons(): a recursive descent
+ * of the display list picking up anything wearing a `btn_` texture (which is
+ * every wooden plate in the game, including the ones ui/choicebox.js draws)
+ * plus the gear, which is not a plate but IS the one control a corner-clearance
+ * driver has to be able to find by name.
+ *
+ * `input?.enabled` is the filter that matters: a plate inside a torn-down
+ * overlay is still on the list for a frame, and a driver asserting "nothing
+ * overlaps the gear" must not be handed a ghost.
+ *
+ * EVERY PLATE CARRIES A `role` AS WELL AS A `label`, and callers that mean a
+ * SPECIFIC control must resolve it by role. See addSettingsButton for the bug
+ * that paid for the distinction: labels are captions, and two controls may
+ * legitimately share one.
+ */
+export function chromeButtons(scene) {
+  const NAMED = { icon_setting: 'SETTINGS' };
+  const out = [];
+  const walk = (o) => {
+    if (!o) return;
+    const key = o.texture?.key ?? '';
+    if (o.texture && (/^btn_/.test(key) || key in NAMED) && o.input?.enabled) {
+      const m = o.getWorldTransformMatrix();
+      out.push({
+        key, label: o.getData?.('hfLabel') ?? NAMED[key] ?? null,
+        role: o.getData?.('hfRole') ?? null,
+        x: Math.round(m.tx), y: Math.round(m.ty),
+        w: Math.round(o.displayWidth), h: Math.round(o.displayHeight),
+      });
+    }
+    (o.list ?? []).forEach(walk);
+  };
+  scene.children.list.forEach(walk);
+  return out;
+}
+
+/**
+ * One labelled rectangle, with the corner verdict already taken.
+ *
+ * `decor` marks a box that is DRAWN but not AIMED AT — a version stamp, a
+ * caption, a painted mat. It still reports `clears` (JC reads the build number
+ * off the version stamp, so a stamp inside the corner bite is a real defect)
+ * but it is excluded from the collision pass, because two pieces of text
+ * sharing a strip is a layout, not a bug.
+ */
+export function chromeBox(label, x, y, w, h, { decor = false } = {}) {
+  const b = {
+    label,
+    x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h),
+    left: Math.round(x - w / 2), right: Math.round(x + w / 2),
+    top: Math.round(y - h / 2), bottom: Math.round(y + h / 2),
+    decor,
+  };
+  b.clears = clearsCorners(b);
+  return b;
+}
+
+/** The same box, measured off a live object (text included, origins honoured). */
+export function chromeObjBox(label, obj, opts = {}) {
+  if (!obj?.active) return null;
+  const b = obj.getBounds();
+  return chromeBox(label, b.centerX, b.centerY, b.width, b.height, opts);
+}
+
+/**
+ * EVERY INTERSECTING PAIR OF TARGETS, label against label.
+ *
+ * Pairwise and not cog-against-the-world on purpose: the cog is what JC
+ * reported, but the defect class is "two things were placed by two people who
+ * never measured each other", and the next instance of it will not involve the
+ * gear. A driver asserts this list is EMPTY.
+ */
+export function chromeCollisions(boxes) {
+  const live = boxes.filter(b => b && !b.decor);
+  const out = [];
+  for (let i = 0; i < live.length; i++) {
+    for (let j = i + 1; j < live.length; j++) {
+      const a = live[i], c = live[j];
+      if (!(a.left < c.right && a.right > c.left && a.top < c.bottom && a.bottom > c.top)) continue;
+      out.push({
+        a: a.label, b: c.label,
+        w: Math.min(a.right, c.right) - Math.max(a.left, c.left),
+        h: Math.min(a.bottom, c.bottom) - Math.max(a.top, c.top),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * EVERY CAPTION THIS SCREEN PRINTS ON MORE THAN ONE BOX.
+ *
+ * THE BUG IT EXISTS FOR (2026-08-11): the Title has two objects that say
+ * 'SETTINGS' — the corner gear and the ladder's own menu plate — and
+ * `TitleScene.chrome()` resolved the cog by that caption. It picked the wrong
+ * one, and the `filter` beside it then dropped BOTH from the collision sweep,
+ * so the audit written for "the settings cog overlaps a main-menu element" was
+ * structurally blind to the one element named after the cog.
+ *
+ * The fix was to resolve by `hfRole`. THIS is the tripwire that stops the next
+ * one: any driver reaching for `boxes.find(b => b.label === 'X')` can first ask
+ * whether X identifies anything at all.
+ *
+ * IT IS A REPORT, NOT AN ASSERTION, and deliberately so. A scene legitimately
+ * prints one caption on several boxes (a row of identical sockets; a plate's
+ * text child carrying its parent's label), so a strict `dupLabels === []` would
+ * be red for reasons that are not bugs. The contract the drivers assert is the
+ * narrower, true one: no repeated name INSIDE the chrome contract, and no
+ * ambiguity in the labels a driver actually resolves by. Tightening this to a
+ * hard assertion needs the walk to count only hfLabel-carrying interactive
+ * targets minus plate text children — a follow-up, not this wave.
+ */
+export function chromeDupLabels(boxes) {
+  const seen = new Map();
+  for (const b of boxes) if (b) seen.set(b.label, (seen.get(b.label) ?? 0) + 1);
+  return [...seen].filter(([, n]) => n > 1).map(([label, n]) => ({ label, n }));
 }
 
 /** Modal settings overlay: master/music/sfx volumes, screen shake, fullscreen. */
@@ -620,5 +835,10 @@ export function openSettings(scene) {
   // should make you back out to read your own deck. On the title screen there
   // is no run to read — `run.runDeck` is a stale blob until resumeRun() —
   // so the button simply is not offered there.
-  if (inRun && run?.active) viewDeckButton(scene, ov, run, 150, GAME_H - 62);
+  // VIEW DECK · HANDS · MAP, at the row's own default home. The explicit
+  // (150, GAME_H-62) it used to pass WAS the shipped default, so dropping it
+  // changes nothing on desktop and lets the touch build inherit the safe-frame
+  // start the three-plate cluster now derives (see INFO_PLATE in ui/rewards.js:
+  // a 200px plate centred on 150 hangs its left edge inside SAFE.x).
+  if (inRun && run?.active) viewDeckButton(scene, ov, run);
 }

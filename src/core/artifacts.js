@@ -722,6 +722,24 @@ export const BEGGARS_BOWL_CHIPS = 20;
 /** THE TWO SHOP DISCOUNTS, as FRACTIONS OFF. See run.shopDiscountFactor. */
 export const HAGGLER_DISCOUNT = 0.10;
 export const CHARTER_DISCOUNT = 0.50;
+/**
+ * ROYAL CHARTER: how many restocks it covers PER SHOP VISIT.
+ *
+ * It used to cover them all, forever, and that was not a legendary — it was a
+ * button that prints money. An infinite dig means farming the merchant's shelf
+ * for chip-granting potions until the run is solved, and hunting a MYTHICAL
+ * (which the ladder deliberately gates behind expensive digs) at no cost at
+ * all. JC's ruling, 2026-08-11: THREE free digs a visit, then the merchant
+ * starts charging again.
+ *
+ * AND THE FREE ONES CONSUME LADDER STEPS. The 4th dig of a visit costs the
+ * ladder's 4th rung, not its first — the coupon buys you the DIG, not a reset,
+ * which is the rule freeFirstRestock has followed since 2026-08-02 and which is
+ * what stops "three free, then a cheap ladder" being nearly as farmable as
+ * infinite. See MapScene's restock button: `restocks` advances on every pull,
+ * paid or not, and always has.
+ */
+export const CHARTER_FREE_RESTOCKS = 3;
 /** RAINY-DAY JAR: chips held per chip paid, and the ceiling on one visit. */
 export const RAINY_DAY_STEP = 10;
 export const RAINY_DAY_CAP = 50;
@@ -764,8 +782,27 @@ export const WEATHERCOCK_MULT = 4;
 /** LOAN SHARK'S LEDGER: what a crown is worth, and what a captain is. */
 export const LOAN_BOSS_CHIPS = 100;
 export const LOAN_ELITE_CHIPS = 40;
-/** PILGRIM'S FLASK: overheal becomes chips 1:1, up to this much per fight. */
+/** PILGRIM'S FLASK: overhealing grants chips 1:1, up to this much per fight. */
 export const FLASK_CHIP_CAP = 20;
+
+/**
+ * WHAT ONE FLASK MAY TAKE OUT OF ONE SPILL — the cap arithmetic, pure.
+ *
+ * `a` is a flask INSTANCE (a copy on the belt, or a mirror wearing its props),
+ * `waste` the overheal in points. The cap is per COPY per FIGHT: two flasks
+ * catch twenty each and bank two separate ledgers, exactly like every other
+ * capped scaler in the pool, and `a.state.fight` is what the fight bell wipes.
+ *
+ * It lives here rather than inline in CombatScene.catchOverheal for the reason
+ * every rule in this file does: a node test can hold the cap against a mirrored
+ * pair without booting a renderer, and the scene keeps only the theatre — who
+ * is holding a flask, and paying the chips through gainChips.
+ */
+export function flaskTake(a, waste) {
+  const rate = a?.props?.overhealChips ?? 0;
+  const room = Math.max(0, (a?.props?.overhealChipCap ?? 0) - (a?.state?.fight ?? 0));
+  return Math.max(0, Math.min(room, Math.max(0, waste ?? 0) * rate));
+}
 /** BREWER'S THUMB: the odds the bottle survives the drink. */
 export const BREWER_KEEP_CHANCE = 0.25;
 /** RAGPICKER'S HOOK: mult per discard SPENT, for the rest of that fight. */
@@ -780,8 +817,19 @@ export const SOURDOUGH_REST_VALUE = 10;
 export const QUILL_EVENT_CHOICES = 2;
 /** TORTOISE STANDARD: value per SHIELD_VALUE_STEP of Shield standing. */
 export const TORTOISE_VALUE = 2;
-/** GOLDEN GOOSE: chips per map node you commit to (props.nodeChips). */
-export const GOOSE_CHIPS = 5;
+/**
+ * GOLDEN GOOSE: chips per map node you commit to (props.nodeChips).
+ *
+ * 5 -> 20 (JC, 2026-08-11). At five it was a VERY RARE that paid back its own
+ * 200-chip price in forty rooms — roughly two full acts — which is to say it
+ * never paid for itself inside a run at all, and every player who bought one
+ * learned that the hard way. Twenty makes a board of ~15 rooms an act worth
+ * ~300, which is a relic you are pleased to see rather than one you regret.
+ * The payout path is untouched: it rides `nodeChips` through payNodeArrival
+ * into gainGold, so difficulty's gold factor and every chip-gain multiplier in
+ * the game scale it exactly as they scaled the five.
+ */
+export const GOOSE_CHIPS = 20;
 /** WINNER'S PODIUM: the factor on whatever you play most. */
 export const PODIUM_FACTOR = 2;
 /** GLASS GAVEL: what a High Card is worth, and what it costs to find out. */
@@ -806,7 +854,29 @@ export const DEAD_MANS_FACTOR = 4;
 export const SHIP_FIGHTS_PER_MAST = 5;
 export const SHIP_MAX_MASTS = 3;
 export const SHIP_FULL_FACTOR = 4;
-export const SHIP_ACT_CHIPS = 100;
+/**
+ * WHAT ONE MAST PAYS, THE MOMENT IT RISES (JC, 2026-08-11: "it should just work
+ * as soon as it upgrades").
+ *
+ * The shipped design paid SHIP_ACT_CHIPS at every ACT CLEARED ceremony, and
+ * only at full sail. Three things were wrong with that and JC named the third:
+ * the payout was invisible (an act ceremony is a wall of numbers, and one more
+ * line in it is not a relic doing something), it was CONDITIONAL on a state the
+ * player had to hold in their head, and it arrived at a moment that had nothing
+ * to do with the thing that earned it. So the ceremony clause is gone.
+ *
+ * Each mast now pays ON THE UPGRADE, and it ESCALATES with the mast's ordinal:
+ * mastCount x SHIP_MAST_CHIPS, i.e. 100 / 200 / 300 for a lifetime 600. The
+ * escalation is the point — a relic that rewards you MORE for keeping it is
+ * legible in a way a flat drip is not, and the third mast now lands as an event
+ * (300 chips and the x4) rather than as a quiet condition being met.
+ *
+ * BALANCE NOTE, FLAGGED for JC: this is a NERF on a long run. The old clause
+ * paid 100 per act FOREVER once full sail was up, which on an endless run was
+ * unbounded; the new one pays 600 in total, ever. JC chose clarity over the
+ * drip with that trade named.
+ */
+export const SHIP_MAST_CHIPS = 100;
 
 /**
  * THE THREE STATE ARTS (potato/goldenSpud precedent, 2026-08-10). Each relic
@@ -2718,20 +2788,37 @@ export const ARTIFACT_POOL = [
   },
   {
     /**
-     * THE PILGRIM'S FLASK. It catches what would otherwise be POURED AWAY: the
-     * heal a full hero cannot hold. Capped per FIGHT (FLASK_CHIP_CAP), banked on
-     * the instance, and paid through gainGold like every other chip in the game.
+     * THE PILGRIM'S FLASK. Overheal — the heal a full hero cannot hold — comes
+     * back as chips, one for one. Capped per FIGHT (FLASK_CHIP_CAP), banked on
+     * the instance, and paid through gainChips like every other chip in the game.
      *
-     * ZELUS: FLAG (documented, 2026-08-10). His overheal is not wasted, it banks
-     * as ZEAL, which is his whole kit and is not the flask's to take. So the
-     * flask reads what is left AFTER Zeal has taken its fill: with Zeal uncapped
-     * (zealCapFor, 2026-08-04) that is nothing at all, and the flask is dead
-     * weight in his hands. That is the honest reading of "would be WASTED", and
-     * it is the one that leaves his hero exclusive alone.
+     * ===========================================================================
+     * ZELUS DOUBLE-DIPS, AND THAT IS THE RULING (JC, 2026-08-11)
+     * ===========================================================================
+     * The 08-10 pass excluded the Zealot in code (`if (this.chr.id === 'zealot')
+     * return 0` in CombatScene.catchOverheal) and argued the case at length right
+     * here: his overheal banks as ZEAL, so it is his resource rather than waste,
+     * so the flask has nothing to catch. JC has OVERRIDDEN that.
+     *
+     * On Zelus the same overheal now does BOTH: it converts to Zeal (his kit,
+     * untouched — scoring.js still hands the whole spill to the battery) and it
+     * fills the flask. Same 1:1 rate, same FLASK_CHIP_CAP per fight, same ledger,
+     * as every other hero. The relic is a relic, not a hero-compatibility matrix:
+     * a rare the player bought is either doing its printed job or it is a trap,
+     * and "dead weight in one hero's hands, silently" is the trap.
+     *
+     * The old rationale is deleted rather than softened on purpose. A stale
+     * reason is worse than none — it reads as the current ruling to whoever finds
+     * it next, and this one had already outlived the code it justified.
      */
     id: 'pilgrimsFlask', name: "Pilgrim's Flask", rarity: 'rare', price: 115,
     icon: 'icon_drop', tint: 0x58c0a8,
-    desc: `Healing you cannot hold becomes chips instead, 1 for 1, up to ${FLASK_CHIP_CAP} a fight.`,
+    // JC'S PHRASING, and the cap clause still derives from the exported const so
+    // the copy, the prop and the live line can never quote three numbers. The
+    // sentence deliberately no longer says "instead": on Zelus the chips are IN
+    // ADDITION to the Zeal, and a word that implies a swap would be a lie on the
+    // one hero the ruling is about.
+    desc: `Overhealing grants chips at a rate of 1:1 (max ${FLASK_CHIP_CAP} per fight).`,
     props: { overhealChips: 1, overhealChipCap: FLASK_CHIP_CAP },
     liveDesc(a) {
       const fight = a.state.fight ?? 0;
@@ -3078,11 +3165,20 @@ export const ARTIFACT_POOL = [
   },
   {
     // Both halves ride chokepoints: the price through run.shopPrice (the one
-    // till), the free dig through props.freeRestock at the restock button.
+    // till), the free digs through props.freeRestock at the restock button.
+    //
+    // "RESTOCK IS FREE, FOREVER" IS DEAD (JC, 2026-08-11). That clause made the
+    // merchant's shelf an infinite tap: dig until the chip-granting potions
+    // show up, dig again until a MYTHICAL does, and the ladder that exists to
+    // price exactly that hunt never charged a chip. It is THREE free digs per
+    // VISIT now (CHARTER_FREE_RESTOCKS) and then the ladder resumes — from the
+    // rung the free ones already climbed, not from the bottom. The 50% off half
+    // is untouched, and it is still the reason to want the relic.
     id: 'royalCharter', name: 'Royal Charter', rarity: 'legendary', price: 320,
     icon: 'icon_coins', tint: 0xffd23e,
-    desc: `Everything the merchant sells is ${Math.round(CHARTER_DISCOUNT * 100)}% off, and RESTOCK is free, forever.`,
-    props: { shopDiscount: CHARTER_DISCOUNT, freeRestock: 1 },
+    desc: `Everything the merchant sells is ${Math.round(CHARTER_DISCOUNT * 100)}% off. `
+      + `The first ${CHARTER_FREE_RESTOCKS} RESTOCKS at each shop are free.`,
+    props: { shopDiscount: CHARTER_DISCOUNT, freeRestock: CHARTER_FREE_RESTOCKS },
   },
   {
     /**
@@ -3106,12 +3202,35 @@ export const ARTIFACT_POOL = [
      * SHIP IN A BOTTLE. A mast every SHIP_FIGHTS_PER_MAST fights won, three at
      * most, and the rigging is PAINTED FROM THE COUNT rather than banked — so a
      * save written at two masts comes back at two masts without a migration.
-     * At full sail it is x4 on everything, and every ACT CLEARED ceremony pays
-     * SHIP_ACT_CHIPS through gainGold, where the ledger can see it.
+     * At full sail it is x4 on everything.
+     *
+     * =======================================================================
+     * THE ACT CEREMONY CLAUSE IS GONE (JC, 2026-08-11)
+     * =======================================================================
+     * It used to read "+100 chips at every act ceremony" and pay through an
+     * `actCleared` hook, gated on already being at full sail. JC's verdict was
+     * that the relic is incomprehensible, and he is right about why: the reward
+     * arrived at a moment that had nothing to do with the thing that earned it,
+     * inside a ceremony that is already a wall of numbers, and only after a
+     * condition the player had to be tracking privately. "It should just work as
+     * soon as it upgrades."
+     *
+     * So it does. EACH MAST PAYS THE INSTANT IT RISES, escalating with its own
+     * ordinal (SHIP_MAST_CHIPS x the mast number: 100, then 200, then 300), on
+     * the same beat as the A MAST RISES / FULL SAIL banner, through gainChips
+     * like every other payout in the game. The x4 at full sail is untouched and
+     * is not gated on anything but the mast count — `mods` is read live off
+     * `state.fights`, so it applies from the moment the third mast is up.
+     *
+     * The nerf is deliberate and named: the old clause paid 100 an act forever
+     * (unbounded on an endless run); this pays 600 across a run, ever. Clarity
+     * was the trade.
      */
     id: 'shipInABottle', name: 'Ship in a Bottle', rarity: 'legendary', price: 330,
     icon: 'icon_drop', tint: 0x3f8fd0,
-    desc: `A mast every ${SHIP_FIGHTS_PER_MAST} fights won, up to ${SHIP_MAX_MASTS}. At full sail: x${SHIP_FULL_FACTOR} mult and +${SHIP_ACT_CHIPS} chips at every act ceremony.`,
+    desc: `Every ${SHIP_FIGHTS_PER_MAST} fights won: +1 mast, up to ${SHIP_MAX_MASTS}. `
+      + `Masts pay ${Array.from({ length: SHIP_MAX_MASTS }, (_, i) => `◉${(i + 1) * SHIP_MAST_CHIPS}`).join(' / ')}. `
+      + `FULL SAIL: x${SHIP_FULL_FACTOR} Mult.`,
     mods(a) {
       return shipMasts(a?.state?.fights ?? 0) >= SHIP_MAX_MASTS
         ? { globalMultFactor: SHIP_FULL_FACTOR } : {};
@@ -3124,22 +3243,29 @@ export const ARTIFACT_POOL = [
         const before = shipMasts(a?.state?.fights ?? 0);
         bank(a, 'fights');
         const after = riggShip(a);
-        if (after > before) scene.relicTransformed?.(a, after >= SHIP_MAX_MASTS ? 'FULL SAIL!' : 'A MAST RISES');
-      },
-      actCleared(scene, a) {
-        if (shipMasts(a?.state?.fights ?? 0) < SHIP_MAX_MASTS) return 0;
-        const paid = scene.gainChips(SHIP_ACT_CHIPS, 'FULL SAIL!');
+        if (after <= before) return 0;
+        // ONE MAST PER FIGHT AT MOST (bank() adds one fight, and one fight can
+        // only ever cross one 5-fight boundary), so the payout is the NEW mast's
+        // ordinal and there is no run to sum.
+        const full = after >= SHIP_MAX_MASTS;
+        const paid = scene.gainChips?.(after * SHIP_MAST_CHIPS, full ? 'FULL SAIL!' : 'A MAST RISES') ?? 0;
         bank(a, 'paid', paid);
+        // The banner rides the same beat as the money, so the relic's
+        // transformation and its reward are one event on screen.
+        scene.relicTransformed?.(a, full
+          ? `FULL SAIL!  ◉ +${paid}`
+          : `A MAST RISES  ◉ +${paid}`);
         return paid;
       },
     },
     liveDesc(a) {
       const masts = shipMasts(a.state.fights ?? 0);
+      const port = a.state.paid ?? 0;
       if (masts >= SHIP_MAX_MASTS) {
-        return `Currently: FULL SAIL. x${SHIP_FULL_FACTOR} mult  (${a.state.paid ?? 0} chips in port)`;
+        return `Currently: FULL SAIL. ${masts}/${SHIP_MAX_MASTS} masts, x${SHIP_FULL_FACTOR} mult  (${port} chips in port)`;
       }
       const left = SHIP_FIGHTS_PER_MAST - ((a.state.fights ?? 0) % SHIP_FIGHTS_PER_MAST);
-      return `Currently: ${masts} mast${masts === 1 ? '' : 's'}  (${left} fight${left === 1 ? '' : 's'} to the next)`;
+      return `Currently: ${masts}/${SHIP_MAX_MASTS} masts  (${left} fight${left === 1 ? '' : 's'} to the next, worth ◉${(masts + 1) * SHIP_MAST_CHIPS})`;
     },
   },
   {

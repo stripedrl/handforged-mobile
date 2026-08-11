@@ -11,9 +11,15 @@
  *
  * So it wears a STATUS CHIP, in both scenes that own a hero: the combat sidebar
  * and the map HUD. Small, framed like the debuff pips it sits near, painted
- * with the option's OWN pack-card face, and it says what it does on hover
- * (desktop) or on a hold (mobile, via ui/touch.js installLongPress, which
- * synthesises the pointerover this file listens for).
+ * with the option's OWN pack-card face, and it says what it does on HOVER on
+ * desktop or on a TAP on touch.
+ *
+ * (It used to say "or on a hold, via installLongPress, which synthesises the
+ * pointerover this file listens for". That synthesis was removed on 2026-08-11
+ * — it was half of the double-description bug, where one touch woke both the
+ * two-tap box and the old tooltip on top of each other — so the touch path is
+ * now an explicit `tapInfo` fork at the binding below rather than a hover this
+ * file is tricked into receiving.)
  *
  * TWO RULES THIS FILE KEEPS:
  *
@@ -30,11 +36,16 @@
  * (`scene.oracleChip`, `scene.oracleTip`) must be nulled in their create().
  */
 
-import { GAME_W, GAME_H, DEPTH, PARCH } from '../config.js';
+import { GAME_W, GAME_H, DEPTH, PARCH, TOUCH } from '../config.js';
 import { woodPanel } from './panels.js';
 import { ORACLE_BY_ID } from '../core/oracle.js';
 import { optionArtSlug } from '../core/packs.js';
 import { personalize } from './rewards.js';
+// THE HOVER REMOVAL (JC, 2026-08-11). `hoverInfo` binds nothing on a finger;
+// `tapInfo` is the finger's replacement — tap to open a persistent panel, tap
+// again or tap away to put it back. The fork stays VISIBLE at the call site.
+import { hoverInfo } from './touch.js';
+import { tapInfo } from './choicebox.js';
 
 /** The Oracle pack's own violet — the wrapper, the shelf and now the chip. */
 export const ORACLE_ACCENT = 0x9a5cff;
@@ -186,11 +197,44 @@ export function addOracleChip(scene, x, y, id, { size = 46, depth = null, below 
   chip.chipSize = size;            // the INKED footprint, for layout audits
   chip.oracleId = def.id;
 
-  hit.on('pointerover', () => {
-    hideOracleTip(scene);
-    scene.oracleTip = oracleTip(scene, def, x, y, { below, gap: half + 18 });
-  });
-  hit.on('pointerout', () => hideOracleTip(scene));
+  // ------------------------------------------------------------------
+  // WHAT FUTURE DID I BUY? — and, since 2026-08-11, how a finger asks.
+  //
+  // This chip is the ONLY surface in the game that will tell you which of the
+  // Oracle's twenty permanent modifiers is riding your run, and until now it
+  // told you on HOVER and on nothing else. The 08-04 model reached that hover
+  // by synthesising a `pointerover` under a long press; that synthesis is gone
+  // (it was half of the double-description bug), so without a replacement the
+  // receipt would simply be unreadable on a phone — which is the one build the
+  // chip was drawn for in the first place.
+  //
+  // The two paths print the SAME two strings from the same table: the option's
+  // name and `ORACLE_BY_ID[id].desc` through personalize(), which is the string
+  // her pack shelf printed when the choice was made. A retune moves both.
+  //
+  // MOUNTED TWICE, and this binding is why that costs nothing: the combat
+  // sidebar and the map HUD both call addOracleChip, so both get the fork.
+  // ------------------------------------------------------------------
+  if (TOUCH) {
+    tapInfo(scene, hit, {
+      key: `oracle:${def.id}`,
+      // A FUNCTION, and it reads the WORLD matrix: the chip is a child of a
+      // sidebar container in one scene and of the HUD in the other, so its
+      // (x, y) arguments are local coordinates that mean two different things.
+      anchor: () => {
+        const m = hit.getWorldTransformMatrix();
+        return { x: m.tx, y: m.ty, w: hitW, h: hitW };
+      },
+      title: `THE ORACLE  ·  ${def.name.toUpperCase()}`,
+      body: () => personalize(def.desc),
+      accent: ORACLE_ACCENT,
+    });
+  } else {
+    hoverInfo(hit, () => {
+      hideOracleTip(scene);
+      scene.oracleTip = oracleTip(scene, def, x, y, { below, gap: half + 18 });
+    }, () => hideOracleTip(scene));
+  }
   chip.once('destroy', () => hideOracleTip(scene));
   return chip;
 }

@@ -1,25 +1,53 @@
 /**
  * @file touch.js
- * THE TOUCH MODEL (JC, 2026-08-04, the mobile quest): "tap acts, hold reveals,
- * and the taps that matter get a second step."
+ * THE TOUCH MODEL (JC, 2026-08-04, the mobile quest), REWRITTEN 2026-08-11.
  *
  * Desktop is untouched: every helper here collapses to the classic behaviour
- * when the MOBILE flag is off.
+ * when the TOUCH flag is off.
  *
- * THE THREE RULES:
- *   1. HOLD = HOVER. Press and hold (~400ms, finger still) on anything that
- *      answers a mouse hover — artifacts, potions, map nodes, shop items,
- *      enemies — and its tooltip appears, exactly as if a cursor were resting
- *      on it. Release KEEPS the tooltip; the next tap anywhere dismisses it.
- *      A hold never triggers the object's tap action.
- *   2. TAP = CLICK. `tapBind` binds an action to a clean tap: finger down and
- *      up within the slop radius, released before the hold fires. On desktop
- *      the same call binds plain pointerdown, so call sites stay one-liners.
- *   3. TWO STEPS WHERE A MISS COSTS A RUN. Consequential taps (drinking a
- *      potion) go through a confirm panel — see the call sites.
+ * ===========================================================================
+ * THERE IS NO HOVER ON A FINGER (JC, 2026-08-11 — the double-description bug)
+ * ===========================================================================
+ * The 08-04 model's first rule was HOLD = HOVER: a long press synthesised a
+ * `pointerover` on whatever was under the finger, so the phone could reach the
+ * desktop tooltips. The 08-10 wave then gave the consequential surfaces a
+ * TWO-TAP BOX (ui/choicebox.js) that prints the same words in a panel that
+ * stands BESIDE the thumb instead of under it.
+ *
+ * Both shipped, and JC played the result: tapping a relic opened the box AND
+ * the old tooltip, on top of each other, saying the same thing twice. Two
+ * separate mechanisms were racing for one gesture —
+ *
+ *   · Phaser itself emits `pointerover` on a TOUCH pointerdown (a finger that
+ *     lands on a thing is, as far as the engine is concerned, now hovering it),
+ *   · and installLongPress emitted a SECOND one 400ms later.
+ *
+ * JC'S RULING: hover is REMOVED ENTIRELY on touch and replaced by tapping to
+ * learn more. So:
+ *
+ *   1. NO HOVER-DRIVEN INFORMATION. `hoverInfo` is the one binder every
+ *      tooltip in this game is wired through, and it binds NOTHING on touch.
+ *      Pure VISUAL hover polish — a plate that puffs, a disc that spins — is
+ *      left alone: it costs nothing, it is not a second description, and on a
+ *      finger it simply reads as press feedback.
+ *   2. TAP TO LEARN MORE. Every surface whose information was hover-ONLY now
+ *      opens a persistent info panel on tap (`tapInfo`, ui/choicebox.js), and
+ *      tapping away dismisses it. Exactly one description panel can be on
+ *      screen at a time — enforced by the registry in ui/infoPanels.js, not by
+ *      forty call sites remembering to close each other.
+ *   3. THE LONG PRESS NO LONGER SYNTHESISES ANYTHING. It survives for exactly
+ *      one thing: the CARD INSPECT gesture in ui/inspect.js, which owns its own
+ *      hold timer and never went through `pointerover` in the first place.
+ *
+ * THE RULES THAT SURVIVE:
+ *   · TAP = CLICK. `tapBind` binds an action to a clean tap: finger down and
+ *     up within the slop radius, released before a drag begins. On desktop the
+ *     same call binds plain pointerdown, so call sites stay one-liners.
+ *   · TWO STEPS WHERE A MISS COSTS A RUN. Consequential taps go through the
+ *     choice box — see ui/choicebox.js.
  */
 
-import { MOBILE } from '../config.js';
+import { MOBILE, TOUCH } from '../config.js';
 import { isRightPointer } from './pointer.js';
 
 /**
@@ -33,27 +61,72 @@ export const HOLD_MS = 400;      // finger-still time before a press becomes a h
 export const SLOP = 14;          // px of drift allowed before a tap/hold is a drag
 
 /**
+ * BIND A HOVER THAT SHOWS INFORMATION. Desktop only, by construction.
+ *
+ * ============================================================================
+ * THIS FUNCTION'S ENTIRE JOB IS THE `if` ON ITS FIRST LINE
+ * ============================================================================
+ * Every parchment tooltip in this game — the intent tip, the relic tip, the
+ * shield rule, the map's belt and shop tips, rewards' miniTip, the oracle and
+ * passive chips, the hero kit panel, the wardrobe blurb — is now bound through
+ * here rather than through a raw `.on('pointerover', ...)`. That is what makes
+ * "hover is gone on touch" ONE decision instead of forty, and it is what makes
+ * the next tooltip somebody adds correct by default: reaching for the binder
+ * that every neighbouring line already uses is the path of least resistance.
+ *
+ * WHY A BINDER AND NOT A GUARD INSIDE EACH `show*Tip`. Two reasons, both paid
+ * for: (1) several of those helpers are also called PROGRAMMATICALLY — the
+ * `__hfCombat.intentTipText()` verification hook builds the tip, reads it and
+ * tears it down; `__hfSkins.hover(id)` drives the wardrobe blurb — and a guard
+ * inside the constructor would blind the drivers along with the finger; (2) the
+ * gate belongs where the INPUT is decided, not where the paint is.
+ *
+ * WHAT DOES *NOT* COME THROUGH HERE: pure visual polish. A plate that puffs, a
+ * card that lifts, a disc that spins, the cog that tilts. Those stay on plain
+ * `.on('pointerover')`. They are not a second description of anything, and on
+ * touch they read as press feedback, which is a small free gift.
+ *
+ * @param {Phaser.GameObjects.GameObject} obj
+ * @param {function} onOver  build/show the panel
+ * @param {function} [onOut] tear it down (hover-out; touch never needs one)
+ */
+export function hoverInfo(obj, onOver, onOut) {
+  if (TOUCH) return obj;          // there is no hover on a finger. Tap to learn more.
+  if (onOver) obj.on('pointerover', onOver);
+  if (onOut) obj.on('pointerout', onOut);
+  return obj;
+}
+
+/**
  * Arm the scene-wide long-press watcher. Call once in create() (safe to call
- * on desktop: it does nothing). It owns three scene fields:
- *   _touchHoldObj   the object currently "hovered" by a hold (or null)
+ * on desktop: it does nothing). It owns one scene field:
  *   _touchHoldFired this gesture became a hold — tapBind suppresses its tap
+ *
+ * ============================================================================
+ * WHAT THIS USED TO DO, AND WHY IT STOPPED (JC, 2026-08-11)
+ * ============================================================================
+ * It used to hit-test the finger at 400ms, find the topmost object with a
+ * `pointerover` listener, and EMIT ONE AT IT — the phone's way of reaching the
+ * desktop tooltips. That is half of the double-description bug: the tap had
+ * already opened the two-tap box, Phaser had already emitted its own touch
+ * `pointerover`, and this fired a third event into the same gesture. After the
+ * hover removal there is nothing left for a synthetic hover to wake, so it does
+ * not fire one. A long press must never produce a SECOND rendering of anything.
+ *
+ * WHAT SURVIVES IS THE FLAG, and it is still load-bearing: `_touchHoldFired`
+ * is how `tapBind` knows a gesture was a READ (ui/inspect.js's card panel, which
+ * runs its own identical hold timer off `gameobjectdown`) rather than a TAP, so
+ * holding a card to inspect it never also plays it. Keeping the watcher here —
+ * rather than folding it into inspect.js — keeps ONE definition of how long a
+ * hold is and how far it may drift, which is the whole reason HOLD_MS and SLOP
+ * are exported from this file.
  */
 export function installLongPress(scene) {
   if (!MOBILE || !scene?.input) return;
   let timer = null;
   let start = null;
 
-  const clearHover = () => {
-    const held = scene._touchHoldObj;
-    scene._touchHoldObj = null;
-    if (held?.active && held.emit) {
-      try { held.emit('pointerout', scene.input.activePointer); } catch { /* gone */ }
-    }
-  };
-
   scene.input.on('pointerdown', (p) => {
-    // A new touch dismisses whatever the last hold was reading.
-    clearHover();
     scene._touchHoldFired = false;
     start = { x: p.x, y: p.y };
     if (timer) timer.remove();
@@ -61,14 +134,10 @@ export function installLongPress(scene) {
       if (!start) return;
       const cur = scene.input.activePointer;
       if (Math.hypot(cur.x - start.x, cur.y - start.y) > SLOP) return;
-      // The topmost interactive object under the finger that knows how to be
-      // hovered gets a synthetic hover. hitTestPointer respects depth order.
-      const hits = scene.input.hitTestPointer(cur) ?? [];
-      const target = hits.find(o => o.listenerCount?.('pointerover') > 0);
-      if (!target) return;
+      // The gesture is a READ, not a tap. Nothing is emitted at anything: the
+      // only surface that answers a hold is the card inspect panel, and it
+      // arms its own timer on the same constants.
       scene._touchHoldFired = true;
-      scene._touchHoldObj = target;
-      try { target.emit('pointerover', cur, target.input?.localX, target.input?.localY); } catch { /* gone */ }
     });
   });
   scene.input.on('pointermove', (p) => {
@@ -79,8 +148,6 @@ export function installLongPress(scene) {
   scene.input.on('pointerup', () => {
     if (timer) { timer.remove(); timer = null; }
     start = null;
-    // The tooltip SURVIVES the release — reading should not require a held
-    // finger over the very thing being read. The next pointerdown clears it.
   });
   scene.events.once('shutdown', () => { if (timer) timer.remove(); });
 }

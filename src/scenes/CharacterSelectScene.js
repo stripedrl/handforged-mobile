@@ -1,10 +1,20 @@
-import { GAME_W, GAME_H, DEPTH, CHARACTERS, SUIT_COLORS, SUIT_PIP_KEY, PARCH, applyMobileCamera } from '../config.js';
+import {
+  GAME_W, GAME_H, DEPTH, CHARACTERS, SUIT_COLORS, SUIT_PIP_KEY, SUIT_GLYPH, PARCH, SAFE, TOUCH,
+  applyMobileCamera,
+} from '../config.js';
 import { installPointerPolicy } from '../ui/pointer.js';
-import { installLongPress } from '../ui/touch.js';
+// `hoverInfo` is THE binder for every hover that shows INFORMATION, and it
+// binds nothing on a finger (ui/touch.js). `tapInfo` is its touch counterpart:
+// tap to open a persistent panel, tap again or tap away to dismiss.
+import { installLongPress, hoverInfo } from '../ui/touch.js';
+import { tapInfo } from '../ui/choicebox.js';
 import { woodPanel } from '../ui/panels.js';
 import { addTavernBackdrop } from '../ui/tavern.js';
 import { playMusic } from '../core/music.js';
-import { addSettingsButton } from '../ui/settingsMenu.js';
+import {
+  addSettingsButton, COG_HOME,
+  chromeButtons, chromeBox, chromeObjBox, chromeCollisions, chromeDupLabels,
+} from '../ui/settingsMenu.js';
 import { sfx } from '../core/sfx.js';
 import { newRun, run } from '../core/run.js';
 import { DIFFICULTIES } from '../core/difficulty.js';
@@ -36,7 +46,23 @@ import { legible, burst } from '../ui/juice.js';
 // =========================================================================
 const CW = 460, CH = 690;
 const K = CH / 560;
-const CARD_W = 495, CARD_GAP = 48, SIDE = 110;
+const CARD_W = 495, CARD_GAP = 48;
+/**
+ * THE RAIL'S SIDE MARGIN — the strip the chevrons live in, and therefore the
+ * strip the outermost card is NOT allowed to rest in.
+ *
+ * 110 on desktop, unchanged since the day the arrows were moved out of the
+ * first card's centre. On TOUCH it has to be bigger, and the reason is the safe
+ * frame rather than the arrows: config.SAFE.x pulls anything interactive 96px
+ * in from the glass, so a chevron at x=46 (which is where they shipped) is
+ * standing 50px inside a margin the phone will not let it have. Move the
+ * chevron in without moving the margin and it lands ON the first card's left
+ * edge instead — the exact failure the 110 was introduced to fix, one arrow
+ * further along. So the margin moves with it: 170 puts the chevron's box at
+ * 100..164 and the resting card's left edge at 187, which is daylight on both
+ * canvases (2340 and 1920 alike, because every term here is GAME_W-relative).
+ */
+const SIDE = TOUCH ? 170 : 110;
 // Recentred for the freed space: the logo used to own y 0-300 and does not any
 // more, so the row sits nearer the middle of the screen than the bottom of it.
 // Card top = 203, PLAY hint = 949, bottom hint = 1050. Nothing touches.
@@ -69,6 +95,9 @@ export class CharacterSelectScene extends Phaser.Scene {
     this.heroArt = {};
     window.__hfSelect = null;   // the verification hook must never outlive its plates
     window.__hfRow = null;
+    window.__hfSelectChrome = null;   // ...and neither must the chrome audit's
+    this.chevrons = null;
+    this._heroCardBoxes = null;
     playMusic(this, 'menu');
     addTavernBackdrop(this, 0.45);
     /**
@@ -93,9 +122,25 @@ export class CharacterSelectScene extends Phaser.Scene {
       });
     }
 
-    const back = this.add.text(48, 40, '◀  BACK', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '26px', color: '#d8c9a8', stroke: '#241505', strokeThickness: 4,
+    // ------------------------------------------------------------------
+    // BACK, OFF THE CUT CORNER (2026-08-11, the chrome sweep).
+    //
+    // It shipped at (48, 40) with origin (0, 0.5), which is a box of roughly
+    // 48..160 x 22..58. Its top-left corner is 164px from the top-left arc
+    // centre (150, 150) against a 150px radius: 14px outside the glass, on the
+    // one control that gets a player OFF this screen. Pulled inside the SAFE
+    // frame on both axes it reads 144..282 x 42..86 and its worst corner is
+    // 108px in — and it takes a bigger face on touch while it is being moved,
+    // because 26px of text is a thin thing to ask a thumb to find and this is
+    // the only exit in the room.
+    // ------------------------------------------------------------------
+    const back = this.add.text(TOUCH ? 48 + SAFE.x : 48, TOUCH ? 40 + SAFE.y : 40, '◀  BACK', {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: TOUCH ? '32px' : '26px',
+      color: '#d8c9a8', stroke: '#241505', strokeThickness: 4,
     }).setOrigin(0, 0.5).setInteractive({ useHandCursor: true });
+    this.backBtn = back;
+    // Pure visual polish (a link that warms up), so it stays on the raw binding:
+    // on a finger it reads as press feedback and it describes nothing.
     back.on('pointerover', () => { sfx(this, 'menu_select', { volume: 0.3, jitter: 0.05 }); back.setColor('#ffd23e'); });
     back.on('pointerout', () => back.setColor('#d8c9a8'));
     back.on('pointerdown', () => { sfx(this, 'button', { volume: 0.7 }); this.scene.start('Title'); });
@@ -112,27 +157,136 @@ export class CharacterSelectScene extends Phaser.Scene {
     legible(this.add.text(GAME_W / 2, 46, 'CHOOSE YOUR HERO', {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '34px', color: '#f0d9a0',
     }), { thickness: 6 }).setOrigin(0.5);
-    this.add.text(GAME_W / 2, GAME_H - 30, 'hover a card to read the kit. click it to pick your difficulty.', {
+    // THE ONE COPY FORK on this screen. A build with no mouse must never be
+    // told to hover: after the hover removal (JC, 2026-08-11) there is no such
+    // gesture here at all, and the kit now lives behind the little ⓘ tab on
+    // each card's shoulder. Both strings sit side by side in the source, where
+    // a reviewer sees both at once, rather than in two files that drift.
+    this.add.text(GAME_W / 2, GAME_H - 30, TOUCH
+      ? 'tap ⓘ on a card to read the kit. tap the card to pick your difficulty.'
+      : 'hover a card to read the kit. click it to pick your difficulty.', {
       fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: '#d8c9a8', stroke: '#241505', strokeThickness: 4,
     }).setOrigin(0.5);
-    addSettingsButton(this);
-    this.addSkinsButton();
+    this.cogBtn = addSettingsButton(this);
+    this.skinsBtn = this.addSkinsButton();
 
     this.buildHeroRow();
+
+    // ==================================================================
+    // THE CHROME AUDIT (JC, 2026-08-11: "the settings cog sometimes overlaps
+    // with main menu elements"). THIS screen is the sometimes — see
+    // addSkinsButton for the 72x29 intersection that shipped on every touch
+    // build — and it had no geometry hook of any kind, which is exactly why
+    // nobody caught it.
+    //
+    // Everything in the top strip, both chevrons and all five hero cards come
+    // back as world-space boxes carrying their own corner-arc verdict, plus
+    // `collisions`: every intersecting pair of TARGETS, named. A driver asserts
+    // that list is empty at both touch widths and does not have to know that
+    // SKINS is 220 wide or that the gear lives at GAME_W-144.
+    //
+    // Separate from `window.__hfSelect`, which is the DIFFICULTY PICKER's hook
+    // and only exists while that overlay is up, and from `window.__hfRow`,
+    // which is the rail's scroll state. This one is the furniture.
+    // ==================================================================
+    window.__hfSelectChrome = {
+      buttons: () => chromeButtons(this),
+      chrome: () => {
+        const plates = chromeButtons(this);
+        // BY ROLE, NEVER BY LABEL. This screen happens to carry only ONE object
+        // saying 'SETTINGS' today, so caption matching answered correctly here
+        // — which is exactly why it is worth changing: the Title screen proved
+        // that a second SETTINGS plate can arrive without anybody noticing that
+        // an audit somewhere else silently started measuring it (see the same
+        // block in TitleScene.chrome for the bug this cost). `hfRole` is set by
+        // addSettingsButton, there is one per scene, and no caption can claim
+        // it. Box labelled 'COG' to match CombatScene.chromeAudit.
+        const cog = chromeBox('COG', COG_HOME.x, COG_HOME.y, COG_HOME.size, COG_HOME.size);
+        const drawn = plates.find(p => p.role === 'cog');
+        cog.drawn = drawn ? { w: drawn.w, h: drawn.h } : null;
+        const boxes = [
+          cog,
+          ...plates.filter(p => p.role !== 'cog')
+            .map(p => chromeBox(p.label ?? p.key, p.x, p.y, p.w, p.h)),
+          chromeObjBox('BACK', this.backBtn),
+          ...(this.chevrons ?? []).map((t, i) => chromeObjBox(i === 0 ? 'CHEVRON LEFT' : 'CHEVRON RIGHT', t)),
+          // The cards are the BOARD, not the chrome: two of them are always
+          // half off the rail's ends by design, and the chevrons deliberately
+          // stand in the margin beside them. They are reported so a driver can
+          // assert the cog and SKINS are nowhere near the row, and marked
+          // `decor` so the rail's own geometry is not read as a defect.
+          ...(this._heroCardBoxes?.() ?? []).map(b => ({ ...b, decor: true })),
+        ].filter(Boolean);
+        return {
+          gameW: GAME_W, gameH: GAME_H, touch: TOUCH, safe: { ...SAFE },
+          side: SIDE, rowScroll: Math.round(this.rowScroll ?? 0),
+          cog,
+          skins: boxes.find(b => b.label === 'SKINS') ?? null,
+          boxes,
+          collisions: chromeCollisions(boxes),
+          // `skins` above is resolved BY LABEL, which is exactly the shape of
+          // the bug that blinded TitleScene's audit — so the screen publishes
+          // whether any caption is ambiguous rather than leaving a driver to
+          // assume. See ui/settingsMenu.chromeDupLabels.
+          dupLabels: chromeDupLabels(boxes),
+          allClear: boxes.every(b => b.clears),
+        };
+      },
+    };
   }
 
   /**
    * SKINS, from character select as well as the title screen (patch §3). It sits
    * left of the gear rather than in the card row: it is a wardrobe, not a hero,
    * and putting it in the row would make it the sixth thing you can "pick".
+   *
+   * ======================================================================
+   * IT WAS SITTING ON THE GEAR (JC, 2026-08-11: "the settings cog sometimes
+   * overlaps with main menu elements"). THIS is the sometimes.
+   * ======================================================================
+   * SKINS shipped at (GAME_W-200, 42) as a 180x54 desktop plate and never
+   * learned that a touch build exists. On a phone the cog is a 76px square
+   * pulled inside the safe frame, so the two boxes read
+   *
+   *     COG    GAME_W-182 .. GAME_W-106  x  40 .. 116
+   *     SKINS  GAME_W-290 .. GAME_W-110  x  15 .. 69
+   *
+   * — a 72x29 intersection, IDENTICAL on the 2340 phone and the 1920 tablet
+   * because both are GAME_W-relative, so no amount of testing on one device
+   * would have caught it on the other. And they were BOTH at depth
+   * `DEPTH.overlay - 1` with SKINS added second, which at equal depth wins the
+   * hit test: the covered strip of the gear was not merely ugly, it was
+   * unclickable, on every touch build, on the one screen where a player who
+   * wants to turn the music down is most likely to be.
+   *
+   * The fix is measured, not nudged. On touch the plate becomes a finger-sized
+   * 220x76 and takes the gear's own centre line (y 78) so the top strip reads
+   * as one row, and its right edge is parked 24px clear of the gear's left:
+   *
+   *     COG    GAME_W-182 .. GAME_W-106  x  40 .. 116
+   *     SKINS  GAME_W-426 .. GAME_W-206  x  40 .. 116     gap 24px, zero overlap
+   *
+   * Its top edge (40) now clears SAFE.y (24) instead of sitting 9px above it,
+   * and neither of its right-hand corners is inside the corner arc (the nearer
+   * one is 56px shy of the quadrant the bite even applies to). Desktop keeps
+   * the exact plate it shipped with — SAFE is {0,0} there, the cog is a 44px
+   * square at GAME_W-44, and the two have always had 44px between them.
+   *
+   * The depth tie is broken too, permanently: SKINS drops one layer so that if
+   * anything ever drifts back into the gear again it drifts UNDER it, and the
+   * control JC actually reported stays pressable while somebody fixes the
+   * layout.
    */
   addSkinsButton() {
-    const x = GAME_W - 200, y = 42;
-    const btn = this.add.image(x, y, 'btn_gray').setDisplaySize(180, 54)
-      .setDepth(DEPTH.overlay - 1).setInteractive({ useHandCursor: true });
+    const x = TOUCH ? COG_HOME.x - COG_HOME.size / 2 - 24 - 110 : GAME_W - 200;
+    const y = TOUCH ? COG_HOME.y : 42;
+    const w = TOUCH ? 220 : 180, h = TOUCH ? 76 : 54;
+    const btn = this.add.image(x, y, 'btn_gray').setDisplaySize(w, h)
+      .setDepth(DEPTH.overlay - 2).setInteractive({ useHandCursor: true });
+    btn.setData('hfLabel', 'SKINS');
     const txt = this.add.text(x, y - 3, 'SKINS', {
-      fontFamily: 'Lilita One', resolution: 2, fontSize: '24px', color: '#3a3020',
-    }).setOrigin(0.5).setDepth(DEPTH.overlay - 1);
+      fontFamily: 'Lilita One', resolution: 2, fontSize: TOUCH ? '28px' : '24px', color: '#3a3020',
+    }).setOrigin(0.5).setDepth(DEPTH.overlay - 2);
     const base = { ix: btn.scaleX, iy: btn.scaleY };
     btn.on('pointerover', () => {
       sfx(this, 'menu_select', { volume: 0.3, jitter: 0.05 });
@@ -225,8 +379,14 @@ export class CharacterSelectScene extends Phaser.Scene {
       t.on('pointerdown', () => { sfx(this, 'button', { volume: 0.6 }); slide(this.rowScroll - dir * step); });
       return t;
     };
-    const left = scrollable ? chev(46, -1) : null;
-    const right = scrollable ? chev(GAME_W - 46, 1) : null;
+    // ...and they sit inside the safe frame on touch. 46 was a desktop number
+    // on a canvas with no glass to lose: a 64px glyph centred there spans
+    // 14..78, which is 82px inside SAFE.x. See the SIDE constant at the head of
+    // this file for why the rail's margin had to widen to pay for the move.
+    const CHEV_X = TOUCH ? SAFE.x + 36 : 46;
+    const left = scrollable ? chev(CHEV_X, -1) : null;
+    const right = scrollable ? chev(GAME_W - CHEV_X, 1) : null;
+    this.chevrons = [left, right].filter(Boolean);
 
     const refreshChevrons = () => {
       // A chevron that cannot move the row is not offered. `left` points at
@@ -345,6 +505,13 @@ export class CharacterSelectScene extends Phaser.Scene {
         x: Math.round(x0 + i * step + this.rowScroll), y: ROW_Y,
       })),
     };
+
+    // The same five cards as AUDIT BOXES, for __hfSelectChrome. Arithmetic and
+    // not a getBounds() read for the reason the deal block above spells out:
+    // every card carries a table glow 1.6x its own width, so a bounds read
+    // would report five overlapping rectangles and call a layout a collision.
+    this._heroCardBoxes = () => ids.map((id, i) => chromeBox(
+      `HERO ${id.toUpperCase()}`, x0 + i * step + this.rowScroll, ROW_Y, CW, CH));
   }
 
   /**
@@ -579,6 +746,12 @@ export class CharacterSelectScene extends Phaser.Scene {
       return px;
     };
 
+    // ------------------------------------------------------------------
+    // THE CARD COMING UP OFF THE TABLE IS POLISH, so it stays on the raw
+    // pointer binding: it describes nothing, it costs nothing, and on a finger
+    // Phaser fires `pointerover` on the press anyway, where a card that lifts
+    // under your thumb reads as exactly the press feedback a tap wants.
+    // ------------------------------------------------------------------
     hit.on('pointerover', () => {
       sfx(this, 'card_hover', { volume: 0.42, jitter: 0.08 });
       this.tweens.add({ targets: card, y: y - 40, scale: 1.045, angle: index % 2 === 0 ? -1.2 : 1.2, duration: 170, ease: 'Sine.easeOut' });
@@ -586,9 +759,41 @@ export class CharacterSelectScene extends Phaser.Scene {
       this.tweens.add({ targets: playHint, alpha: 1, duration: 170 });
       this.tweens.add({ targets: heroG, y: 42, scale: 0.82, duration: 200, ease: 'Sine.easeOut' });
       // A puff of the hero's own suit off the table as the card comes up.
-      const worldX = x + (this.heroRow?.x ?? 0);
-      burst(this, worldX, y + CH * 0.3, open ? suitColor : 0x6b5a80, 9);
+      burst(this, x + (this.heroRow?.x ?? 0), y + CH * 0.3, open ? suitColor : 0x6b5a80, 9);
+    });
+    hit.on('pointerout', () => {
+      this.tweens.add({ targets: card, y, scale: 1, angle: 0, duration: 170 });
+      this.tweens.add({ targets: glow, alpha: 0.16, duration: 180 });
+      this.tweens.add({ targets: playHint, alpha: 0, duration: 150 });
+      this.tweens.add({ targets: heroG, y: -26 * K, scale: 1, duration: 200, ease: 'Sine.easeOut' });
+    });
 
+    // ------------------------------------------------------------------
+    // THE KIT PARCHMENT IS INFORMATION, and information does not live on a
+    // hover any more (JC, 2026-08-11).
+    //
+    // On DESKTOP this is byte-for-byte the panel that shipped: the same slide,
+    // the same rail-follower, the same orphan guard — it is bound through
+    // ui/touch.hoverInfo rather than a raw `.on('pointerover')` so that the ONE
+    // decision "there is no hover on a finger" is made in one place instead of
+    // at forty call sites.
+    //
+    // On TOUCH the parchment is never shown at all, and the ⓘ tab below is the
+    // path to the same words. WHY NOT the shape that was sketched first — show
+    // the parchment automatically for whichever hero is centred on the rail? It
+    // was measured and it does not survive the measuring. The panel is 400px
+    // wide and is placed BESIDE its card (placeInfo, inward toward the middle
+    // of the screen) because there is nowhere else for it to go: the card's top
+    // is at 203 and its PLAY hint bottoms out at 949 on a 1080 canvas, so there
+    // is no room above or below. Beside the CENTRED card means squarely on top
+    // of the card next to it — a permanent 400x300 panel standing on a hero you
+    // are about to swipe to, painted over the very thing the rail exists to let
+    // you browse. A tab you press is smaller, is opt-in, and puts its answer
+    // through ui/choicebox.js, which means it obeys the one-panel registry and
+    // gets dismissed by tapping away like every other description in the game.
+    // ------------------------------------------------------------------
+    const showKit = () => {
+      const worldX = x + (this.heroRow?.x ?? 0);
       const px = placeInfo(this.heroRow?.x ?? 0);
       this._infoFollow = placeInfo;
       info.setVisible(true);
@@ -596,12 +801,8 @@ export class CharacterSelectScene extends Phaser.Scene {
       // as being drawn out of the card rather than switched on next to it.
       info.x = px - (px >= worldX ? 1 : -1) * 26;
       this.tweens.add({ targets: info, alpha: 1, x: px, duration: 180, ease: 'Cubic.easeOut' });
-    });
-    hit.on('pointerout', () => {
-      this.tweens.add({ targets: card, y, scale: 1, angle: 0, duration: 170 });
-      this.tweens.add({ targets: glow, alpha: 0.16, duration: 180 });
-      this.tweens.add({ targets: playHint, alpha: 0, duration: 150 });
-      this.tweens.add({ targets: heroG, y: -26 * K, scale: 1, duration: 200, ease: 'Sine.easeOut' });
+    };
+    const hideKit = () => {
       // ...but only if the pointer has not already arrived on the NEXT card:
       // Phaser dispatches this frame's overs before its outs, so a slide from
       // one card to its neighbour would otherwise leave the new panel orphaned
@@ -611,7 +812,8 @@ export class CharacterSelectScene extends Phaser.Scene {
         targets: info, alpha: 0, duration: 150,
         onComplete: () => { if (info.alpha < 0.02) info.setVisible(false); },
       });
-    });
+    };
+    hoverInfo(hit, showKit, hideKit);
 
     // ------------------------------------------------------------------
     // THE DEAL FLIES A CHILD, NOT THE CARD.
@@ -639,6 +841,59 @@ export class CharacterSelectScene extends Phaser.Scene {
     // ...and the hit area goes on LAST, as a direct child of the card, so it
     // sits above the artwork and stays behind while the artwork flies in.
     card.add(hit);
+
+    // ------------------------------------------------------------------
+    // THE ⓘ TAB — the touch build's road to the kit.
+    //
+    // The card's own tap was already spoken for (it picks the hero and opens
+    // the difficulty page) and hijacking it would have cost a first-timer the
+    // one gesture on this screen that is obvious. So the kit gets a target of
+    // its own, on the card's shoulder, where it overlaps nothing: the name
+    // plate is at +212, the model's head tops out around -160, and the corner
+    // filigree of Caleb's card art is the emptiest 68px on the whole face.
+    //
+    // IT IS A DIRECT CHILD OF `card`, deliberately, for the same reason the hit
+    // rectangle is: `flight` is what the deal animates, and anything parented
+    // to it is a card-and-a-bit to the right of where it looks for the first
+    // 680ms. It fades in on the deal's own clock so it does not arrive before
+    // the card it belongs to, but its target is live and stationary from frame
+    // one, which is what a driver clicking the moment __hfRow appears needs.
+    //
+    // The box's WORDS come from the same two fields the parchment prints
+    // (ch.kit / ch.suitNotes, or the unlock hint for a locked hero), so the
+    // desktop panel and the touch panel cannot drift apart.
+    // ------------------------------------------------------------------
+    if (TOUCH) {
+      const tab = this.add.container(CW / 2 - 46, -CH / 2 + 46).setAlpha(0);
+      const tabDisc = this.add.image(0, 0, 'btn_circle_gray').setDisplaySize(68, 68)
+        .setInteractive({ useHandCursor: true });
+      // `btn_circle_gray` matches the `btn_` walk in chromeButtons, so the tab
+      // is already in the audit as a plate — it just needs a name that says
+      // WHICH hero's kit it opens, or the driver gets five identical discs.
+      tabDisc.setData('hfLabel', `KIT ${ch.id.toUpperCase()}`);
+      tab.add([tabDisc, this.add.text(0, -3, 'i', {
+        fontFamily: 'Lilita One', resolution: 2, fontSize: '40px', color: '#3a3020',
+      }).setOrigin(0.5)]);
+      card.add(tab);
+      this.tweens.add({ targets: tab, alpha: 1, duration: 220, delay: 240 + index * 70 });
+      tapInfo(this, tabDisc, {
+        key: `hero:${ch.id}`,
+        // A FUNCTION, because the rail moves under it: the box is placed
+        // against wherever the tab is standing at the instant it is tapped.
+        anchor: () => {
+          const m = tabDisc.getWorldTransformMatrix();
+          return { x: m.tx, y: m.ty, w: 68, h: 68 };
+        },
+        title: open ? `${ch.name}  ·  ${ch.title}` : '???  ·  A HERO YET UNFORGED',
+        body: () => (open
+          ? [ch.kit, '', ...ch.suitNotes.map(n => `${SUIT_GLYPH[n.suit]}  ${n.text}`)].join('\n')
+          : (ch.unlockHint ?? need?.hint ?? 'Not yet forged.')),
+        note: open ? null : 'This hero is still chained.',
+        accent: open ? suitColor : 0x3a2f4a,
+        owner: card,
+      });
+    }
+
     card.deal = flight;
     return card;
   }
@@ -746,6 +1001,15 @@ export class CharacterSelectScene extends Phaser.Scene {
     const select = (index) => {
       if (!isDifficultyUnlocked(ch.id, index)) {
         sfx(this, 'button', { volume: 0.4, rate: 0.8 });
+        // A REFUSAL THAT SAYS WHY (touch only, 2026-08-11). On desktop the
+        // hover has already printed "LOCKED. Clear Act III with DEXTRA on
+        // GOLD." into the parchment below by the time you press, so the
+        // pitched-down thud is the second half of an answer you have read. A
+        // finger has no hover: without this, tapping a locked plate produced a
+        // noise and nothing else, and the ONLY surface in the game that says
+        // what opens a difficulty would have been unreachable on the phone.
+        // It still does not SELECT — the ring and pickerChoice do not move.
+        if (TOUCH) showDetail(index);
         return;
       }
       this.pickerChoice = index;
@@ -942,11 +1206,18 @@ export class CharacterSelectScene extends Phaser.Scene {
     g.add(chosenRing);
 
     parts.panel.setInteractive({ useHandCursor: true });
-    parts.panel.on('pointerover', () => {
-      onHover(d.index);
-      this.tweens.add({ targets: g, y: y - 12, duration: 130, ease: 'Sine.easeOut' });
-    });
+    // THE 12px LIFT IS POLISH and stays on the raw binding — on a finger it is
+    // the plate acknowledging the press, which this screen otherwise has no way
+    // of doing.
+    parts.panel.on('pointerover', () => this.tweens.add({ targets: g, y: y - 12, duration: 130, ease: 'Sine.easeOut' }));
     parts.panel.on('pointerout', () => this.tweens.add({ targets: g, y, duration: 130 }));
+    // THE BLURB IS INFORMATION. `onHover` writes the six numbers and the
+    // LOCKED line into the picker's shared detail parchment, which is a fixed
+    // region of this page rather than a floating panel — so on touch it does
+    // not need a box of its own, it needs a different DRIVER: the plate you
+    // TAPPED, which is already the plate you picked (see `select` in
+    // openDifficultyPicker, where the same showDetail call sits).
+    hoverInfo(parts.panel, () => onHover(d.index));
     parts.panel.on('pointerdown', onPick);
 
     return {

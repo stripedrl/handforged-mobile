@@ -30,6 +30,8 @@ export const SFX_FILES = [
   'payoff_300.mp3', 'payoff_500.mp3', 'payoff_750.mp3', 'payoff_1000.mp3',
   'payoff_1500.mp3', 'payoff_2500.mp3', 'payoff_5000.mp3', 'payoff_12500.mp3',
   'payoff_50000.mp3', 'payoff_100000.mp3',
+  // JC, 2026-08-10: the INFINITY tier sting (glitch/sci-fi stinger).
+  'payoff_infinity.mp3',
   // JC, 2026-08-02: the ACHIEVEMENT unlock chime. Its own sound rather than the
   // secret-hand sting, because an achievement can fire in the middle of a fight
   // and must not be mistaken for something the hand just did.

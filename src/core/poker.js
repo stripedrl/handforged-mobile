@@ -217,19 +217,33 @@ function rankCounts(cards) {
 }
 
 /**
- * True if all cards share the same rank ordering that forms a 5-card
- * straight. Ace may play high (10-J-Q-K-A) or low (A-2-3-4-5); no
- * wraparound (e.g. Q-K-A-2-3 is NOT a straight).
- * @param {number[]} ranks - exactly 5 ranks
+ * True if these ranks form an unbroken run of DISTINCT values. Ace may play
+ * high (10-J-Q-K-A) or low (A-2-3-4-5); no wraparound (Q-K-A-2-3 is NOT a
+ * straight).
+ *
+ * LENGTH-AGNOSTIC since 2026-08-10, because THE ROPE LADDER lets a straight
+ * form with four cards. For five ranks it answers exactly what the old
+ * hand-rolled five-card version answered — same three cases, same order — so
+ * every existing suite is the proof that nothing moved:
+ *   · duplicates      -> false (uniq.length !== ranks.length)
+ *   · span === len-1  -> true  (5 values spanning 4)
+ *   · ace low         -> the Ace becomes a 1 and the same span test is retried
+ *                        ([2,3,4,5,14] -> [1,2,3,4,5]), which is the aceLow
+ *                        literal generalised.
+ * @param {number[]} ranks
  * @returns {boolean}
  */
-function isStraightRanks(ranks) {
+function isRunOfRanks(ranks) {
   const uniq = Array.from(new Set(ranks));
-  if (uniq.length !== 5) return false;
+  if (uniq.length !== ranks.length) return false;
   const sorted = uniq.slice().sort((a, b) => a - b);
-  const aceLow = [2, 3, 4, 5, 14];
-  if (sorted.every((v, i) => v === aceLow[i])) return true;
-  return sorted[4] - sorted[0] === 4; // 5 unique values spanning exactly 4 => consecutive
+  const span = (arr) => arr[arr.length - 1] - arr[0] === arr.length - 1;
+  if (span(sorted)) return true;
+  // ACE LOW: swap the Ace for a 1 and ask the same question again.
+  if (sorted[sorted.length - 1] === 14) {
+    return span([1, ...sorted.slice(0, -1)]);
+  }
+  return false;
 }
 
 /**
@@ -251,10 +265,37 @@ function isStraightRanks(ranks) {
 const shiftOf = (opts) => (opts?.ofAKindMinus1 ? 1 : 0);
 
 /**
+ * THE BROKEN COMPASS and THE ROPE LADDER (JC spec, 2026-08-10) —
+ * `mods.flushMinus1` and `mods.straightMinus1`.
+ *
+ * A flush (compass) or a straight (ladder) forms with FOUR cards instead of
+ * five. Like THE UNDERSTUDY these change CLASSIFICATION only: hands are still
+ * played from up to five cards, wilds still count as every suit, and an Ace
+ * still runs high or low.
+ *
+ * WHAT FALLS OUT OF IT, and none of it needed a line anywhere else:
+ *   · THE KICKER RULE. scoringIds returns EVERY card for straight/flush/
+ *     straightFlush, so a four-card flush scores four cards. One fewer card
+ *     played for the same hand type is the whole reward.
+ *   · A FOUR-CARD FLUSH IS A FLUSH. Same HAND_DEF, same base, same mult, same
+ *     Smith level, same name. So the METEOR SIGIL's flush-or-better AOE, the
+ *     RISING TIDE's isFlushHand count, the PAINTER'S PALETTE's handFactor and
+ *     the STRAIGHTEDGE's straight-family handValue all pay on it already.
+ *   · BOTH AT ONCE make a four-card STRAIGHT FLUSH legal, which is the honest
+ *     product of the two rules and needs no special case.
+ *
+ * THE FIVE-CARD MINIMUM IS A MINIMUM, not a magic number: `n >= 5 - relax`. A
+ * three-card flush is still not a flush under the compass alone, and with the
+ * flag off `n >= 5` is exactly the `n === 5` this has always tested.
+ */
+const flushMin = (opts) => (opts?.flushMinus1 ? 4 : 5);
+const straightMin = (opts) => (opts?.straightMinus1 ? 4 : 5);
+
+/**
  * Evaluate a played hand of 1-5 cards and return the highest qualifying
  * hand type with its display name and base scoring multiplier.
  * @param {Card[]} cards
- * @param {{ofAKindMinus1?: boolean}} [opts]
+ * @param {{ofAKindMinus1?: boolean, flushMinus1?: boolean, straightMinus1?: boolean}} [opts]
  * @returns {HandResult}
  */
 export function evaluateHand(cards, opts = {}) {
@@ -276,8 +317,8 @@ export function evaluateHand(cards, opts = {}) {
   // Wilds count as any suit: the non-wild cards must agree on one.
   const solid = cards.filter(c => !isWild(c));
   const sameSuit = solid.every(c => SUITS.includes(c.suit) && c.suit === solid[0]?.suit);
-  const isFlush = n === 5 && (solid.length === 0 || sameSuit);
-  const isStraight = n === 5 && isStraightRanks(cards.map((c) => c.rank));
+  const isFlush = n >= flushMin(opts) && (solid.length === 0 || sameSuit);
+  const isStraight = n >= straightMin(opts) && isRunOfRanks(cards.map((c) => c.rank));
 
   // SECRET HANDS first — five of one rank beats everything printed on the
   // chart, and if those five ALSO agree on a suit it is the top of the ladder.
@@ -323,7 +364,8 @@ export function evaluateHand(cards, opts = {}) {
  * combination, which is 56 of them for a full eight-card hand.
  *
  * @param {Card[]} cards
- * @param {{ofAKindMinus1?: boolean}} [opts] passed straight through to evaluateHand
+ * @param {{ofAKindMinus1?: boolean, flushMinus1?: boolean, straightMinus1?: boolean}} [opts]
+ *        passed straight through to evaluateHand
  * @returns {HandResult}
  */
 export function bestHandOf(cards, opts = {}) {
@@ -385,7 +427,10 @@ export function mostPlayedHandType(run) {
  * matched ranks; high card uses only the single highest-ranked card.
  * @param {Card[]} cards
  * @param {HandResult} hand - result of evaluateHand(cards)
- * @param {{ofAKindMinus1?: boolean}} [opts] the SAME flag evaluateHand was given
+ * @param {{ofAKindMinus1?: boolean, flushMinus1?: boolean, straightMinus1?: boolean}} [opts]
+ *        the SAME flags evaluateHand was given. The flush/straight relics need
+ *        nothing here: those types already score every card played, so a
+ *        four-card flush scores four cards for free.
  * @returns {Set<string>}
  */
 export function scoringIds(cards, hand, opts = {}) {

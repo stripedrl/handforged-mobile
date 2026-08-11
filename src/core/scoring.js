@@ -209,6 +209,13 @@ export function zealCapFor(_mods) {
 export const SHIELD_MULT_PCT = 0.01;
 
 /**
+ * THE TORTOISE STANDARD's yardstick: how many points of Shield buy one helping
+ * of `mods.shieldValue`. One number, read by the arithmetic and by the relic's
+ * own printed rules line, so the two can never quote different tortoises.
+ */
+export const SHIELD_VALUE_STEP = 10;
+
+/**
  * CLUBS — THE SPREAD SUIT (JC, 2026-08-01 overhaul).
  *
  * Clubs used to deal damage AND apply the hero's keyed status (bleed / smite /
@@ -544,6 +551,35 @@ export function effectiveSuit(card, character) {
   return WILD_MODS.has(card.mod) ? SUIT_BY_CHARACTER[character] : card.suit;
 }
 
+/** The hero's own suit. Derived from CHARACTERS, never typed out twice. */
+export function heroSuit(character) { return SUIT_BY_CHARACTER[character] ?? null; }
+
+/**
+ * TRUE COLORS (`mods.trueColors`) — THE RULE SUIT, and ONLY the rule suit.
+ *
+ * A card has two suit questions asked of it and they had always shared one
+ * answer:
+ *
+ *   WHAT IS IT?      effectiveSuit. What the RELICS read (suitValue, suitMult,
+ *                    the four grinders), what suitCounts counts, what
+ *                    damageBySuit is keyed by, what the card bottom prints, and
+ *                    what a Keeper's seal bans. UNTOUCHED by this relic, on
+ *                    purpose: a Whetstone Charm that suddenly paid on every card
+ *                    in the hand would be four relics rewritten by one.
+ *   HOW DOES IT HIT? this. The SUIT RULE the card's contribution follows —
+ *                    swords 2x damage, hearts damage+heal, diamonds
+ *                    damage+shield, clubs damage+splash. That is the half each
+ *                    hero's kit is built on, and it is the half TRUE COLORS
+ *                    rewrites: every scoring card hits the way YOUR suit hits.
+ *
+ * Read at exactly two places (the contributeOne switch and the club splash),
+ * which is every place the SUIT RULES are consulted and no place else.
+ */
+export function ruleSuitOf(card, character, mods = null) {
+  const eff = effectiveSuit(card, character);
+  return mods?.trueColors ? (SUIT_BY_CHARACTER[character] ?? eff) : eff;
+}
+
 /**
  * Score a played hand for a given character/state.
  * state.mods (all optional):
@@ -590,6 +626,12 @@ export function effectiveSuit(card, character) {
  *   zealUncap              — RETIRED 2026-08-04 (Zeal is uncapped for everyone
  *                            now — see zealCapFor). Read by nothing; old saves
  *                            may still carry it and it does no harm.
+ *   ofAKindMinus1          — THE UNDERSTUDY: every rank group counts one larger
+ *   flushMinus1            — THE BROKEN COMPASS: a flush forms with four cards
+ *   straightMinus1         — THE ROPE LADDER: a straight forms with four cards
+ *   trueColors             — TRUE COLORS: every scoring card follows YOUR suit's
+ *                            RULE (see ruleSuitOf). What the card IS, and every
+ *                            suit-keyed relic that reads it, is untouched.
  *   heartDamageOff / cloverDamageOff — that suit stops dealing damage entirely
  *                            (heartDamageOff was the Infinite Heart's price
  *                            until 2026-08-04, now a general lever again; the
@@ -619,7 +661,15 @@ export function scoreHand({ cards, character, state }) {
   // the classification and the kicker rule have to agree about how many cards
   // an of-a-kind takes, or the hand is named for one rule and scored by the
   // other. (mods is read below; this is the one thing needed above it.)
-  const evalOpts = { ofAKindMinus1: !!(state.mods ?? {}).ofAKindMinus1 };
+  // THE THREE CLASSIFICATION RELICS, read once and handed to BOTH halves of
+  // evaluation (THE UNDERSTUDY's of-a-kind shift, THE BROKEN COMPASS's four-card
+  // flush, THE ROPE LADDER's four-card straight). All three are OFF by default,
+  // and with all three off poker.js is byte-identical to what it always was.
+  const evalOpts = {
+    ofAKindMinus1: !!(state.mods ?? {}).ofAKindMinus1,
+    flushMinus1: !!(state.mods ?? {}).flushMinus1,
+    straightMinus1: !!(state.mods ?? {}).straightMinus1,
+  };
   // GO-GO GOO can hand this more than five cards, and the best five-card hand
   // in the pile is what sets the type and the mult. Everything else in the game
   // plays 1-5 and goes through the ordinary evaluator, unchanged.
@@ -673,6 +723,9 @@ export function scoreHand({ cards, character, state }) {
   const priced = cards.map((card) => {
     const isScoring = scoring.has(card.id);
     const suit = effectiveSuit(card, character);
+    // TRUE COLORS: WHAT IT IS stays `suit`; HOW IT HITS becomes yours. See
+    // ruleSuitOf — the relic rewrites the suit RULE and nothing else.
+    const ruleSuit = ruleSuitOf(card, character, mods);
     if (!SUIT_SET.has(suit)) throw new RangeError(`scoreHand: unknown suit ${suit}`);
     // The card's OWN value (rank + its printed mod) versus the value the
     // ARTIFACTS talk it into. Splitting them here is what lets combat replay
@@ -695,7 +748,7 @@ export function scoreHand({ cards, character, state }) {
     const dead = roulette === 'black';
     const rouletteBonus = roulette === 'green' ? ROULETTE_GREEN_VALUE : 0;
     return {
-      card, isScoring, suit, ownValue, faceBonus, suitBonus, modBonus, rouletteBonus,
+      card, isScoring, suit, ruleSuit, ownValue, faceBonus, suitBonus, modBonus, rouletteBonus,
       roulette, spins, dead,
       value: ownValue + faceBonus + suitBonus + modBonus + rouletteBonus,
     };
@@ -774,7 +827,7 @@ export function scoreHand({ cards, character, state }) {
   const raw = [];
 
   priced.forEach((p, idx) => {
-    const { card, isScoring, suit, ownValue, faceBonus, suitBonus, modBonus, rouletteBonus, roulette, spins, dead, value: v } = p;
+    const { card, isScoring, suit, ruleSuit, ownValue, faceBonus, suitBonus, modBonus, rouletteBonus, roulette, spins, dead, value: v } = p;
     const retriggered = idx === topIdx;
     // THE ECHO SEAL (0803-B): read off the STAMP layer, which also answers for
     // every legacy `mod: 'echo'` card in an old save (see cardStamp).
@@ -790,8 +843,11 @@ export function scoreHand({ cards, character, state }) {
     // to remember the trade.
     const heartsBite = !mods.heartDamageOff;
     const cloversBite = !mods.cloverDamageOff;
+    // SWITCHED ON `ruleSuit`, NOT `suit` (2026-08-10). Identical to `suit` for
+    // every hand in the game; TRUE COLORS is the one relic that separates them,
+    // and this switch is the entire surface it touches on the card side.
     const contributeOne = (val) => {
-      switch (suit) {
+      switch (ruleSuit) {
         case 'swords': return { rawDamage: val * 2, heal: 0, shield: 0 };
         case 'hearts': return { rawDamage: heartsBite ? val : 0, heal: val, shield: 0 };
         // DIAMONDS: damage AND shield, both at full value. gemFactor is 1 by
@@ -947,7 +1003,7 @@ export function scoreHand({ cards, character, state }) {
     // exact: what this card will actually have contributed by the end.
     damageBySuit[suit] = (damageBySuit[suit] ?? 0) + allDamage * outside;
     raw.push({
-      card, rawDamage, heal, shield, scoring: isScoring,
+      card, rawDamage, heal, shield, scoring: isScoring, ruleSuit,
       ownValue, faceBonus, suitBonus, modBonus, rouletteBonus, roulette, dead,
       cardChips, cardMult, cardSeal, cardStampMult,
       value: v, own, retriggered,
@@ -998,6 +1054,17 @@ export function scoreHand({ cards, character, state }) {
   // touches it (the Pocket Anvil's +15, the Golden Spud's +100).
   const flatValueBonus = mods.flatValue ?? 0;
   if (flatValueBonus > 0) baseSum += flatValueBonus;
+
+  // THE TORTOISE STANDARD (2026-08-10) — flat PRE-MULT value bought with the
+  // wall you are already standing behind. It reads state.shield ONLY: the plate
+  // this hand is about to lay is not something you were standing behind when
+  // you chose the hand, and counting it would also let a Diamond hand pay for
+  // its own bonus. Lands on baseSum with the other flat value channels, so the
+  // whole mult curve multiplies it.
+  const shieldStanding = Math.max(0, Math.round(state.shield ?? 0));
+  const shieldValueBonus = (mods.shieldValue ?? 0) > 0
+    ? Math.floor(shieldStanding / SHIELD_VALUE_STEP) * mods.shieldValue : 0;
+  if (shieldValueBonus > 0) baseSum += shieldValueBonus;
 
   // FLAT SHIELD (2026-08-02) — the Tungsten Cube. Added to any hand that
   // already grants Shield, and added HERE, inside scoreHand, which is what puts
@@ -1267,9 +1334,14 @@ export function scoreHand({ cards, character, state }) {
   // scales (outScale, shieldScale, healScale) are deliberately NOT baked in, so
   // the equation can feed a card's single contribution onto the score side and
   // then announce the Pocketwatch's ×2 as its own visible beat.
-  const breakdown = raw.map(({ card, rawDamage, heal, shield, scoring: isScoring, ownValue, faceBonus, suitBonus, modBonus, rouletteBonus, roulette, dead, cardChips, cardMult, cardSeal, cardStampMult, value, own, retriggered, times, liveTimes, activations, beats, allDamage }) => ({
+  const breakdown = raw.map(({ card, rawDamage, heal, shield, scoring: isScoring, ruleSuit, ownValue, faceBonus, suitBonus, modBonus, rouletteBonus, roulette, dead, cardChips, cardMult, cardSeal, cardStampMult, value, own, retriggered, times, liveTimes, activations, beats, allDamage }) => ({
     id: card.id,
+    // WHAT IT IS. The card bottom, the aura, every suit-keyed relic. TRUE
+    // COLORS never touches this; only `ruleSuit` below moves.
     suit: effectiveSuit(card, character),
+    // HOW IT HITS. Equal to `suit` for every hand in the game except under
+    // TRUE COLORS, and reported so the UI and a driver can tell them apart.
+    ruleSuit,
     rank: card.rank,
     mod: card.mod ?? null,
     // THE THREE LAYERS, decomposed for the UI: what it IS, what was pressed
@@ -1287,7 +1359,9 @@ export function scoreHand({ cards, character, state }) {
     damage: capNum(Math.round(capNum(allDamage * valueFactor * effMult))),
     // CLUBS: a quarter of what THIS card dealt reaches every other enemy. Zero
     // for every other suit, so the card bottoms only print it where it is real.
-    aoe: effectiveSuit(card, character) === 'clovers'
+    // Reads the RULE suit, because the splash IS the club suit's rule: under
+    // TRUE COLORS an Ophelia hand splashes whatever it is made of.
+    aoe: ruleSuit === 'clovers'
       ? capNum(Math.round(capNum(allDamage * valueFactor * effMult) * CLUB_SPLASH)) : 0,
     // --- the repeat (2026-08-04) ---
     times,          // CARD-level activations: an ECHO SEAL, the Ouroboros
@@ -1402,6 +1476,8 @@ export function scoreHand({ cards, character, state }) {
     stampMultBonus,    // flat mult the MULTIPLICATIVE SEALS added
     handValueBonus,    // flat pre-mult VALUE a hand-type relic added (Straightedge)
     flatValueBonus,    // flat pre-mult VALUE added to EVERY hand (Pocket Anvil)
+    shieldValueBonus,  // ...and the value the standing wall bought (Tortoise Standard)
+    shieldStanding,    // the Shield it read
     flatShieldBonus,   // flat Shield added to any hand that shields (Tungsten Cube)
     // CLUBS: total damage this hand splashes onto every OTHER living enemy.
     // 0 for a hand with no clubs in it — the readout stays off when it is off.
@@ -1463,6 +1539,10 @@ export function scoreHand({ cards, character, state }) {
     effMult,
     // SIX OF A KIND's square, reported so the cascade can give it its own beat
     // and a verification run can assert the ORDER (see step 8b above).
+    // TRUE COLORS: the suit every scoring card FOUGHT as, or null when the
+    // relic is not on the belt. Reported so the cascade, the preview and a
+    // driver can all say so without re-deriving it from the hero.
+    ruleSuit: mods.trueColors ? (heroSuit(character) ?? null) : null,
     handSquared,       // did this hand square the mult? (SIX OF A KIND only)
     multBeforeSquare: capNum(multBeforeSquare),   // ...and what it squared
     // Did this hand hit the ceiling? The one flag the ∞ readout, the top payoff

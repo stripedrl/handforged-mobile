@@ -11,7 +11,10 @@
  */
 
 import { rollEliteDrop, rollMythical } from './artifacts.js';
-import { gainGold } from './run.js';
+// THE ONE CARD-DESTRUCTION DOOR (run.destroyRunCard). Two rooms take a card off
+// the deck forever, and both go through it so THE GRAVE ROBBER'S SPADE is paid
+// without either room knowing the relic exists.
+import { gainGold, destroyRunCard } from './run.js';
 import { HAND_DEFS, offerableHandTypes } from './poker.js';
 import { cardLabel } from './deck.js';
 import { CASINO_GAMES, MIN_WAGER, MAX_WAGER, casinoAvailable, affordableWagers } from './casino.js';
@@ -169,7 +172,7 @@ export const EVENTS = [
         hintOf() { return 'your highest card, gone for good'; },
         resolve(run) {
           const top = highestCard(run.runDeck);
-          run.runDeck.splice(run.runDeck.indexOf(top), 1);
+          destroyRunCard(top, run);
           gainGold(90, run);
           return { text: `Your ${cardLabel(top)} vanishes into his sleeve. +90 chips.`, good: true };
         },
@@ -347,8 +350,7 @@ export const EVENTS = [
           // Takes the named card out by identity — the old body sorted the
           // master deck in place and shifted the front off it.
           const gone = lowestCard(run.runDeck);
-          const i = run.runDeck.indexOf(gone);
-          if (i >= 0) run.runDeck.splice(i, 1);
+          destroyRunCard(gone, run);
           return { text: `The dark swallows your ${cardLabel(gone)}. The deck feels lighter.`, good: true };
         },
       },
@@ -415,23 +417,69 @@ export function eventOffered(ev, run) {
   return ev.available ? !!ev.available(run) : true;
 }
 
-/** Pick an event for a node — mythic nodes always get the Forge. */
-export function rollEvent(run, node) {
+/**
+ * THE FORCED ROADS. A mythic node is always the Forge, and a node may NAME the
+ * event it wants (DEV/VERIFICATION ONLY — nothing in the game ever sets it; it
+ * exists so a verification run can photograph one specific room instead of
+ * farming boards until it turns up).
+ *
+ * Neither of these is DRAWN FROM THE BAG, so neither writes to run.seenEvents,
+ * and both are answered before the bag is even touched. Split out so the two
+ * public entry points below cannot disagree about them.
+ */
+function forcedEvent(node) {
   if (node.mythic) return CRIMSON_FORGE;
-  // DEV/VERIFICATION ONLY: a node may NAME the event it wants. Nothing in the
-  // game ever sets this; it exists so a verification run can photograph one
-  // specific room instead of farming boards until it turns up.
-  if (node.eventId) {
-    const forced = EVENTS.find(e => e.id === node.eventId);
-    if (forced) return forced;
-  }
+  if (node.eventId) return EVENTS.find(e => e.id === node.eventId) ?? null;
+  return null;
+}
+
+/**
+ * DEAL `count` DISTINCT EVENTS OFF THE NO-REPEAT BAG, MARKING NONE OF THEM SEEN.
+ *
+ * The seen bag (run.seenEvents) exists so a run does not show you the same fork
+ * twice, and drawing is now a separate act from SPENDING: THE CARTOGRAPHER'S
+ * QUILL deals QUILL_EVENT_CHOICES rooms and you walk down one, so the road you
+ * turned down has to go back in the bag. Whoever takes an event calls
+ * noteEventSeen on THAT one and nothing else.
+ *
+ * Returns a list, always at least one long unless the pool is empty. The forced
+ * roads short-circuit to a single-element list: the Forge is the Forge however
+ * many the quill deals.
+ */
+export function rollEventChoices(run, node, count = 1, rng = Math.random) {
+  const forced = forcedEvent(node);
+  if (forced) return [forced];
   run.seenEvents ??= [];
   let pool = EVENTS.filter(e => eventOffered(e, run) && !run.seenEvents.includes(e.id));
   // Everything seen: forget the history and deal again. The `available` gate is
   // re-applied here rather than only above, or clearing the log would hand back
   // a casino this act has already played.
   if (!pool.length) { run.seenEvents = []; pool = EVENTS.filter(e => eventOffered(e, run)); }
-  const ev = rand(pool);
+  // Drawn WITHOUT replacement, so the quill can never deal you the same room
+  // twice. At count 1 this is exactly the single `rand(pool)` draw it replaced:
+  // one rng call, the same index, the same event.
+  const left = [...pool];
+  const out = [];
+  for (let i = 0; i < count && left.length; i++) {
+    out.push(left.splice(Math.floor(rng() * left.length), 1)[0]);
+  }
+  return out;
+}
+
+/** Spend one event out of the bag. The road you actually walked down. */
+export function noteEventSeen(run, ev) {
+  if (!ev) return ev;
+  run.seenEvents ??= [];
   run.seenEvents.push(ev.id);
+  return ev;
+}
+
+/**
+ * Pick an event for a node — mythic nodes always get the Forge. One draw, and
+ * because there is no choice to make, the one drawn is the one taken.
+ */
+export function rollEvent(run, node) {
+  const ev = rollEventChoices(run, node, 1)[0];
+  if (!forcedEvent(node)) noteEventSeen(run, ev);
   return ev;
 }

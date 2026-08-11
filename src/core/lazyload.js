@@ -241,7 +241,17 @@ for (const [kind, count] of Object.entries(PARTICLE_VARIANTS)) {
  * keeps id 'potato' when it becomes the Golden Spud (becomeGoldenSpud) and sets
  * `artKey` instead, so its texture has to be asked for by name.
  */
-export const TRANSFORM_ART = ['goldenSpud'];
+/**
+ * 2026-08-10: four more state arts joined the Golden Spud. THE STRAY KITTEN
+ * grows into blackCat, the SEEDLING opens into seedlingBloom, and SHIP IN A
+ * BOTTLE has a three-rung rigging ladder whose upper two rungs are files of
+ * their own (shipInABottle itself is a pool id and loads in the loop below).
+ * A key that is missing from this list is a relic that paints its fallback
+ * icon forever and a unit sweep that fails, which is the 0806 lesson.
+ */
+export const TRANSFORM_ART = [
+  'goldenSpud', 'blackCat', 'seedlingBloom', 'shipInABottle_2', 'shipInABottle_3',
+];
 for (const art of ARTIFACT_POOL) boot('art_' + art.id, `${A}/icons/artifacts/${art.id}.png`);
 for (const key of TRANSFORM_ART) boot('art_' + key, `${A}/icons/artifacts/${key}.png`);
 

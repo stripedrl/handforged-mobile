@@ -82,6 +82,11 @@ import {
   slotsUsed, mirrorBlockedBy,
   mirrorNote, cardKey, noteReached, noteKill, beltArtifacts, nookArtifacts, gainGold, chipGainFactor,
   checkpointFight, clearPendingFight, handSizeOf, HAND_SIZE_FLOOR, leftoverHandChips,
+  // THE BELL AT THE BOTTOM OF THE CARD-DESTRUCTION FUNNEL. burnCardForever is
+  // the one removal path that owns its own splice (it has a draw pile, a
+  // discard pile and a live sprite to sweep as well as the run deck), so it
+  // rings the bell by hand — see noteCardsDestroyed's own note.
+  noteCardsDestroyed,
   // ALTERNATE ACTS: ACTS[i] is only half the answer now. actOf resolves the
   // index through run.actPicks, which was rolled once at run start.
   actOf,
@@ -103,7 +108,16 @@ import { gateOn } from '../ui/loadingVeil.js';
 import { uninstallRunRng } from '../core/rng.js';
 import { autosave, clearSave } from '../core/save.js';
 import { drawRecap, recapRows, unlockRows, recapHeight, RECAP } from '../ui/runRecap.js';
-import { ARTIFACT_RARITY, ARTIFACT_POOL, acquireArtifact, getProp, WHEEL_OF_DIVINITY_WEDGES, artifactLiveLine, chaosMultRoll } from '../core/artifacts.js';
+import {
+  ARTIFACT_RARITY, ARTIFACT_POOL, acquireArtifact, getProp, WHEEL_OF_DIVINITY_WEDGES,
+  artifactLiveLine, chaosMultRoll,
+  // THE 2026-08-10 WAVE. Only the two numbers COMET IN A JAR quotes are read
+  // here: everything else the wave needs arrives as a `prop` on the instance
+  // (props.freezeReduce, props.overhealChipCap, props.thunderEvery,
+  // props.deadMansRepeat/Factor, props.potionKeep), which is the same constant
+  // one indirection later and keeps mirrored copies reading their OWN number.
+  COMET_CHARGES, COMET_FACTOR,
+} from '../core/artifacts.js';
 // NIGHT 0802: the egg's queued hatch, the potato's secret, the slot machine.
 import {
   rollHatchDef, hatchEgg, becomeGoldenSpud, GOLDEN_SPUD_VALUE, SLOT_BUTTON_CHIPS,
@@ -681,6 +695,63 @@ const LOUD_EFFECTS = new Set([
   // ...and the biome wave's own two: both stage a set-piece over the fan.
   'blind', 'fade',
 ]);
+/**
+ * SOVEREIGN'S WRIT (the mythical, 2026-08-10) — WHAT A SIGNATURE IS.
+ *
+ * THE RULING, in one sentence: A SIGNATURE IS NULLIFIED WHEN IT LANDS ON YOU.
+ * Your hero, your hand, your deck, your relics, your Shield, your HP, your
+ * right to play a hand at all. A signature that only ever changes the ENEMY —
+ * its body, its allies, its armour — is untouched, because a bear healing
+ * itself is not something happening to you.
+ *
+ * These are the EFFECT TYPES, i.e. the names an intent carries. Listed by the
+ * dispatch that would otherwise deliver them:
+ *
+ *   applyPlayerDebuff's signature class
+ *     rooted (Fairy King's aura and the DREAD GRIP that borrows it), courtLock
+ *     (COURT ADJOURNED), suitSeal (RIME THORNS, TALON GRIP's suit lock),
+ *     suitban (ETERNAL KEEP), spikes, blind (MOONGLARE), fade (SCALE DUST),
+ *     hypnotize (the HYPNOTIC GAZE).
+ *   runBossEffect's player-facing half
+ *     quake (HOPQUAKE scrambles YOUR suits), slice (AGATHA cuts YOUR cards).
+ *   runBiomeEffect's player-facing half
+ *     condemn, burnPlayed, handTypeOnce (DOUBLE JEOPARDY), demandHand (THE
+ *     QUEUE), hangRelic (UNSINGING), mirrorHand (REFLECTION's throwback),
+ *     shrinkHand (REWEAVE), dropHand (WEIGHTLESS), cardTax (PYRE TAX),
+ *     markCard (HE SEES IT COMING).
+ *
+ * WHAT KEEPS WORKING, deliberately: FEAST, CALL OF THE PACK, GLACIAL AEGIS,
+ * WAKING WRATH, SILKBOUND, THE HUNT, STILLNESS, SCAFFOLD, NOTHING TWICE, the
+ * FROZEN RITE, the SISTERS' WARD, MORPH and the VOID SHELL. Those are their
+ * bodies, their allies and their armour, and none of them is an effect on you.
+ *
+ * ...and GENERIC VIOLENCE lands as always, bosses included: `attack`, `buff`,
+ * `charge`, and the plain debuffs (bleed, poison, brittle, fear, freeze) are
+ * NOT on this list. The writ answers SIGNATURES, not violence.
+ */
+const WRIT_BLOCKED = new Set([
+  // applyPlayerDebuff's signature class
+  'rooted', 'courtLock', 'suitSeal', 'suitban', 'spikes', 'blind', 'fade', 'hypnotize',
+  // runBossEffect's player-facing half
+  'quake', 'slice',
+  // runBiomeEffect's player-facing half
+  'condemn', 'burnPlayed', 'handTypeOnce', 'demandHand', 'hangRelic',
+  'mirrorHand', 'shrinkHand', 'dropHand', 'cardTax', 'markCard',
+]);
+/**
+ * ...and the same ruling read off a def's SPECIAL id rather than off an intent's
+ * effect type, for the whole-fight passives setupBossSpecials switches on at the
+ * opening bell (they never arrive as an effect, so they would otherwise be the
+ * one door the writ could not stand in). Each maps to the blocked TYPE it is:
+ *
+ *   rooted / dreadGrip  -> 'rooted'     cards off your deal
+ *   wintersForce        -> 'rooted'     which hands you are allowed to play
+ *   shatterguard        -> 'rooted'     every point of Shield you gain
+ *
+ * All three land on YOU and all three are therefore struck down. Everything
+ * else in SIGNATURES is the enemy's own body and is deliberately absent.
+ */
+const WRIT_BLOCKED_SPECIALS = new Set(['rooted', 'dreadGrip', 'wintersForce', 'shatterguard']);
 /** Biome dress for WARDING: Act I BARK SKIN · II FROST SHIELD · III GRAVE SHELL. */
 const WARD_LOOK = {
   forest: { name: 'BARK SKIN', tint: 0x8fe098, ink: '#8fe098' },
@@ -862,6 +933,53 @@ export class CombatScene extends Phaser.Scene {
   propHolders(key) { return this.liveArtifacts().filter(a => (a.props?.[key] ?? 0) > 0); }
 
   hasArtifact(id) { return run.artifacts.some(a => a.id === id); }
+
+  /**
+   * SOVEREIGN'S WRIT, the one predicate. Both entry points below funnel through
+   * it, so there is exactly ONE place that decides whether the mythical is
+   * standing between you and a signature — no per-boss checks scattered through
+   * the dispatches, which is the whole reason the relic is auditable at all.
+   *
+   * `blocked` is the caller's own verdict on its name (an effect TYPE for the
+   * intent loop, a def's SPECIAL id for the opening-bell passives).
+   */
+  writRefuse(enemy, blocked, { delay = 0 } = {}) {
+    if (this.prop('sovereignWrit') <= 0) return false;
+    // RANK AND FILE ARE NOT SOVEREIGN. A wolf's SEALED SUIT is the same effect
+    // type an elite's RIME THORNS is, and the writ's own words are "boss and
+    // elite SIGNATURE mechanics" — so the ordinary enemies keep their teeth.
+    if (isRankAndFile(enemy?.def)) return false;
+    if (!blocked) return false;
+    // THE BANK IS PER HOLDER, like every other scaler: a mirrored writ counts
+    // its own signatures struck down and its tooltip reads its own number.
+    for (const a of this.propHolders('sovereignWrit')) {
+      a.state.struck = (a.state.struck ?? 0) + 1;
+    }
+    // The same beat the immunity charms play, one size up: this is a mythical
+    // earning a price, so it gets a word rather than a shrug. `delay` is for
+    // the opening-bell passives, whose telegraph has to be READ before it is
+    // struck down (see setupBossSpecials).
+    const beat = () => {
+      sfx(this, 'shield', { volume: 0.8, rate: 1.1 });
+      popMessage(this, this.heroHome.x, this.heroHome.y - 60, 'THE WRIT!',
+        { color: '#e8c84a', size: 32 });
+    };
+    if (delay > 0) this.time.delayedCall(delay, beat); else beat();
+    return true;
+  }
+
+  /** SOVEREIGN'S WRIT: does this signature effect from this body reach you? */
+  writBlocks(enemy, type, opts) {
+    return this.writRefuse(enemy, WRIT_BLOCKED.has(type), opts);
+  }
+
+  /**
+   * ...and the same question asked of a whole-fight PASSIVE, which never
+   * arrives as an intent effect and so has no type to ask about.
+   */
+  writBlocksSpecial(enemy, opts) {
+    return this.writRefuse(enemy, WRIT_BLOCKED_SPECIALS.has(enemy?.def?.special), opts);
+  }
 
   /**
    * Aegis Core: every point of Shield the player gains is 35% stronger. Every
@@ -1068,6 +1186,28 @@ export class CombatScene extends Phaser.Scene {
     for (const a of this.propHolders('allIn')) {
       mods.globalMultFactor *= 3;
       this.mulAtRelic(modList, a, 3);
+    }
+    // THE DEAD MAN'S HAND. The last hand you are ENTITLED to is replayed and
+    // strikes at ×N.
+    //
+    // WHY `handsLeft === 1`. handsLeft is handLimit - handsThisFight, and
+    // handsThisFight is incremented AFTER this state is built (at the commit
+    // point in playHand). So while THIS hand is being scored the clock is still
+    // showing the hand it is about to spend, and `=== 1` really does read as
+    // "this is the last hand you are entitled to" rather than "you have one
+    // more after this". Read off the CLOCK rather than off the fan, so it is
+    // the last hand you were OWED and not merely the last one you played — and
+    // so the HOURGLASS, which spends no hand, can never re-arm it.
+    //
+    // Through addHandRepeat like every other replay in the game, which is what
+    // makes it stack ADDITIVELY with the Repeating Pocketwatch (1+1+1 = three
+    // plays) instead of compounding into a number nobody chose.
+    if (this.prop('deadMansHand') > 0 && this.handsLeft === 1) {
+      for (const a of this.propHolders('deadMansHand')) {
+        addHandRepeat(mods, a.props.deadMansRepeat);
+        mods.globalMultFactor *= a.props.deadMansFactor;
+        this.mulAtRelic(modList, a, a.props.deadMansFactor);
+      }
     }
     // ================= THE LEFTOVER BENCH (0803-B §1.1/§1.3) =================
     //
@@ -2191,6 +2331,37 @@ export class CombatScene extends Phaser.Scene {
       forceSlot: (v) => { this._slotForce = (v == null ? null : !!v); return this._slotForce; },
       /** Pin the Prospector's Pan to a certainty (1) or a never (0). */
       forcePan: (v) => { this._panForce = (v == null ? null : Number(v)); return this._panForce; },
+      // --- THE 2026-08-10 WAVE ---------------------------------------------
+      /** Every owned relic's banked state and live line, plus the wave's own switches. */
+      wave0810: () => ({
+        belt: run.artifacts.map(a => ({
+          id: a.id, name: a.name, artKey: a.artKey ?? null,
+          state: JSON.parse(JSON.stringify(a.state ?? {})),
+          live: artifactLiveLine(a, run),
+        })),
+        writ: this.prop('sovereignWrit'),
+        coldSnap: !!this._coldSnap,
+        handsLeft: this.handsLeft,
+        handsThisFight: this.handsThisFight,
+        lastRes: {
+          handType: this._lastRes?.handType ?? null,
+          handRepeat: this._lastRes?.handRepeat ?? 1,
+          effMult: this._lastRes?.effMult ?? 0,
+          ruleSuit: this._lastRes?.ruleSuit ?? null,
+          shieldValueBonus: this._lastRes?.shieldValueBonus ?? 0,
+        },
+      }),
+      /** Pin the GLASS GAVEL's shatter roll: 1 breaks it now, 0 never. */
+      forceGavel: (p) => { this._gavelForce = (p == null ? null : Number(p)); return this._gavelForce; },
+      /** Pin the BREWER'S THUMB's keep roll the same way. */
+      forceBrewer: (p) => { this._brewerForce = (p == null ? null : Number(p)); return this._brewerForce; },
+      /** What SOVEREIGN'S WRIT answers, and how many signatures it has struck down. */
+      writState: () => ({
+        blocked: [...WRIT_BLOCKED],
+        specials: [...WRIT_BLOCKED_SPECIALS],
+        struck: this.propHolders('sovereignWrit')
+          .reduce((s, a) => s + (a.state.struck ?? 0), 0),
+      }),
       /** Age a relic's own fight counter so an egg or a potato comes due now. */
       ageRelic: (id, n) => {
         const a = run.artifacts.find(x => x.id === id);
@@ -2327,7 +2498,11 @@ export class CombatScene extends Phaser.Scene {
           zealConsumed: r.zealConsumed ?? 0, zealFactor: r.zealFactor ?? 1,
           zealGained: r.zealGained ?? 0, zeal: this.player.zeal,
           // 0803: the uncap, and the Bull's wall-to-mult spend, as plain numbers.
-          zealCap: (r.zealCap === Infinity ? -1 : r.zealCap ?? ZEAL_CAP),
+          // 0810: zealCapFor answers INFINITY_CAP now, never a literal Infinity,
+          // so the old `-1 means no lid` sentinel had nothing left to encode —
+          // the ceiling is a finite number that travels over the wire intact.
+          // A driver asks isInfinite() / INFINITY_CAP, not a magic negative.
+          zealCap: (r.zealCap ?? ZEAL_CAP),
           shieldMultRead: r.shieldMultRead ?? 0,
           shieldMultFactor: r.shieldMultFactor ?? 1,
           benchedEthereal: this._benchedEthereal ?? 0,
@@ -3873,6 +4048,164 @@ export class CombatScene extends Phaser.Scene {
     return true;
   }
 
+  // ---------------- THE THREE ACTIVES OF THE 2026-08-10 WAVE ----------------
+  // All three obey useActiveArtifact's contract above: RETURN FALSE TO REFUSE,
+  // and a refusal costs no charge. So each one's first job is to say out loud
+  // why there is nothing legal to do, rather than eating the fight's one press.
+
+  /**
+   * COMET IN A JAR. One charge a hand, across the whole RUN; RELEASE empties
+   * the jar and lights the rest of the fight up. Refuses while it is short,
+   * because a comet released at twenty-four charges is a comet wasted.
+   */
+  useCometInAJar(a) {
+    const have = a.state.charges ?? 0;
+    if (have < COMET_CHARGES) {
+      this.announce(`THE JAR IS NOT FULL: ${have} of ${COMET_CHARGES} charges`, '#8fd8ff');
+      return false;
+    }
+    a.state.charges = have - COMET_CHARGES;
+    a.state.lit = true;
+    // The ×N rides mods.globalMultFactor off `state.lit`, so the belt has to be
+    // re-collected and the PREVIEW re-read the instant it is set: a player
+    // planning the next hand against the number the jar had a second ago is a
+    // player being lied to by the equation bar.
+    this.refreshAll();
+    this.updatePreview();
+    sfx(this, 'legendary_appears', { volume: 0.95 });
+    this.cameras.main.flash(240, 120, 180, 255);
+    burst(this, ARENA_CX, 320, 0x8fd8ff, 28);
+    this.bigMessage(`THE COMET!\n×${COMET_FACTOR} mult`, '#8fd8ff', 54, 2400);
+    this.pulseArtifact(a, { text: `×${COMET_FACTOR}`, color: '#8fd8ff' });
+    return true;
+  }
+
+  /**
+   * COLD SNAP CHARM. Armed, not fired: the NEXT hand you play comes back to
+   * your hand instead of going to the discard pile. Refuses while it is already
+   * armed, so a stray second press cannot burn the charge on nothing.
+   */
+  useColdSnapCharm(a) {
+    if (this._coldSnap) {
+      this.announce('ALREADY ARMED: play a hand', '#bfd8ff');
+      return false;
+    }
+    a.state.armed = true;
+    this._coldSnap = a;
+    sfx(this, 'frozen_placed', { volume: 0.85 });
+    popMessage(this, ARENA_CX, 300, 'ARMED: the next hand comes home',
+      { color: '#bfd8ff', size: 34 });
+    this.pulseArtifact(a, { text: 'ARMED', color: '#bfd8ff' });
+    this.refreshAll();
+    return true;
+  }
+
+  /**
+   * COLD SNAP CHARM lands, at the stow loop. The sprites that SURVIVED the hand
+   * go back into the fan instead of into the discard pile.
+   *
+   * A CARD THAT IS GONE IS STILL GONE: burned and vanished sprites were already
+   * skipped by the loop's own guard, so the All-In Visor, ETHEREAL's vanish and
+   * the FADE all still win and the charm resurrects nothing.
+   *
+   * THE HAND SIZE IS STILL THE HAND SIZE. If the fan cannot hold everything
+   * that survived, as many as fit come home and the rest are stowed normally —
+   * a charm is not a licence to hold nine cards.
+   */
+  coldSnapReturn(a, coming) {
+    this._coldSnap = null;
+    a.state.armed = false;
+    a.state.saved = (a.state.saved ?? 0) + coming.length;
+    if (!coming.length) return;
+    // Held to the same beat the discard tweens fly on, so the hand does not
+    // snap back into the fan while the cascade is still finishing its sentence.
+    this.time.delayedCall(this.spd(575), () => {
+      for (const cs of coming) {
+        if (!cs.active) continue;
+        cs.setSelected(false);
+        // A returning card re-derives its lock rather than simply losing it: a
+        // sealed suit is still sealed, and a card is not laundered by leaving.
+        cs.setLockState(this.cardDenied(cs.card) ? 'banned' : null);
+        this.handCards.push(cs);
+      }
+      this.layoutHand();
+      sfx(this, 'frozen_placed', { volume: 0.8, rate: 1.15 });
+      popMessage(this, ARENA_CX, 300, 'COLD SNAP', { color: '#bfd8ff', size: 40 });
+      this.pulseArtifact(a, { text: `${coming.length} HOME`, color: '#bfd8ff' });
+      this.updatePreview();
+      this.refreshAll();
+    });
+  }
+
+  /**
+   * HOURGLASS OF THE SECOND SUN. Re-executes the LAST hand you played, through
+   * the ordinary scoring path, as a play that does NOT tick the hand clock.
+   *
+   * IT IS A REPLAY OF THE HAND'S OUTPUT, not a re-draw. Those cards are in the
+   * discard pile by now (or burned, or gone); the hourglass never touches the
+   * fan and never asks for them back. It re-scores the same five card OBJECTS
+   * and re-delivers what they make, which is exactly what the CHRONO ELIXIR's
+   * echo does, on a button and with a fresh roll of every gamble in the hand.
+   *
+   * IT DOES NOT SPEND A HAND: handsThisFight and run.counters.handsPlayed are
+   * both deliberately untouched, so the clock, the out-of-hands warning and THE
+   * DEAD MAN'S HAND (which reads the clock at BUILD time) are all unmoved by it.
+   */
+  useSecondSunHourglass(a) {
+    const last = this._lastPlay;
+    if (!last?.cards?.length) {
+      this.announce('NO HAND TO TURN BACK YET', '#ffc542');
+      return false;
+    }
+    const cards = last.cards;
+    // The ordinary path, start to finish: the orb gambles again, the belt is
+    // re-collected against the board AS IT STANDS NOW, and the wheel spins
+    // fresh. A replay that reused the old result would be a screenshot.
+    this.rollChaosOrbs();
+    const state = this.buildScoreState(cards);
+    state.rouletteRolls = rollRouletteFor(cards, Math.random, state.mods);
+    if (this._rouletteForce) {
+      for (const k of Object.keys(state.rouletteRolls)) {
+        state.rouletteRolls[k] = state.rouletteRolls[k].map(() => this._rouletteForce);
+      }
+    }
+    const res = scoreHand({ cards, character: this.chr.id, state });
+    this._lastRes = res;
+    a.state.turned = (a.state.turned ?? 0) + 1;
+    sfx(this, 'legendary_appears', { volume: 0.9 });
+    this.cameras.main.flash(220, 255, 210, 120);
+    this.bigMessage('THE SECOND SUN', '#ffc542', 54, 2200);
+    this.pulseArtifact(a, { text: 'AGAIN', color: '#ffc542' });
+    // THE BIOME CONTEXT, built exactly the way resolveHand builds it: a replay
+    // is still a HAND, so a WALL, NOTHING TWICE, a marked card and a forgotten
+    // suit all still stand in front of it.
+    this._handCtx = {
+      type: last.ev.type, ids: cards.map(c => c.id),
+      used: new Set(this.usedHandTypes),
+      damageBySuit: res.damageBySuit ?? {},
+    };
+    for (const e of this.enemies ?? []) e._gateSaid = false;
+    if (res.shield && this.addShield(res.shield) > 0) this.heroShield();
+    if (res.heal) this.healPlayer(res.heal, { quiet: true });
+    if (res.chipBonus) this.gainChips(res.chipBonus, null, { quiet: true });
+    this.retargetIfDead();
+    let dealt = 0;
+    if (res.damage > 0 && this.target?.alive) {
+      sfx(this, res.damage >= 90 ? 'hit_big' : 'hit_small', { volume: 1, jitter: 0.05 });
+      dealt = this.deliverStrike(res, { color: '#ffc542' }).dealt;
+    }
+    this._handCtx = null;
+    // NO afterHand HOOK, on purpose and for the echo's own reason: the bank
+    // ledger, the gavel's roll and the comet's charge are all paid ONCE per
+    // hand COMMITTED, and the hourglass commits nothing.
+    this.noteHandStats(dealt, 0, last.ev.name);
+    this.refreshAll();
+    this.time.delayedCall(700, () => {
+      if (!this.livingEnemies().length && !this.busy) this.fightWon();
+    });
+    return true;
+  }
+
   /**
    * Balatro moment v2: the relic swells AND STAYS swollen until the next hand.
    * Repeat triggers in one hand accumulate — the label grows into a running
@@ -4136,6 +4469,16 @@ export class CombatScene extends Phaser.Scene {
       // above — the bow is here, the ×N is repeatBeat()'s.
       if (pr.oneCardRepeat && n === 1) {
         jobs.push([a, { text: `↻ ×${pr.oneCardRepeat}`, color: '#ff5ce1' }]);
+        this._repeatCause.push(a);
+      }
+      // THE DEAD MAN'S HAND takes two bows, because it genuinely moves both
+      // sides: the ×N on the mult, and the replay the repeat beat is about to
+      // perform. handsThisFight is already incremented here, so the clock reads
+      // ZERO for the very hand buildScoreState saw one left on — the same
+      // question asked one tick later.
+      if (pr.deadMansHand && this.handsLeft === 0) {
+        jobs.push([a, { mult: pr.deadMansFactor, color: '#ff8c28', eqMul: pr.deadMansFactor }]);
+        jobs.push([a, { text: `↻ ×${pr.deadMansRepeat}`, color: '#ff8c28' }]);
         this._repeatCause.push(a);
       }
       // Stamp the CELL onto every job this iteration produced, so a mirrored
@@ -4530,9 +4873,51 @@ export class CombatScene extends Phaser.Scene {
 
   // ---------------- Artifact-facing helpers (hooks call these) ----------------
 
+  /**
+   * PILGRIM'S FLASK. Healing you cannot HOLD becomes chips, 1 for 1, capped per
+   * FIGHT. `amount` is what was offered and `applied` is what the HP bar
+   * actually took, so the waste is simply the difference and the flask never
+   * has to know where the heal came from.
+   *
+   * THE ZEALOT IS OUT, and it is a deliberate ruling (it is the def's own, in
+   * artifacts.js): his overheal banks as ZEAL, which is his entire kit. It is
+   * not WASTED healing, it is his resource — and since zealCapFor took the
+   * ceiling off there is nothing left over for the flask to catch anyway. So
+   * the relic is dead weight in his hands rather than a second engine bolted
+   * onto the one he already has.
+   *
+   * @returns {number} chips actually paid.
+   */
+  catchOverheal(amount, applied) {
+    if (this.prop('overhealChips') <= 0) return 0;
+    const waste = Math.max(0, Math.round((amount ?? 0) - (applied ?? 0)));
+    if (waste <= 0) return 0;
+    if (this.chr.id === 'zealot') return 0;
+    let paid = 0;
+    // PER HOLDER, per fight: a mirrored flask catches its own twenty, banks its
+    // own ledger and its tooltip reads its own number, exactly like every other
+    // capped scaler in the pool.
+    for (const a of this.propHolders('overhealChips')) {
+      const room = Math.max(0, (a.props.overhealChipCap ?? 0) - (a.state.fight ?? 0));
+      const take = Math.min(room, waste * a.props.overhealChips);
+      if (take <= 0) continue;
+      a.state.fight = (a.state.fight ?? 0) + take;
+      const got = this.gainChips(take, 'FLASK');
+      a.state.paid = (a.state.paid ?? 0) + got;
+      paid += got;
+    }
+    return paid;
+  }
+
   healPlayer(amount, { quiet = false } = {}) {
     const missing = this.player.maxHp - this.player.hp;
     const applied = Math.min(amount, missing);
+    // THE FLASK'S FIRST DOOR. Asked BEFORE the early return below, because a
+    // heal that lands entirely on a full bar is the exact case the relic exists
+    // for and `applied <= 0` is what that looks like. (The second door is the
+    // hearts hand in resolveHand, which deliberately does not route through
+    // healPlayer — see the note there.)
+    this.catchOverheal(amount, Math.max(0, applied));
     if (applied <= 0) return;
     this.player.hp += applied;
     if (!quiet) { sfx(this, 'heal', { volume: 0.7 }); this.heroHeal(); }
@@ -5001,6 +5386,72 @@ export class CombatScene extends Phaser.Scene {
   }
 
   /**
+   * A RELIC BECOMES SOMETHING ELSE, IN PLACE. THE SEEDLING blooms; SHIP IN A
+   * BOTTLE raises a mast and eventually makes full sail. Both rewrite their own
+   * instance (the artKey above all) and then need the mat to actually paint the
+   * new picture — turnPotatoGolden's beat one size down, because the potato's
+   * secret is a whole ceremony and a mast is a moment.
+   */
+  relicTransformed(a, message) {
+    // THE MEMO SIGNATURE IS ID-ONLY and none of these transformations changes
+    // an id, so without this null the mat would sit there painting the seed
+    // while the relic underneath it was already in bloom.
+    this._artifactSig = null;
+    this.onBeltChanged?.();
+    this.time.delayedCall(this.spd(300), () => {
+      sfx(this, 'minor_upgrade', { volume: 0.85 });
+      const icon = this.artifactIcons?.[run.artifacts.indexOf(a)];
+      if (icon?.active) burst(this, icon.x, icon.y, 0xffd23e, 14);
+      this.pulseArtifact(a, { text: message, color: '#ffd23e' });
+    });
+  }
+
+  /**
+   * THE GLASS GAVEL SHATTERS. A relic leaves the belt with NO PAYOUT, which is
+   * exactly why this is not sellArtifactInFight: there is no sale here, no
+   * chips, no receipt and no re-suiting to undo.
+   *
+   * onSell IS STILL CALLED. It is the one hook a relic uses to REVOKE what it
+   * granted at pickup (a Discard, a hand slot, the Cracked Crown's chips), and
+   * a gavel that shattered while its grant stayed behind would be a permanent
+   * freebie you could buy on purpose. What the relic gave, it gives back — the
+   * gavel takes the RELIC, not the honesty.
+   *
+   * @returns {boolean} true when a relic was actually taken off the belt.
+   */
+  shatterRelic(art) {
+    const i = run.artifacts.indexOf(art);
+    if (i < 0) return false;
+    // The icon is about to be destroyed by the repaint below, so the ceremony
+    // is played by a stand-in at the same spot: a tinted copy that cracks
+    // outward while the real mat is already re-laying itself out underneath.
+    const icon = this.artifactIcons?.[i];
+    const at = icon?.active ? { x: icon.x, y: icon.y } : { x: SIDEBAR_W / 2, y: 380 };
+    if (icon?.active) {
+      const ghost = this.add.image(at.x, at.y, icon.texture.key)
+        .setDisplaySize(icon.displayWidth, icon.displayHeight)
+        .setTint(0xbfd8ff).setDepth(DEPTH.overlay);
+      this.tweens.add({
+        targets: ghost, scale: ghost.scale * 1.4, alpha: 0, angle: 14,
+        duration: 320, ease: 'Cubic.easeIn', onComplete: () => ghost.destroy(),
+      });
+    }
+    run.artifacts.splice(i, 1);
+    try { art.onSell?.(run, art); }
+    catch (e) { console.error(`gavel onSell ${art.id}`, e); }
+    sfx(this, 'frozen_placed', { volume: 0.9, rate: 1.4 });
+    sfx(this, 'card_deselect', { volume: 0.8, rate: 0.7 });
+    burst(this, at.x, at.y, 0xbfd8ff, 18);
+    popMessage(this, at.x, at.y - 40, 'THE GAVEL SHATTERS', { color: '#bfd8ff', size: 30 });
+    // The memo signature is ID-ONLY. The splice does change the id list, but
+    // nulling it first is what guarantees the repaint even when a second gavel
+    // (or a mirror of one) leaves the list hashing the same as before.
+    this._artifactSig = null;
+    this.onBeltChanged();
+    return true;
+  }
+
+  /**
    * THE HATCH. Queued by the egg's fightEnd hook (never performed there — see
    * queueHatch), presented here as its own beat before the rewards open, and
    * resolved IN THE SAME ROW POSITION: relics resolve left to right, so where
@@ -5094,7 +5545,17 @@ export class CombatScene extends Phaser.Scene {
    */
   burnCardForever(card) {
     const i = run.runDeck.findIndex(c => c.id === card.id);
-    if (i >= 0) run.runDeck.splice(i, 1);
+    if (i >= 0) {
+      run.runDeck.splice(i, 1);
+      // THE BELL AT THE BOTTOM OF THE FUNNEL. Rung ONLY when the splice really
+      // happened, so a card already gone from the run deck (a double-burn, a
+      // sprite struck twice) can never pay THE GRAVE ROBBER'S SPADE twice.
+      // This one line is what pays the spade for the All-In Visor, the Wheel's
+      // DESTROY wedge, CONDEMNED, the ETHEREAL vanish, the FADE's vanish and
+      // the Potion of Poof, all at once — every path in the game that takes a
+      // card away forever comes through either here or run.destroyRunCard.
+      noteCardsDestroyed(1, run);
+    }
     this.deck = this.deck.filter(c => c.id !== card.id);
     this.discardPile = this.discardPile.filter(c => c.id !== card.id);
   }
@@ -5220,6 +5681,22 @@ export class CombatScene extends Phaser.Scene {
     // or a boss is allowed its moment.
     if (source && CARD_DENIAL_CAP > 0 && (type === 'freeze' || type === 'fear') && isRankAndFile(source.def)) {
       value = Math.min(CARD_DENIAL_CAP, value);
+    }
+
+    // WOOLEN MITTENS. FREEZE reaches fewer of your cards, from ANY source, and
+    // it STACKS WITH THE CAP rather than replacing it: the cap trims the
+    // rank-and-file's number first, the mittens then take one off whatever is
+    // left. On a capped 2 that is a 1; on a boss's uncapped 3 it is a 2. Taken
+    // all the way to nothing it is an immunity for that one gust, and it says
+    // so with the charms' own beat rather than freezing zero cards in silence.
+    const mitts = type === 'freeze' ? this.prop('freezeReduce') : 0;
+    if (mitts > 0) {
+      value = Math.max(0, value - mitts);
+      if (value <= 0) {
+        sfx(this, 'shield', { volume: 0.7, rate: 1.2 });
+        popMessage(this, this.heroHome.x, this.heroHome.y - 60, 'IMMUNE!', { color: '#9adcff', size: 30 });
+        return;
+      }
     }
 
     const color = DEBUFF_COLORS[type] ?? 0xffffff;
@@ -5723,6 +6200,11 @@ export class CombatScene extends Phaser.Scene {
    * tests/mechanics.test.js's Talon Grip deadlock matrix.
    */
   talonGrip(enemy) {
+    // SOVEREIGN'S WRIT. TALON GRIP is the one signature that rides IN on a
+    // plain debuff: the bleed is generic violence and lands as always, the SUIT
+    // LOCK it comes wrapped in is the signature and is struck down. Asked as
+    // 'suitSeal' because that is literally the effect the seal is.
+    if (this.writBlocks(enemy, 'suitSeal')) return null;
     this.applySuitSeal(TALON_GRIP_SUIT, TALON_GRIP_TURNS, { quiet: true });
     sfx(this, 'hit_stab', { volume: 0.9, rate: 0.8, jitter: 0.05 });
     shake(this, 0.006, 240);
@@ -7733,18 +8215,33 @@ export class CombatScene extends Phaser.Scene {
   setupBossSpecials() {
     const specials = new Set(this.enemies.filter(e => e.def.special).map(e => e.def.special));
     const beat = 1500;   // after the boss entrance flare has finished shouting
+    /**
+     * SOVEREIGN'S WRIT at the opening bell. The whole-fight passives never
+     * arrive as an intent effect, so the writ has to stand here too — once,
+     * through the same predicate the intent loop uses.
+     *
+     * THE BLURB STILL PRINTS. The telegraph is the game telling you what it
+     * WOULD do to you, and watching it get struck down IS the mythical's
+     * payoff: the sentence lands, then 'THE WRIT!' lands on top of it. A
+     * silently-missing set-piece would read as a bug, not as a relic.
+     */
+    const writ = (special) => this.writBlocksSpecial(
+      (this.enemies ?? []).find(e => e.def?.special === special), { delay: beat + 420 });
 
     if (specials.has('rooted')) {
-      this.bossHandPenalty = ROOTED_PENALTY;
-      this.growRoots();
+      // Struck down AFTER the blurb's own beat, so the roots are announced and
+      // then refused rather than never mentioned. Nothing is switched on.
+      const rooted = writ('rooted');
+      if (!rooted) { this.bossHandPenalty = ROOTED_PENALTY; this.growRoots(); }
       this.time.delayedCall(beat, () => {
         this.bossBlurb(`ROOTED: ${ROOTED_PENALTY} fewer cards in hand`, '#8fe098');
         sfx(this, 'fear_placed', { volume: 0.7, rate: 0.8 });
       });
     }
     if (specials.has('wintersForce')) {
-      this.wintersForce = true;
-      this.winterAura();
+      // WINTER'S FORCE dictates which hands you are ALLOWED to play, which is a
+      // signature landing squarely on you. The aura never goes up.
+      if (!writ('wintersForce')) { this.wintersForce = true; this.winterAura(); }
       this.time.delayedCall(beat, () => {
         this.bossBlurb(`WINTER'S FORCE: play EXACTLY ${this.winterNeed} cards`, '#9adcff');
         sfx(this, 'frozen_placed', { volume: 0.8 });
@@ -7778,6 +8275,12 @@ export class CombatScene extends Phaser.Scene {
         this.bossBlurb(sig.blurb, sig.ink);
         sfx(this, 'fear_placed', { volume: 0.7, rate: 0.8 });
       });
+      // SOVEREIGN'S WRIT, again through the ONE predicate: the blurb above has
+      // already been queued (the telegraph always prints), and the switch below
+      // is what actually happens to you. Struck down, nothing is switched on.
+      // Every signature NOT in WRIT_BLOCKED_SPECIALS — the Aegis, Stillness,
+      // the Hunt, the Pack — falls straight through and keeps working.
+      if (this.writBlocksSpecial(enemy, { delay: beat + i * BLURB_STAGGER + 420 })) return;
       switch (enemy.def.special) {
         // E1: the aura is live from the bell, and it eats the plate you walked
         // in with — see raiseShatterguard.
@@ -8786,6 +9289,20 @@ export class CombatScene extends Phaser.Scene {
     this._activeUsed = new Set();
     this.wheelNextMult = null;     // Wheel of Divinity: ×2 on the NEXT hand
     this.wheelNextRepeat = null;   // ...or every card retriggering on it
+    // --- THE 2026-08-10 WAVE, all fight-local. The scene is a SINGLETON, so a
+    //     charm armed in the last fight, the last hand it played, and a flask
+    //     that already caught its twenty must all die here or they arrive in
+    //     the next room still holding last room's answer.
+    this._coldSnap = null;         // COLD SNAP CHARM: the armed instance
+    // ...and the charm's own latch, which lives on the INSTANCE and therefore
+    // outlives the scene field: a fight that ended while it was armed would
+    // leave the tooltip promising a hand that is never coming home.
+    for (const a of run.artifacts) if (a.state?.armed) a.state.armed = false;
+    this._lastPlay = null;         // HOURGLASS OF THE SECOND SUN: what it turns
+    // PILGRIM'S FLASK's cap is PER FIGHT and banks on the instance. The def is
+    // all props and carries no fightStart hook of its own, so the wipe is
+    // walked from here — the same door every other fight-local reset uses.
+    for (const a of this.propHolders('overhealChips')) if (a.state) a.state.fight = 0;
     this.syncActiveTags();
     this.pstat = freshPstat();
     this._brittleApplied = 0; this._fearApplied = 0;
@@ -9885,6 +10402,13 @@ export class CombatScene extends Phaser.Scene {
     if (this.hypnoCard && !this.selected.includes(this.hypnoCard)) this.selected.push(this.hypnoCard);
     if (this.hypnoCard) { this.hypnoCard.setLockState(null); this.hypnoCard = null; }
     const going = [...this.selected];
+    // RAGPICKER'S HOOK. Fired on EVERY discard the player actually takes —
+    // refunded ones and free ones included — which is the same reading the
+    // recap tally three lines up already uses: the ACTION is the discard, and
+    // a beat you spent is spent. The alternative (only when discardsLeft
+    // really came down) would quietly turn a refund relic into a nerf on the
+    // hook, and would pay a free-discard build nothing at all.
+    this.artHook('discard', { cards: going.map(cs => cs.card) });
     this.selected = [];
     this.busy = true;
     going.forEach((cs, i) => {
@@ -10555,6 +11079,12 @@ export class CombatScene extends Phaser.Scene {
     // beat a relic can claim "the first hand of this fight" from (The Forge
     // Eternal's tempering) and be right about it.
     this.artHook('handCommit', { ev, cards, played });
+    // ...and the same commit point is what the HOURGLASS OF THE SECOND SUN
+    // turns back to. The CARD objects are what matter: the sprites in `played`
+    // are destroyed on their way to the discard pile long before the glass is
+    // ever turned, which is why the hourglass replays the hand's OUTPUT rather
+    // than dealing the hand again.
+    this._lastPlay = { played, cards, ev };
     // SECRET HANDS: the same commit point uncovers one, forever, across runs.
     // From here on the Smith will offer it and the hands chart will name it.
     // FULL REPERTOIRE reads the same commit point: every hand type the game ever
@@ -10821,6 +11351,11 @@ export class CombatScene extends Phaser.Scene {
       const missing = this.player.maxHp - this.player.hp;
       const applied = Math.min(res.heal, missing);
       this.player.hp += applied;
+      // PILGRIM'S FLASK'S SECOND DOOR. There are exactly two, because the
+      // hand's own healing has never routed through healPlayer (it is folded
+      // into the cascade's beat instead), and a flask that could not see the
+      // one heal that matters most would be a flask that does nothing.
+      this.catchOverheal(res.heal, Math.max(0, applied));
       // The hand's own healing does not route through healPlayer, so REFLECTION
       // is answered here as well — or the one heal that matters most (a hearts
       // hand) would be the one the Moonwell could not see.
@@ -11117,8 +11652,17 @@ export class CombatScene extends Phaser.Scene {
       }
     }
 
+    // COLD SNAP CHARM. Decided ONCE, ahead of the loop, because the fan's room
+    // is a budget shared by the whole hand: what can come home is what the hand
+    // size can still hold after the hand's own destruction has taken its share.
+    const snap = isEcho ? null : this._coldSnap;
+    const snapRoom = snap ? Math.max(0, this.effectiveHandSize - this.handCards.length) : 0;
+    const coming = [];
     played.forEach((cs, i) => {
       if (burned.has(cs) || vanished.has(cs)) return;   // that sprite has its own exit
+      // ...and if the charm is armed and the fan still has a slot, this card
+      // never goes anywhere: no stow, no discard pile, no exit tween.
+      if (snap && coming.length < snapRoom) { coming.push(cs); return; }
       // WHERE A SPENT CARD IS FILED — the discard, or back into the draw pile if
       // THE ORACLE'S RECYCLER was taken. The guard directly above is what makes
       // BURNED BEAT RECYCLED: a card destroyed as it played never reaches this
@@ -11131,6 +11675,7 @@ export class CombatScene extends Phaser.Scene {
         onComplete: () => cs.destroy(),
       });
     });
+    if (snap) this.coldSnapReturn(snap, coming);
     // 1.5x the old dwell: the equation (and the total that replaced it) is the
     // payoff, and it was clearing the screen before JC could read the mult.
     this.tweens.add({ targets: this.eqParts, alpha: 0, duration: 300, delay: this.spd(1050) });
@@ -11312,7 +11857,26 @@ export class CombatScene extends Phaser.Scene {
     //  this is that figure, summed, so the arena and the readouts agree.)
     const clubSplash = Math.max(0, Math.round(res.aoeSplash ?? 0));
 
-    if (this.prop('aoeFlush') > 0 && FLUSH_PLUS.has(res.handType)) {
+    // THUNDERHEAD BANNER: every Nth hand of a fight strikes the WHOLE ROOM at
+    // FULL damage. It sits FIRST in the same if/else chain the Meteor and the
+    // Boulder share, and therefore ABSORBS them for that hand — exactly as the
+    // Meteor already absorbs the club splash. A hand goes wide ONCE. The storm
+    // is the strongest of the three (everybody, full damage, nothing traded),
+    // so when it is due it is what happens and the other two stand down rather
+    // than stacking a second wave on top of it.
+    //
+    // PER STRIKE, not per hand, which is the Meteor's own rule: DUEL-WIELD
+    // CANES swing again and the storm rides along with the blow, because the
+    // splash is part of the blow.
+    const thunderEvery = this.prop('thunderEvery');
+    const storming = thunderEvery > 0 && this.handsThisFight > 0
+      && this.handsThisFight % thunderEvery === 0 && others.length > 0;
+    if (storming) {
+      for (const a of this.propHolders('thunderEvery')) a.state.struck = (a.state.struck ?? 0) + 1;
+      this.pulseByProp('thunderEvery', 'THUNDERHEAD', '#5878e8');
+      splash(res.damage, '#8fa8ff', 52);
+      popMessage(this, ARENA_CX, 260, 'THUNDERHEAD!', { color: '#5878e8', size: 44 });
+    } else if (this.prop('aoeFlush') > 0 && FLUSH_PLUS.has(res.handType)) {
       // Meteor Sigil: flush-or-better goes wide at FULL damage. Absorbs the
       // club splash — everyone already took the whole blow.
       this.pulseByProp('aoeFlush', 'METEOR', '#ff7028');
@@ -11678,6 +12242,13 @@ export class CombatScene extends Phaser.Scene {
         for (const e of others) {
           const eff = e;
           this.time.delayedCall(fxDelay, () => {
+            // SOVEREIGN'S WRIT stands HERE, at the one fork every non-attack
+            // effect passes through, rather than inside each of the four
+            // dispatches under it. A struck-down signature never reaches its
+            // theatre at all — no vignette, no set-piece, no state change.
+            // `attack` was filtered out above this loop, so violence is
+            // untouched by construction and never had to be excepted.
+            if (this.writBlocks(enemy, eff.type)) return;
             if (eff.type === 'buff') {
               popNumber(this, enemy.homeX, enemy.homeY - 120, `${intent.label}  ATK+${eff.value}`, { color: '#ffb060', size: 30 });
             } else if (eff.type === 'charge') {
@@ -12085,6 +12656,18 @@ export class CombatScene extends Phaser.Scene {
     }).setOrigin(0.5));
     const heal = Math.round(this.player.maxHp * 0.3);
     this.player.hp = Math.min(this.player.maxHp, this.player.hp + heal);
+    // SHIP IN A BOTTLE makes port. `actCleared` is a NEW hook name and this is
+    // the one beat all three roads to a cleared act pass through (an ordinary
+    // clear, an endless clear, and taking the offer), so it is the only place
+    // it needs firing.
+    //
+    // THE PAYOUT IS READ OFF THE PURSE, not off the hook's return: snapshot
+    // run.chips either side and the ledger line below is honest about a
+    // mirrored ship, a hung one, or anything else that ever hangs off this
+    // hook, without this line having to know who any of them are.
+    const chipsBefore = run.chips ?? 0;
+    this.artHook('actCleared', { actIndex: run.actIndex });
+    const actPaid = Math.max(0, (run.chips ?? 0) - chipsBefore);
     const next = actOf(nextIdx);
     /**
      * THE DESCENT'S OWN PREFETCH. This panel names the world below out loud and
@@ -12098,8 +12681,12 @@ export class CombatScene extends Phaser.Scene {
      * the reason the endless stays flat instead of climbing.
      */
     ensure(this, actBundle(nextIdx, run));
+    // The ledger sentence. A payout the panel does not name is a payout the
+    // player never sees happen, so it rides beside the heal rather than only in
+    // the sidebar's own pop.
     ov.add(this.add.text(GAME_W / 2, GAME_H / 2 - 62,
-      `${clearedAct.name} falls silent.  You rest and recover ${heal} HP.`, {
+      `${clearedAct.name} falls silent.  You rest and recover ${heal} HP.`
+      + (actPaid ? `  Your relics pay out ${actPaid} chips.` : ''), {
         fontFamily: '"Baloo 2"', resolution: 2, fontSize: '24px', color: PARCH.textDim, fontStyle: 'bold',
       }).setOrigin(0.5));
     const nextLine = endlessNow
@@ -12763,9 +13350,31 @@ export class CombatScene extends Phaser.Scene {
     return box;
   }
 
+  /**
+   * A BOTTLE IS DRUNK. This is the ONE door every potion in the game goes
+   * through — the belt, the confirm box, the merchant's drink and POTION WITHIN
+   * A POTION's refill all arrive here — which is why the two 2026-08-10 potion
+   * relics both live at this line and nowhere else.
+   *
+   * THE FAIRY IS OUT, and that is the shipped ruling: defeat()'s revive splices
+   * the bottle out directly and deliberately never comes through here, so the
+   * BREWER'S THUMB can never save a Fairy in a Bottle. A one-in-four chance to
+   * keep the bottle that just un-killed you is a second life on a coin flip,
+   * and it is not what a rare is allowed to buy.
+   */
   consumePotion(pot) {
+    // BREWER'S THUMB, rolled BEFORE the splice. On a keep the bottle simply
+    // never leaves the belt — the DRINK has already happened above us either
+    // way, so what survives the roll is the glass and never the effect.
+    const keep = this.prop('potionKeep');
+    const kept = keep > 0 && Math.random() < (this._brewerForce ?? keep);
     const idx = run.potions.indexOf(pot);
-    if (idx >= 0) run.potions.splice(idx, 1);
+    if (kept) {
+      for (const a of this.propHolders('potionKeep')) a.state.kept = (a.state.kept ?? 0) + 1;
+      popMessage(this, SIDEBAR_W / 2, 560, 'KEPT!', { color: '#d8c8b0', size: 32 });
+    } else if (idx >= 0) {
+      run.potions.splice(idx, 1);
+    }
     sfx(this, drinkSfxKey(pot), { volume: 0.85 });
     this.hidePotionTip();
     this.renderPotionBelt();
@@ -12774,6 +13383,9 @@ export class CombatScene extends Phaser.Scene {
     // line every drink actually goes through, refusals and all having already
     // been turned away above it.
     this._drinksThisFight = (this._drinksThisFight ?? 0) + 1;
+    // CORK COLLECTOR strings the cork. Fired on the same line the tally is
+    // counted on, for the same reason: this is where a drink is a drink.
+    this.artHook('potion', { pot });
     // Every drink is an event, and every event also sweeps the state trophies.
     // THE POTION OF NOTHING is the one exception: it fires its own, late, so
     // the fanfare lands after the joke instead of stepping on it.
@@ -13777,9 +14389,12 @@ export class CombatScene extends Phaser.Scene {
     this.shieldText.setText(`${p.shield}`);
     // THE INFINITE HEART's uncap is the whole reason to want the relic, so the
     // readout says so: 'ZEAL 84 / ∞' instead of a number nobody can size.
+    // ...and the test is isInfinite(), not `=== Infinity`: zealCapFor answers
+    // INFINITY_CAP (1e30) since 0810, so an identity check against Infinity is
+    // never true and the sidebar printed the literal 'ZEAL 84 / 1e+30'.
     const zCap = this.chr.id === 'zealot' ? this.zealCap() : ZEAL_CAP;
     this.resourceText.setText(this.chr.id === 'zealot'
-      ? `ZEAL ${p.zeal} / ${zCap === Infinity ? '∞' : zCap}` : '');
+      ? `ZEAL ${p.zeal} / ${isInfinite(zCap) ? '∞' : zCap}` : '');
     const free = this.prop('freeDiscards') > 0;
     this.discardText.setText(free ? 'Discards: ∞' : `Discards: ${this.discardsLeft}`);
     this.deckText.setText(`Deck: ${this.deck.length}`);

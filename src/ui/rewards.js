@@ -1940,9 +1940,43 @@ function buildPackOffer(scene, run, offer, done) {
   });
   publishShelf(scene, ov, 'packOffer', shelfEntries);
 
+  /**
+   * THE BEGGAR'S BOWL (props.skipChips). Walking past a shelf of packs pays.
+   *
+   * ONLY ON THE DELIBERATE SKIP. Every other way out of this overlay is a pack
+   * being TAKEN, and a bowl that filled on the way into a pack would be a relic
+   * that pays you for shopping rather than for going without. The pay is summed
+   * across holders and goes through gainGold, so the difficulty's gold factor
+   * and every chip-gain relic apply exactly as they do everywhere else, and the
+   * ledger each holder's liveDesc reads back is split by share of what was owed
+   * (which for a flat-rate prop is an even split).
+   */
+  const begBowl = () => {
+    const holders = effectiveArtifacts().filter(a => (a.props?.skipChips ?? 0) > 0);
+    const owed = holders.reduce((s, a) => s + a.props.skipChips, 0);
+    if (owed <= 0) return 0;
+    const paid = gainGold(owed);
+    if (paid <= 0) return 0;
+    for (const a of holders) {
+      if (!a.state) continue;
+      a.state.begged = (a.state.begged ?? 0) + 1;
+      a.state.paid = (a.state.paid ?? 0) + Math.round(paid / holders.length);
+    }
+    sfx(scene, 'chips_stack', { volume: 0.8 });
+    popMessage(scene, GAME_W / 2, GAME_H - 130, `+${paid} chips`, { color: '#ffc542', size: 36, rise: 60 });
+    return paid;
+  };
   // Not feeling any of them? Walk away.
-  button(scene, ov, GAME_W / 2, GAME_H - 62, 'SKIP PACKS', () => { ov.destroy(true); done(); },
-    { key: 'btn_dark', color: '#a898c4', w: 250, h: 56 });
+  button(scene, ov, GAME_W / 2, GAME_H - 62, 'SKIP PACKS', () => {
+    // One caller of this overlay leaves the SCENE on `done` (the victory road
+    // back to the map), so a payout nobody gets to read is a payout nobody
+    // believes. It holds the door for the length of the float, and only when
+    // the bowl actually caught something.
+    const paid = begBowl();
+    ov.destroy(true);
+    if (paid > 0) scene.time.delayedCall(900, done);
+    else done();
+  }, { key: 'btn_dark', color: '#a898c4', w: 250, h: 56 });
   // Which pack helps THIS deck? Check before you commit (JC).
   viewDeckButton(scene, ov, run);
   return ov;

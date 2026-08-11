@@ -23,6 +23,10 @@ import { twoTap, openChoiceBox } from '../ui/choicebox.js';
 import {
   run, chr, advanceAct, newActMap, effectiveArtifacts, removalPrice, boosterPrice, mirrorBlockedBy,
   sellValue, sellArtifact, beltArtifacts, nookArtifacts, slotsUsed, gainGold, enterMapNode,
+  // THE ONE CARD-DESTRUCTION DOOR. The campfire's PURGE and the merchant's
+  // removal both go through it, so THE GRAVE ROBBER'S SPADE is paid without
+  // either room knowing the relic exists.
+  destroyRunCard,
   // THE MERCHANT'S TILL: every price on his table, through one function, so the
   // Oracle's NEGOTIATOR and COLLECTOR are two numbers instead of five edits.
   shopPrice,
@@ -38,8 +42,14 @@ import {
   endlessTint, endlessLoop, isEndlessIndex,
 } from '../core/acts.js';
 import { difficultyOf } from '../core/difficulty.js';
-import { rollEvent } from '../core/events.js';
+// rollEvent is the one-draw-one-take door every ? room used before THE
+// CARTOGRAPHER'S QUILL; rollEventChoices + noteEventSeen are the two halves it
+// is now built out of, and the quill is the only caller that needs them apart.
+import { rollEvent, rollEventChoices, noteEventSeen } from '../core/events.js';
 import { ARTIFACT_RARITY, rollShopStock, ARTIFACT_POOL, acquireArtifact } from '../core/artifacts.js';
+// THE STRAY KITTEN's meal counter and the meal itself. artifacts.js owns the
+// transformation (name, desc, art, tint) so the campfire only has to feed it.
+import { feedTheKitten, KITTEN_MEALS } from '../core/artifacts.js';
 import { PACK_TYPES, openPack, BOUNTY_REWARDS, rollBountyRewards, rollPackOffer } from '../core/packs.js';
 import {
   artifactCeremony, artifactPickerOverlay, packOfferOverlay, packOpenOverlay, deckPickerOverlay, handChartOverlay, deckInfoOverlay,
@@ -1327,16 +1337,28 @@ export class MapScene extends Phaser.Scene {
     // is owed for having advanced — today that is the BANKER'S VAULT's interest,
     // and it is the same one line for a fight, an elite, a boss, an event, a
     // rest and the merchant, because the branch below happens after it.
-    const { node, interest } = enterMapNode(nodeId, run, settings.dev);
+    const { node, interest, arrival } = enterMapNode(nodeId, run, settings.dev);
     if (interest > 0) {
       sfx(this, 'chips_stack', { volume: 0.9 });
       this.hudChips?.setText(`◉ ${run.chips} chips`);
       popMessage(this, GAME_W / 2, 560, `THE VAULT PAYS  +${interest} chips`,
         { color: '#ffd23e', size: 44, rise: 70 });
     }
+    // THE GOLDEN GOOSE (run.payNodeArrival) gets its OWN LINE, under the vault's.
+    // The two are different promises — one is a percentage of what you are
+    // holding, one is a flat fee for setting foot here — and folding them into a
+    // single sum would make a player who owns both unable to tell which relic is
+    // paying. Smaller ink, because it is the smaller number and it lands every
+    // single node, and the goose says its own name for the same reason.
+    if (arrival > 0) {
+      sfxCapped(this, 'chips_stack', { volume: 0.7 }, 300);
+      this.hudChips?.setText(`◉ ${run.chips} chips`);
+      popMessage(this, GAME_W / 2, interest > 0 ? 632 : 560, `THE GOOSE LAYS  +${arrival} chips`,
+        { color: '#ffd23e', size: 34, rise: 60 });
+    }
     // A dividend nobody watches land is a number nobody believes, so a paying
     // node holds the wipe back long enough to read it.
-    const hold = interest > 0 ? 900 : 0;
+    const hold = interest > 0 || arrival > 0 ? 900 : 0;
     if (node.type === 'fight' || node.type === 'elite' || node.type === 'boss') {
       this.time.delayedCall(hold, () => {
         this.cameras.main.fadeOut(300, 20, 16, 28);
@@ -2070,6 +2092,33 @@ export class MapScene extends Phaser.Scene {
   hideTip() { if (this.mapTip) { this.mapTip.destroy(true); this.mapTip = null; } }
 
   /**
+   * FIRE AN ARTIFACT HOOK FROM THE MAP, over the EFFECTIVE belt (mirrors count).
+   *
+   * The exact shape of CombatScene.artHook, and deliberately so: a relic author
+   * writes ONE hook body and it does not have to know which screen rang it. The
+   * belt is `effectiveArtifacts()` rather than `run.artifacts` for the same
+   * reason the fight's is `liveArtifacts()` — a MIRROR pointing at a relic is a
+   * second copy of that relic and every hook it owns.
+   *
+   * One try/catch per relic, so a hook that throws costs its own effect and not
+   * the rest of the belt.
+   *
+   * NO gainChips HERE. CombatScene has one because a fight is full of relics
+   * that pay mid-hand; the map's only hook today is SOURDOUGH STARTER's `rest`,
+   * which banks VALUE on its own instance and never touches the purse. The map's
+   * chip payouts (the vault's interest, the goose's arrival, the jar's entry,
+   * the bowl's skip) all go straight through run.gainGold at their own sites,
+   * which is the same door CombatScene.gainChips is a wrapper around. When a
+   * map-side hook first needs to pay, that wrapper is what to add.
+   */
+  artHook(name, ctx) {
+    for (const a of effectiveArtifacts()) {
+      try { a.hooks?.[name]?.(this, a, ctx); }
+      catch (e) { console.error(`artifact hook ${a.id}.${name}`, e); }
+    }
+  }
+
+  /**
    * THE BELT MOVED — a relic was taken, swapped or sold by an overlay running
    * over the map (see rewards.beltChanged). The merchant's tent draws its own
    * copy of the belt and re-renders it itself; out on the board the HUD is what
@@ -2278,26 +2327,147 @@ export class MapScene extends Phaser.Scene {
    */
   runEvent(node) {
     this.hideTip();
-    const ev = rollEvent(run, node);
+    /**
+     * THE CARTOGRAPHER'S QUILL (props.eventChoices). A ? room deals TWO events
+     * and you take one.
+     *
+     * THE TWO ROOMS IT DOES NOT TOUCH are the two the bag never dealt: a MYTHIC
+     * node is the Crimson Forge by definition, and a node carrying a forced
+     * `eventId` is a verification driver naming the room it wants to photograph.
+     * rollEventChoices short-circuits both to a single-element list, so the
+     * guard here is belt and braces: a fork offered between the Forge and the
+     * Forge is not a fork.
+     *
+     * ONLY THE ONE YOU TAKE IS MARKED SEEN — the relic's own ruling, and
+     * rollEventChoices is built to make it possible: it draws without writing to
+     * run.seenEvents at all, and noteEventSeen spends exactly the one road you
+     * walked down. The other goes back in the bag.
+     */
+    const forks = getProp(effectiveArtifacts(), 'eventChoices');
+    const dealt = forks > 1 && !node.mythic && !node.eventId
+      ? rollEventChoices(run, node, forks) : null;
+    if (dealt && dealt.length > 1) return this.eventForkOverlay(dealt);
+    // One eligible room left in the bag is not a choice, so it is not offered as
+    // one; it is still a draw the quill made, so it is still spent by hand.
+    this.enterEvent(dealt?.length ? noteEventSeen(run, dealt[0]) : rollEvent(run, node));
+  }
+
+  /**
+   * WALK INTO AN EVENT that has already been drawn AND SPENT. Everything from
+   * the trophy to the painting hangs off this, so the quill's fork and the plain
+   * one-draw road arrive by exactly the same door.
+   */
+  enterEvent(ev) {
     // YOU WERE HERE (2026-08-04). Two packs are locked behind meeting a room:
     // THE DEALER behind the Traveling Casino, the FORGE behind pulling a
     // mythical out of the Crimson Forge. This is the arrival half — walking in
     // is the whole ask for the casino, and the forge's second condition is
     // fired below, when the fire actually gives something up.
+    //
+    // IT FIRES FOR THE ROOM YOU TOOK, AND ONLY THAT ONE. A quill that dealt you
+    // the casino and let you walk past it did not take you to the casino.
     fireAchievements(this, 'visit', { eventId: ev.id, run });
     /**
      * THE PAINTING, FETCHED ON ENTRY. Fifteen backdrops at 5 MB each; you meet
      * one room at a time and most runs never see half of them.
      *
-     * The ROLL happens above the gate on purpose — `rollEvent` writes to
+     * The ROLL happens above the gate on purpose — the draw writes to
      * `run.seenEvents` and the gate has to know WHICH painting to ask for, so
-     * rolling inside it would either roll twice or ask for the wrong file. The
-     * rest of the room is unchanged and still reads `textures.exists(evbg_…)`:
+     * rolling inside it would either roll twice or ask for the wrong file. THE
+     * QUILL sharpens the same rule: the fork is picked BEFORE this runs, so one
+     * painting is fetched and it is the one you are about to stand in. The rest
+     * of the room is unchanged and still reads `textures.exists(evbg_…)`:
      * several of these have never been painted, and the wood panel fallback is
      * the feature, not a failure.
      */
     gateOn(this, eventBg(ev.id), () => this.buildEvent(ev),
       { label: ev.name, ensure, missingKeys });
+  }
+
+  /**
+   * THE QUILL'S FORK — the roads, side by side, before either is a room.
+   *
+   * A plate per event: its sigil, its NAME and its opening line, which is
+   * everything the room itself leads with and therefore everything the choice
+   * can honestly be made on. No painting yet, deliberately: fetching one 5 MB
+   * backdrop per road to show a picture you may not walk into is the cost the
+   * whole deferred-art system exists to avoid.
+   *
+   * ONE TAP COMMITS, exactly like the campfire's option cards, which is this
+   * plate's own shape (sigil, name, sentence) and the precedent for it. The
+   * two-tap rule is for icons whose meaning is HIDDEN; nothing here is hidden.
+   *
+   * There is no decline. A ? room was always a room you walked into; the quill
+   * gives you a second door, not a way out of the building.
+   */
+  eventForkOverlay(dealt) {
+    const ov = this.add.container(0, 0).setDepth(DEPTH.overlay);
+    ov.add(this.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0x14101c, 0.9).setInteractive());
+    ov.add(this.add.text(GAME_W / 2, GAME_H / 2 - 330, 'TWO ROADS', {
+      fontFamily: 'Lilita One', resolution: 2, fontSize: '54px', color: '#88b0c8', stroke: '#141828', strokeThickness: 10,
+    }).setOrigin(0.5));
+    ov.add(this.add.text(GAME_W / 2, GAME_H / 2 - 272,
+      'The quill drew both. Take one. The other goes back on the map.', {
+        fontFamily: '"Baloo 2"', resolution: 2, fontSize: '24px', color: '#d8c9a8', fontStyle: 'bold',
+      }).setOrigin(0.5));
+
+    // THE CAMPFIRE'S MEASURE-THEN-PLACE, for the same reason: a row of choices
+    // must read as a row, so they share ONE size and that size comes from the
+    // longest line on it rather than from a number typed today.
+    const flavors = dealt.map(ev => this.add.text(0, 0, ev.flavor, {
+      fontFamily: '"Baloo 2"', resolution: 2, fontSize: '21px', color: PARCH.textDim, fontStyle: 'bold',
+      wordWrap: { width: 380 }, align: 'center',
+    }).setOrigin(0.5));
+    const cardW = Phaser.Math.Clamp(
+      Math.max(...flavors.map(f => f.width), ...dealt.map(ev => this.measure(ev.name,
+        { fontFamily: 'Lilita One', resolution: 2, fontSize: '31px' }))) + 64, 420, 560);
+    const cardH = 200 + Math.max(...flavors.map(f => f.height));
+    // Clamped against the canvas the same way the campfire's four-across row is,
+    // so a future quill that deals three still lands on the screen.
+    const pitch = Math.min(cardW + 60, Math.floor((GAME_W - 80) / Math.max(1, dealt.length)));
+
+    dealt.forEach((ev, i) => {
+      const x = GAME_W / 2 + (i - (dealt.length - 1) / 2) * pitch;
+      const card = this.add.container(x, GAME_H / 2 + 150);
+      const parts = woodPanel(this, 0, 0, cardW, cardH, { accent: ev.tint });
+      card.add([parts.shadow, parts.panel, parts.line]);
+      const top = -cardH / 2;
+      const icon = this.add.image(0, top + 26 + 30, ev.icon).setTint(ev.tint);
+      icon.setScale(60 / Math.max(icon.width, icon.height));
+      card.add(contactPool(this, 2, icon.y + 30, 74, { alpha: 0.28 }));
+      card.add(icon);
+      card.add(this.add.text(0, top + 26 + 60 + 22 + 20, ev.name, {
+        fontFamily: 'Lilita One', resolution: 2, fontSize: '31px', color: PARCH.text,
+        wordWrap: { width: cardW - 40 }, align: 'center',
+      }).setOrigin(0.5));
+      flavors[i].setPosition(0, top + 26 + 60 + 22 + 40 + 16 + flavors[i].height / 2);
+      card.add(flavors[i]);
+      ov.add(card);
+      parts.panel.setInteractive({ useHandCursor: true });
+      parts.panel.on('pointerover', () => {
+        sfx(this, 'menu_select', { volume: 0.25, jitter: 0.06 });
+        this.tweens.add({ targets: card, scale: 1.05, duration: 110 });
+      });
+      parts.panel.on('pointerout', () => this.tweens.add({ targets: card, scale: 1, duration: 110 }));
+      parts.panel.on('pointerdown', () => {
+        sfx(this, 'button', { volume: 0.8 });
+        // THE RECEIPT: one fork DRAWN, banked on every quill that dealt it, and
+        // banked on the choice rather than on the deal so a fork the player
+        // never got to answer is never counted.
+        for (const a of effectiveArtifacts()) {
+          if ((a.props?.eventChoices ?? 0) > 1 && a.state) a.state.forks = (a.state.forks ?? 0) + 1;
+        }
+        noteEventSeen(run, ev);
+        ov.destroy(true);
+        this.enterEvent(ev);
+      });
+    });
+
+    // Several of these rooms buy, burn or rewrite a card, so knowing the deck is
+    // half of knowing which road you want. It is also the only thing on this
+    // screen you can press without choosing.
+    viewDeckButton(this, ov, run);
+    return ov;
   }
 
   buildEvent(ev) {
@@ -2589,6 +2759,19 @@ export class MapScene extends Phaser.Scene {
           run.player.hp = Math.min(run.player.maxHp, run.player.hp + heal);
           sfx(this, 'heal', { volume: 0.9 });
           popMessage(this, GAME_W / 2, GAME_H / 2 - 120, `+${heal} HP`, { color: '#50e090', size: 44 });
+          /**
+           * THE `rest` HOOK FIRES ON **REST** AND NOWHERE ELSE (the ruling,
+           * 2026-08-10), matched to the copy on its only holder: SOURDOUGH
+           * STARTER reads "Resting feeds it +10 more." RESTING is the verb, and
+           * the verb is this option. HONE, PURGE and FEED THE KITTEN are three
+           * other things you can do at a campfire instead of sleeping, and a
+           * hook that fired on all four would make the relic read "visiting a
+           * rest site", which is not what it says and is four times the pay.
+           *
+           * The heal is passed along so a future hook can read what the fire was
+           * actually worth without recomputing it.
+           */
+          this.artHook('rest', { heal });
           this.time.delayedCall(800, done);
         },
       },
@@ -2600,6 +2783,27 @@ export class MapScene extends Phaser.Scene {
           deckPickerOverlay(this, run, { count: 1, optional: true, title: 'Hone which card?' }, (cards) => {
             if (cards[0]) {
               cards[0].rank = Math.min(14, cards[0].rank + 2);
+              /**
+               * THE CAMPSTOOL (props.honeValue). The stool files an extra +5 of
+               * pure VALUE onto the same card the fire just sharpened.
+               *
+               * The receipt goes on the STOOL, not on the card: `state.honed` is
+               * a list of card ids, the relic's own mods() turns that list into
+               * mods.cardValue, and run.collectMods already merges that channel.
+               * So the bonus is on the card for as long as the stool is on the
+               * belt, and it leaves with the stool if you sell it — which is the
+               * ordinary rule for a relic that grants, and it costs the card
+               * nothing to have been honed by a stool you no longer own.
+               *
+               * Every owned copy banks it (a mirrored stool is a second stool),
+               * and the prop gate is asked once rather than per instance so the
+               * effective belt is walked the same way every other prop is.
+               */
+              if (getProp(effectiveArtifacts(), 'honeValue') > 0) {
+                for (const a of effectiveArtifacts()) {
+                  if ((a.props?.honeValue ?? 0) > 0 && a.state) (a.state.honed ??= []).push(cards[0].id);
+                }
+              }
               sfx(this, 'purchase_upgrade', { volume: 0.85 });
             }
             done();
@@ -2611,7 +2815,9 @@ export class MapScene extends Phaser.Scene {
         act: (done) => {
           deckPickerOverlay(this, run, { count: 1, optional: true, title: 'Burn which card?' }, (cards) => {
             if (cards[0]) {
-              run.runDeck.splice(run.runDeck.indexOf(cards[0]), 1);
+              // Through the ONE DOOR (run.destroyRunCard), so THE GRAVE ROBBER'S
+              // SPADE is paid for the burn without the campfire knowing it.
+              destroyRunCard(cards[0], run);
               sfx(this, 'poison', { volume: 0.8 });
             }
             done();
@@ -2620,21 +2826,92 @@ export class MapScene extends Phaser.Scene {
       },
     ];
 
-    // Measure first: the three cards share ONE size (a row of options must read
-    // as a row), but that size comes from the longest description, not from a
-    // number typed in 2026.
+    /**
+     * THE FOURTH OPTION AT THE FIRE — FEED THE KITTEN (props.kittenFeed).
+     *
+     * Offered only while there is a kitten still hungry: once every copy has
+     * eaten its KITTEN_MEALS and become a BLACK CAT there is nothing to feed,
+     * and a card is too expensive a thing to spend on an option that does
+     * nothing. So a grown belt gets the ordinary three cards back.
+     *
+     * The picker is the ORGANIZED full-deck one (`sample: 0`) rather than a
+     * dealt hand: this is a permanent, chosen sacrifice off the master deck, and
+     * choosing it out of ten random cards would be a different bargain.
+     */
+    const hungryKittens = () => effectiveArtifacts()
+      .filter(a => (a.props?.kittenFeed ?? 0) > 0 && !a.state?.grown);
+    if (getProp(effectiveArtifacts(), 'kittenFeed') > 0 && hungryKittens().length) {
+      // The hungriest one names the number, so a belt holding a fresh kitten and
+      // a nearly-grown one never advertises the meal it is not about to be.
+      const left = Math.max(...hungryKittens().map(a => KITTEN_MEALS - (a.state?.meals ?? 0)));
+      options.push({
+        label: 'FEED THE KITTEN', icon: 'icon_heart_small', tint: 0xc8a860,
+        desc: `Destroy a chosen card to feed it. ${left} meal${left === 1 ? '' : 's'} to go.`,
+        act: (done) => {
+          deckPickerOverlay(this, run, {
+            count: 1, optional: true, sample: 0, title: 'Feed it which card?',
+          }, (cards) => {
+            if (cards[0]) {
+              // The meal is a DESTRUCTION and goes through the one door, so a
+              // belt holding the kitten and THE GRAVE ROBBER'S SPADE is paid for
+              // feeding the cat without either relic knowing the other exists.
+              destroyRunCard(cards[0], run);
+              // Every hungry copy eats. A MIRRORED kitten is a second kitten and
+              // the card it ate was real, so it grows on the same schedule.
+              // feedTheKitten owns the whole transformation (name, desc, art,
+              // tint) so nothing about the BLACK CAT is spelled out here.
+              for (const a of hungryKittens()) feedTheKitten(a);
+              sfx(this, 'heal', { volume: 0.85 });
+            }
+            // `done` is refreshMap (every option at this fire is handed the same
+            // one), and refreshMap re-lays the whole HUD, so the belt repaints
+            // itself and the BLACK CAT's icon lands with it. `art_blackCat` is a
+            // BOOT texture (lazyload.TRANSFORM_ART), not a deferred one, so
+            // there is nothing to gate on and no frame where the cat is a
+            // fallback square.
+            done();
+          });
+        },
+      });
+    }
+
+    // Measure first: the cards share ONE size (a row of options must read as a
+    // row), but that size comes from the longest description, not from a number
+    // typed in 2026.
     const descs = options.map(opt => this.add.text(0, 0, opt.desc, {
       fontFamily: '"Baloo 2"', resolution: 2, fontSize: '21px', color: PARCH.textDim, fontStyle: 'bold',
       wordWrap: { width: 280 }, align: 'center',
     }).setOrigin(0.5));
+    /**
+     * THE ROW WAS HARDCODED FOR THREE. THE STRAY KITTEN MAKES IT FOUR.
+     *
+     * Two numbers had three baked into them: the card WIDTH, whose 360 ceiling
+     * was chosen when three of them plus two gaps was the widest the row could
+     * ever be, and the PITCH, which was `(i - 1) * (cardW + 40)` — the centre
+     * index of a three-card row, written as a literal.
+     *
+     * Both are general now, and THREE LANDS EXACTLY WHERE IT ALWAYS DID:
+     * `i - (options.length - 1) / 2` is `i - 1` when length is 3, and the width
+     * ceiling only falls when the row would otherwise not fit, which at three
+     * it never does (3 x 360 + 2 x 40 = 1160, inside 1920 with 380 to spare).
+     * At four the ceiling binds on the narrow build and nowhere else.
+     */
+    const ROW_PAD = 60;          // daylight the row keeps at each edge of the canvas
+    const CARD_GAP = 40;
+    const n = options.length;
+    const roomPerCard = Math.floor((GAME_W - ROW_PAD * 2 - CARD_GAP * (n - 1)) / n);
     const cardW = Phaser.Math.Clamp(
       Math.max(...descs.map(d => d.width), ...options.map(o => this.measure(o.label,
-        { fontFamily: 'Lilita One', resolution: 2, fontSize: '31px' }))) + 56, 260, 360);
+        { fontFamily: 'Lilita One', resolution: 2, fontSize: '31px' }))) + 56,
+      260, Math.max(260, Math.min(360, roomPerCard)));
     // 26 pad + 52 icon + 22 + 40 label + 14 + desc + 26 pad
     const cardH = 180 + Math.max(...descs.map(d => d.height));
+    // ...and the PITCH is clamped against the canvas too, so a row whose cards
+    // hit the 260 floor tightens its gaps rather than walking off the screen.
+    const pitch = Math.min(cardW + CARD_GAP, Math.floor((GAME_W - ROW_PAD * 2) / n));
 
     options.forEach((opt, i) => {
-      const x = GAME_W / 2 + (i - 1) * (cardW + 40);
+      const x = GAME_W / 2 + (i - (n - 1) / 2) * pitch;
       const card = this.add.container(x, GAME_H / 2 + 170);
       const parts = woodPanel(this, 0, 0, cardW, cardH, { accent: opt.tint });
       card.add([parts.shadow, parts.panel, parts.line]);
@@ -2777,6 +3054,68 @@ export class MapScene extends Phaser.Scene {
     // from deleting half a deck at one table. Scoped to runShop(), so the next
     // tent starts fresh.
     let removedThisVisit = false;
+    /**
+     * THE MERCHANT'S SCALE (props.merchantScale). ONE booster pack OR one card
+     * removal, free, per VISIT — and the player picks which by taking it.
+     *
+     * A `let` in this closure, exactly like `restocks` and `removedThisVisit`,
+     * because "per visit" IS this closure: walking out of the tent and back in
+     * is what re-arms it, which is the same rule everything else on his table
+     * already lives by and therefore the one the player already knows.
+     *
+     * ONE free thing however many scales you hold. The relic's copy says "one
+     * BOOSTER PACK or one CARD REMOVAL is free" and a mirrored scale does not
+     * make that sentence say two.
+     */
+    let scaleLeft = getProp(effectiveArtifacts(), 'merchantScale') > 0;
+    /** Spend it, and bank the receipt on every scale that was standing. */
+    const spendScale = () => {
+      scaleLeft = false;
+      for (const a of effectiveArtifacts()) {
+        if ((a.props?.merchantScale ?? 0) > 0 && a.state) a.state.used = (a.state.used ?? 0) + 1;
+      }
+    };
+
+    /**
+     * THE RAINY-DAY JAR (props.shopEntryStep / shopEntryCap), PAID ON ENTRY.
+     *
+     * Once per visit, and the visit is this function body: buildShop runs once
+     * per tent, so the payout is a straight-line statement here rather than a
+     * latch, for the same reason `restocks` opens at 0 with no guard.
+     *
+     * THE PURSE IS READ BEFORE IT IS PAID. `base` is captured first and every
+     * holder is measured against it, so a jar can never earn on its own payout
+     * and two jars can never earn on each other's — the same rule the BANKER'S
+     * VAULT's interest lives by (run.payEncounterInterest).
+     *
+     * It pays through gainGold, so the difficulty's gold factor and the
+     * chip-gain relics apply exactly as they do at every other door, and the
+     * ledger each holder's liveDesc reads back is split by share of what was
+     * owed rather than by the flat amount, because gainGold may have fattened
+     * or shaved the total on the way in.
+     */
+    const payRainyDay = () => {
+      const base = run.chips;
+      const holders = effectiveArtifacts().filter(a => (a.props?.shopEntryStep ?? 0) > 0);
+      if (!holders.length) return;
+      const owed = holders.map((a) => {
+        const raw = Math.floor(base / a.props.shopEntryStep);
+        const cap = a.props.shopEntryCap ?? 0;
+        return cap > 0 ? Math.min(cap, raw) : raw;
+      });
+      const total = owed.reduce((s, n) => s + n, 0);
+      if (total <= 0) return;
+      const paid = gainGold(total, run);
+      if (paid <= 0) return;
+      holders.forEach((a, i) => {
+        if (a.state) a.state.paid = (a.state.paid ?? 0) + Math.round(paid * (owed[i] / total));
+      });
+      updateChips();
+      sfx(this, 'chips_stack', { volume: 0.85 });
+      popMessage(this, GAME_W / 2, 180, `THE JAR OPENS  +${paid} chips`,
+        { color: '#8fd8ff', size: 38, rise: 60 });
+    };
+    payRainyDay();
 
     // SPREE / BUYER'S REMORSE. Both are questions about ONE VISIT, so both
     // ledgers open empty here and the relic set is torn down on the way out
@@ -2836,11 +3175,27 @@ export class MapScene extends Phaser.Scene {
       spot.add(priceText);
       const tag = { t: priceText, price, sold: false };
       priceTags.push(tag);
-      spot.add(this.add.text(0, iconH / 2 + 16, name, {
+      /**
+       * THE NAME WRAPS TO ITS OWN SPOT'S WIDTH (2026-08-10). It was a flat 240
+       * because the mat only ever held two relics and 240 was comfortably less
+       * than the 420 pitch between them. BIGGER WAGON and THE COLLECTOR'S
+       * KERCHIEF both add a slot and the row's pitch self-clamps down to 275 at
+       * five and 220 at six, at which point a 240-wide name is wider than the
+       * spot it belongs to and neighbours read as one sentence. See renderStock
+       * for where the shrink is derived.
+       */
+      const nameTxt = this.add.text(0, iconH / 2 + 16, name, {
         fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.shopName}px`, color: '#fff2d8',
-        stroke: '#241505', strokeThickness: 5, wordWrap: { width: 240 }, align: 'center',
-      }).setOrigin(0.5, 0));
-      const rarText = this.add.text(0, iconH / 2 + 48 + (name.length > 18 ? 26 : 0), rar.label, {
+        stroke: '#241505', strokeThickness: 5, wordWrap: { width: opts.nameWrap ?? 240 }, align: 'center',
+      }).setOrigin(0.5, 0);
+      spot.add(nameTxt);
+      // The rarity sits under the name it belongs to, MEASURED rather than
+      // guessed. It used to be a fixed 48 plus 26 more if the name was longer
+      // than 18 characters, which was a one-line/two-line estimate that a
+      // narrower wrap turns into a three-line collision. A one-line name at
+      // either type size still measures ~32 and still lands at ~48, so nothing
+      // that shipped before this moves.
+      const rarText = this.add.text(0, iconH / 2 + 16 + nameTxt.height, rar.label, {
         fontFamily: 'Lilita One', resolution: 2, fontSize: `${MAP_TYPE.shopRarity}px`, color: rarCss, stroke: '#241505', strokeThickness: 4,
       }).setOrigin(0.5, 0);
       // HERO EXCLUSIVE burns through the whole spectrum on the mat.
@@ -2934,6 +3289,20 @@ export class MapScene extends Phaser.Scene {
     const SHOP_RELIC_GAP = 420;
     /** Widest the relic row may span, centre to centre, and still sit on the mat. */
     const SHOP_RELIC_ROW_W = 1100;
+    /**
+     * ...AND THE WALL ON ITS LEFT. YOUR RELICS (renderRelicShelf, below) is a
+     * four-column grid of 58px slots at 68px pitch, centred on the potion mat's
+     * x: its rightmost column's right edge is 236 + 1.5 x 68 + 29 = 367. This is
+     * that edge plus a thumb of daylight, and the relic row's leftmost PAINTING
+     * may not reach past it.
+     *
+     * It only ever binds on the 1920 build, where GAME_W / 2 is 960 and there is
+     * simply less mat to the left of centre. At two and three relics the row
+     * clears it with 235 and 53 pixels to spare and nothing moves; from four up
+     * it is what decides the pitch, because SHOP_RELIC_ROW_W was chosen to keep
+     * the row on the MAT and knew nothing about the shelf standing beside it.
+     */
+    const SHOP_RELIC_ROW_LEFT = 392;
     /** ...and the shelf it stands on, named so the verification driver can tap
      *  the relic it means instead of keeping a copy of this number. */
     const SHOP_RELIC_ROW_Y = 372;
@@ -2959,20 +3328,45 @@ export class MapScene extends Phaser.Scene {
       // the your-relics shelf; both together reach five. So the pitch tightens
       // to the widest row the mat can hold and is otherwise unchanged: two and
       // three relics still stand exactly where they always have.
-      const gap = Math.min(SHOP_RELIC_GAP, Math.floor(SHOP_RELIC_ROW_W / Math.max(1, stock.length - 1)));
+      //
+      // ...and the SECOND clamp is the shelf on the left (SHOP_RELIC_ROW_LEFT).
+      // Solved rather than searched: the leftmost painting's left edge is
+      //     GAME_W / 2 - ((n - 1) / 2) * gap - (SHOP_RELIC_ICON * gap / SHOP_RELIC_GAP) / 2
+      // which is linear in `gap` (the icon shrinks with the pitch, just below),
+      // so the widest pitch that clears the wall falls straight out of it.
+      const arm = (stock.length - 1) / 2 + SHOP_RELIC_ICON / (2 * SHOP_RELIC_GAP);
+      const clearGap = Math.floor((GAME_W / 2 - SHOP_RELIC_ROW_LEFT) / arm);
+      const gap = Math.min(SHOP_RELIC_GAP, Math.floor(SHOP_RELIC_ROW_W / Math.max(1, stock.length - 1)), clearGap);
       const axs = stock.map((_, i) => GAME_W / 2 + (i - (stock.length - 1) / 2) * gap);
+      /**
+       * ...AND THE GOODS SHRINK WITH THE PITCH (BIGGER WAGON, 2026-08-10).
+       *
+       * The row learned to tighten its gap when the mat filled up, but the two
+       * things standing IN each gap did not: a 190px painting and a 240px name
+       * were both tuned against the 420 pitch of the two-relic shelf. At five
+       * the pitch is 275 and at six it is 220, so the paintings very nearly
+       * touch and the names run into each other and read as one sentence.
+       *
+       * So both scale by the SAME ratio the pitch moved by, clamped at 1 so they
+       * can never grow: at two, three and four relics the ratio is 1, 1 and
+       * 0.87, which is why the shelf that shipped is untouched at three and only
+       * begins to give ground at the counts that need it.
+       */
+      const shrink = Math.min(1, gap / SHOP_RELIC_GAP);
+      const iconH = Math.round(SHOP_RELIC_ICON * shrink);
+      const nameWrap = Math.round(240 * shrink);
       // ...and WHERE they ended up, beside the ids, so a verification run can
       // click the relic it means instead of guessing a pitch that now moves.
       this._shopStockXs = [...axs];
-      this._shopStockIconH = SHOP_RELIC_ICON;
+      this._shopStockIconH = iconH;
       this._shopRelicRowY = SHOP_RELIC_ROW_Y;
       stock.forEach((art, i) => {
         const rar = ARTIFACT_RARITY[art.rarity];
         // Through the till (run.shopPrice), so THE ORACLE'S NEGOTIATOR and
         // COLLECTOR move this number without the mat knowing either exists.
         const price = shopPrice(art.shopPrice ?? art.price);
-        const icon = addArtifactIcon(this, 0, 0, art, SHOP_RELIC_ICON);
-        const spot = makeSpot(axs[i], SHOP_RELIC_ROW_Y, icon, price, art.name, rar, SHOP_RELIC_ICON, (fail, settle) => {
+        const icon = addArtifactIcon(this, 0, 0, art, iconH);
+        const spot = makeSpot(axs[i], SHOP_RELIC_ROW_Y, icon, price, art.name, rar, iconH, (fail, settle) => {
           if (run.chips < price) { fail('NOT ENOUGH CHIPS'); return false; }
           // PAID ON TAKE, NOT ON OPEN. LEAVE IT / NEVER MIND are real answers,
           // and a relic you did not take costs nothing and leaves the mat: the
@@ -2986,6 +3380,7 @@ export class MapScene extends Phaser.Scene {
           return 'defer';
         }, `${art.name}  ·  ${rar.label}`, artifactTipBody(art, { own: false }), {
           key: `shopbuy:relic:${art.id}`,
+          nameWrap,
           refuse: () => (run.chips < price ? `Not enough chips. He wants ◉ ${price}.` : null),
         });
         if (art.rarity === 'mythical' || art.rarity === 'heroExclusive') {
@@ -3223,8 +3618,17 @@ export class MapScene extends Phaser.Scene {
     // and it still advances the ladder — the coupon buys you the dig, it does
     // not reset the price of the next one. Scoped to runShop() like `restocks`
     // itself, so every tent honours one coupon per relic held.
+    //
+    // THE ROYAL CHARTER (props.freeRestock) is a different promise and sits
+    // ABOVE the coupon: not the first dig of a visit but EVERY dig, forever. It
+    // answers before the ladder is even consulted, and because it answers first
+    // the coupon below is never reached and therefore never SPENT while the
+    // charter is covering the bill — sell the charter and the coupons you were
+    // holding are all still there.
     let freeRestocks = getProp(effectiveArtifacts(), 'freeFirstRestock');
+    const charterCovers = () => getProp(effectiveArtifacts(), 'freeRestock') > 0;
     const restockPrice = () => {
+      if (charterCovers()) return 0;
       if (freeRestocks > 0) return 0;
       const last = RESTOCK_LADDER[RESTOCK_LADDER.length - 1];
       const base = restocks < RESTOCK_LADDER.length
@@ -3248,7 +3652,9 @@ export class MapScene extends Phaser.Scene {
         return;
       }
       run.chips -= cost;
-      if (cost === 0 && freeRestocks > 0) freeRestocks -= 1;
+      // A COUPON IS ONLY SPENT WHEN A COUPON PAID. The charter answers 0 above
+      // it, so a charter holder digs all day without ever tearing one off.
+      if (cost === 0 && !charterCovers() && freeRestocks > 0) freeRestocks -= 1;
       restocks += 1;
       updateChips();
       this.hideTip();
@@ -3262,13 +3668,36 @@ export class MapScene extends Phaser.Scene {
     // (run.counters), so their labels are LIVE — re-read after every purchase
     // made without leaving the tent.
     const services = [
+      /**
+       * THE TWO SERVICES THE MERCHANT'S SCALE COVERS.
+       *
+       * Both read `scaleLeft` for their label AND their price, so while it is
+       * unspent BOTH say FREE and taking either one is what decides which it
+       * was. Whichever is taken calls spendScale() and then refreshServices(),
+       * which is what flips the OTHER button's label straight back to its price
+       * in the same frame — a board that still said FREE next to a service that
+       * would now charge you would be a lie the player pays for.
+       *
+       * THE LADDER STILL CLIMBS ON A FREE ONE. run.counters.packsBought and
+       * run.counters.shopRemovals both advance exactly as if chips had changed
+       * hands, which is precisely how the restock coupon (freeFirstRestock)
+       * already behaves: the free thing buys you the SERVICE, it does not buy
+       * you back the price of the next one.
+       *
+       * ...and a free service still counts as a shop buy (noteBuy), for the same
+       * reason: SPREE and BUYER'S REMORSE are questions about what you did at
+       * his table, and taking a booster off it is taking a booster off it.
+       */
       {
-        label: () => `BOOSTER PACK: ◉ ${boosterPrice(run)}`, color: '#5b3a00', key: 'btn_yellow',
+        label: () => (scaleLeft ? 'BOOSTER PACK: FREE' : `BOOSTER PACK: ◉ ${boosterPrice(run)}`),
+        color: '#5b3a00', key: 'btn_yellow',
         act: () => {
-          const cost = boosterPrice(run);
+          const free = scaleLeft;
+          const cost = free ? 0 : boosterPrice(run);
           if (run.chips < cost) return false;
           run.chips -= cost;
           run.counters.packsBought += 1;
+          if (free) spendScale();
           noteBuy();
           updateChips();
           refreshServices();
@@ -3281,19 +3710,28 @@ export class MapScene extends Phaser.Scene {
       {
         label: () => (removedThisVisit
           ? 'REMOVED  ·  ONE PER VISIT'
-          : `REMOVE A CARD: ◉ ${removalPrice(run)}`),
+          : scaleLeft ? 'REMOVE A CARD: FREE'
+            : `REMOVE A CARD: ◉ ${removalPrice(run)}`),
         disabled: () => removedThisVisit,
         color: '#4a0a10', key: 'btn_red',
         act: () => {
           if (removedThisVisit) return false;
-          const cost = removalPrice(run);
+          // Priced when the button was pressed and honoured when the picker
+          // answers. The picker is modal, so nothing can spend the scale in
+          // between; capturing it means the price you were quoted is the price
+          // you get either way.
+          const free = scaleLeft;
+          const cost = free ? 0 : removalPrice(run);
           if (run.chips < cost) return false;
           deckPickerOverlay(this, run, { count: 1, optional: true, title: 'Remove which card?' }, (cards) => {
             if (cards[0]) {
               run.chips -= cost;
               run.counters.shopRemovals += 1;
-              run.runDeck.splice(run.runDeck.indexOf(cards[0]), 1);
+              // Through the ONE DOOR (run.destroyRunCard), so THE GRAVE ROBBER'S
+              // SPADE is paid for a card the merchant took out of your deck.
+              destroyRunCard(cards[0], run);
               removedThisVisit = true;
+              if (free) spendScale();
               noteBuy();
               sfx(this, 'poison', { volume: 0.8 });
               updateChips();

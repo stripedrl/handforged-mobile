@@ -24,6 +24,17 @@
  *             afterHand(scene,a,ctx) · kill(scene,a,enemy) · fightEnd(scene,a)
  *             — scene = CombatScene. handCommit fires the instant a hand is
  *             committed (hand counted, type known, before the score cadence).
+ *             FOUR MORE JOINED ON 2026-08-10, three in combat and one on the map:
+ *               potion(scene,a,ctx)      a bottle was drunk (CombatScene.
+ *                                        consumePotion, the one drink door).
+ *                                        The Fairy's revive splices its own
+ *                                        bottle and deliberately never arrives.
+ *               discard(scene,a,ctx)     a discard was spent (discardSelected).
+ *               actCleared(scene,a,ctx)  the ACT CLEARED ceremony is paying out.
+ *               rest(scene,a,ctx)        you took the REST option at a campfire.
+ *                                        scene = MapScene here, not CombatScene:
+ *                                        the map has its own artHook now, and it
+ *                                        is the ONLY hook fired from it.
  *   liveDesc(a, run) — THE RUNNING TOTAL (JC, 2026-08-01). Any relic that BANKS
  *             something (a scaler's mult, a suit's growing value, a counter it
  *             reads) returns one short line here — "Currently: +12 mult (12
@@ -52,8 +63,12 @@
 
 import {
   CHIPS_PER_HAND_LEFT, gainGold, killsOfKind, run,
-  SELL_FRACTION, NEGOTIATED_SELL_FRACTION,
+  SELL_FRACTION, NEGOTIATED_SELL_FRACTION, beltArtifacts,
 } from './run.js';
+// poker.js is a leaf (deck.js and nothing else), so this edge cannot close a
+// cycle. THE WEATHERCOCK needs the ladder to say "every hand type but that
+// one", and THE WINNER'S PODIUM needs the run's mode.
+import { HAND_DEFS, HAND_TYPES, mostPlayedHandType } from './poker.js';
 // Leaf modules with no imports of their own (config.js and deck.js both sit at
 // the bottom of the graph), so neither of these edges can close a cycle.
 import { HOARD_CHIP_STEP, SUIT_GLYPH } from '../config.js';
@@ -61,7 +76,7 @@ import { SUITS, rankLabel } from './deck.js';
 // scoring.js is a leaf too (deck.js + poker.js and nothing else), so quoting its
 // constants here cannot close a cycle — and it means the two hero exclusives'
 // rules text is generated from the arithmetic that actually runs.
-import { STAMPS, WRAP_MULT_FACTOR, cardStamp, cardWrap } from './scoring.js';
+import { STAMPS, WRAP_MULT_FACTOR, SHIELD_VALUE_STEP, cardStamp, cardWrap } from './scoring.js';
 // The ACHIEVEMENT GATE reads the trophy case and nothing else. progress.js is a
 // leaf as far as this file is concerned (it imports poker, config and difficulty
 // only), so this edge cannot close a cycle back through artifacts.
@@ -691,6 +706,170 @@ export const BENCH_FACTOR = 1.25;
 export const CRACKED_CROWN_CHIPS = 500;
 export const RIGGED_WHEEL_FACTOR = BENCH_FACTOR;
 export const ETHEREAL_BENCH_FACTOR = BENCH_FACTOR;
+
+// ===========================================================================
+// THE ARTIFACT WAVE, 2026-08-10 — the fifty. Every number the new relics quote
+// lives in this block, so a tooltip, a test, a driver and the arithmetic all
+// read the SAME constant and nothing is hand-typed twice.
+// ===========================================================================
+
+/** WOODEN NICKEL: the dud. One chip. It is not a mistake. */
+export const WOODEN_NICKEL_CHIPS = 1;
+/** TIN CUP: paid on a win with the hand clock run all the way down. */
+export const TIN_CUP_CHIPS = 35;
+/** BEGGAR'S BOWL: paid for walking away from a shelf of packs. */
+export const BEGGARS_BOWL_CHIPS = 20;
+/** THE TWO SHOP DISCOUNTS, as FRACTIONS OFF. See run.shopDiscountFactor. */
+export const HAGGLER_DISCOUNT = 0.10;
+export const CHARTER_DISCOUNT = 0.50;
+/** RAINY-DAY JAR: chips held per chip paid, and the ceiling on one visit. */
+export const RAINY_DAY_STEP = 10;
+export const RAINY_DAY_CAP = 50;
+/** KINDLING: value, and the ONLY act index it burns in. */
+export const KINDLING_VALUE = 20;
+export const KINDLING_ACT = 0;
+/** TRAINING WHEELS: the deck size it wants kept, and what it pays for it. */
+export const TRAINING_WHEELS_DECK = 52;
+export const TRAINING_WHEELS_MULT = 2;
+/** THE BOOKENDS and THE MOON DIAL — the three POSITION relics. */
+export const LEFT_BOOKEND_MULT = 4;
+export const RIGHT_BOOKEND_FACTOR = 1.5;
+export const MOON_DIAL_FACTOR = 2;
+/** THE FOUR HAND-TYPE COMMONS + the rare that doubles Two Pair. */
+export const SOLITAIRE_MULT = 3;
+export const MATCHED_SET_MULT = 3;
+export const STEPPING_STONES_MULT = 2;
+export const TWIN_LOCKETS_FACTOR = 2;
+/** SIGNET RING: value on a scoring J, Q or K (mods.faceValue). */
+export const SIGNET_FACE_VALUE = 8;
+/** WOOLEN MITTENS: how many fewer of your cards a FREEZE reaches. */
+export const MITTEN_CARDS = 1;
+/** CAMPSTOOL: extra value the rest site's HONE files onto the card, forever. */
+export const CAMPSTOOL_VALUE = 5;
+/** DENTED BUCKLER: Shield on the first hand of every fight. */
+export const BUCKLER_SHIELD = 15;
+/** CORK COLLECTOR: mult per bottle drunk, for the rest of that fight. */
+export const CORK_MULT = 3;
+/** DOG-EARED GUIDE: discards granted (run.discardsPerFightBonus). */
+export const GUIDE_DISCARDS = 1;
+/** THREADBARE BANNER: value banked per fight won. */
+export const BANNER_VALUE_PER_FIGHT = 1;
+/** SEEDLING: fights until it blooms, and what the bloom is worth. */
+export const SEEDLING_FIGHTS = 5;
+export const SEEDLING_VALUE = 30;
+/** BIGGER WAGON: extra relics on the merchant's mat (props.extraStock). */
+export const WAGON_STOCK = 1;
+/** WEATHERCOCK: mult for changing your mind. */
+export const WEATHERCOCK_MULT = 4;
+/** LOAN SHARK'S LEDGER: what a crown is worth, and what a captain is. */
+export const LOAN_BOSS_CHIPS = 100;
+export const LOAN_ELITE_CHIPS = 40;
+/** PILGRIM'S FLASK: overheal becomes chips 1:1, up to this much per fight. */
+export const FLASK_CHIP_CAP = 20;
+/** BREWER'S THUMB: the odds the bottle survives the drink. */
+export const BREWER_KEEP_CHANCE = 0.25;
+/** RAGPICKER'S HOOK: mult per discard SPENT, for the rest of that fight. */
+export const RAGPICKER_MULT = 2;
+/** STRAY KITTEN: meals until it is not a kitten, and what it becomes. */
+export const KITTEN_MEALS = 3;
+export const BLACK_CAT_FACTOR = 2;
+/** SOURDOUGH STARTER: value per fight won, and the extra a rest site feeds it. */
+export const SOURDOUGH_VALUE_PER_FIGHT = 2;
+export const SOURDOUGH_REST_VALUE = 10;
+/** CARTOGRAPHER'S QUILL: how many events a ? room deals you to choose from. */
+export const QUILL_EVENT_CHOICES = 2;
+/** TORTOISE STANDARD: value per SHIELD_VALUE_STEP of Shield standing. */
+export const TORTOISE_VALUE = 2;
+/** GOLDEN GOOSE: chips per map node you commit to (props.nodeChips). */
+export const GOOSE_CHIPS = 5;
+/** WINNER'S PODIUM: the factor on whatever you play most. */
+export const PODIUM_FACTOR = 2;
+/** GLASS GAVEL: what a High Card is worth, and what it costs to find out. */
+export const GAVEL_FACTOR = 4;
+export const GAVEL_SHATTER_CHANCE = 0.10;
+/** GRAVE ROBBER'S SPADE: permanent mult per card destroyed (props.destroyMult). */
+export const SPADE_MULT_PER_CARD = 2;
+/** THUNDERHEAD BANNER: which hand of each fight strikes the whole room. */
+export const THUNDER_EVERY = 3;
+/** COMET IN A JAR: charges to fill, and what spending them buys. */
+export const COMET_CHARGES = 25;
+export const COMET_FACTOR = 5;
+/**
+ * THE DEAD MAN'S HAND (JC's retrigger ruling, 2026-08-10): "replayed once" is
+ * TWO TOTAL ACTIVATIONS, which is mods.handRepeat 2 — the Repeating
+ * Pocketwatch's exact number, so the two stack ADDITIVELY through
+ * handRepeatAdd (1+1+1 = 3 plays) like every other replay in the game.
+ */
+export const DEAD_MANS_REPEAT = 2;
+export const DEAD_MANS_FACTOR = 4;
+/** SHIP IN A BOTTLE: fights per mast, the rigging's ceiling, and full sail. */
+export const SHIP_FIGHTS_PER_MAST = 5;
+export const SHIP_MAX_MASTS = 3;
+export const SHIP_FULL_FACTOR = 4;
+export const SHIP_ACT_CHIPS = 100;
+
+/**
+ * THE THREE STATE ARTS (potato/goldenSpud precedent, 2026-08-10). Each relic
+ * keeps its ID forever — ownership, the shop's exclusion list, every save and
+ * every achievement key on it — and swaps `artKey`, which artifactArtKey()
+ * reads and lazyload.TRANSFORM_ART fetches. A texture key that is not in that
+ * list is a relic that paints its fallback icon forever, which is the 0806
+ * lesson written down.
+ */
+export const BLACK_CAT = {
+  name: 'BLACK CAT',
+  desc: `It ate. All damage x${BLACK_CAT_FACTOR}.`,
+  artKey: 'art_blackCat', tint: 0x6a5a8a,
+};
+
+/** One more meal. At KITTEN_MEALS it is not a kitten any more. */
+export function feedTheKitten(a) {
+  if (!a?.state) return a;
+  a.state.meals = (a.state.meals ?? 0) + 1;
+  if (a.state.meals >= KITTEN_MEALS && !a.state.grown) {
+    a.state.grown = true;
+    Object.assign(a, { name: BLACK_CAT.name, desc: BLACK_CAT.desc, artKey: BLACK_CAT.artKey, tint: BLACK_CAT.tint });
+  }
+  return a;
+}
+
+export const SEEDLING_BLOOM = {
+  name: 'Seedling in Bloom',
+  desc: `It opened. Hands are worth +${SEEDLING_VALUE} value.`,
+  artKey: 'art_seedlingBloom', tint: 0xe07aa0,
+};
+
+export function bloomSeedling(a) {
+  if (!a?.state || a.state.bloomed) return a;
+  a.state.bloomed = true;
+  Object.assign(a, {
+    name: SEEDLING_BLOOM.name, desc: SEEDLING_BLOOM.desc,
+    artKey: SEEDLING_BLOOM.artKey, tint: SEEDLING_BLOOM.tint,
+  });
+  return a;
+}
+
+/** How many masts this many won fights have raised, capped at full sail. */
+export function shipMasts(fights) {
+  return Math.min(SHIP_MAX_MASTS, Math.floor(Math.max(0, fights) / SHIP_FIGHTS_PER_MAST));
+}
+
+/**
+ * THE RIGGING LADDER. Three delivered files, three rungs: bare hull, some
+ * canvas, full golden sail. Derived from the mast count rather than banked, so
+ * a save written mid-voyage paints correctly the moment it is loaded.
+ */
+export function shipArtKey(masts) {
+  if (masts >= SHIP_MAX_MASTS) return 'art_shipInABottle_3';
+  return masts >= 1 ? 'art_shipInABottle_2' : 'art_shipInABottle';
+}
+
+/** Re-rig an owned ship to match its mast count. Returns the mast count. */
+export function riggShip(a) {
+  const masts = shipMasts(a?.state?.fights ?? 0);
+  if (a) a.artKey = shipArtKey(masts);
+  return masts;
+}
 
 /** "Currently: ..." — the live line a tooltip appends. null when there is none. */
 export function artifactLiveLine(art, run) {
@@ -2160,7 +2339,873 @@ export const ARTIFACT_POOL = [
       use(scene, a) { return scene.useWheelOfDivinity(a); },
     },
   },
+
+  // =========================================================================
+  // THE 2026-08-10 WAVE — fifty relics, appended in tier order.
+  // Appended rather than interleaved on purpose: every roll path filters on
+  // `rarity` and nothing in the game reads the pool's index, so the wave stays
+  // one readable block instead of fifty diffs scattered through the file.
+  // =========================================================================
+
+  // ------------------------- COMMON (20) -----------------------------------
+  {
+    // A DELIBERATE DUD (JC). One chip a fight is not an economy, it is a joke
+    // with a straight face, and it is not to be buffed.
+    id: 'woodenNickel', name: 'Wooden Nickel', rarity: 'common', price: 50,
+    icon: 'icon_coins', tint: 0xb08040,
+    desc: `+${WOODEN_NICKEL_CHIPS} chip after every fight.`,
+    hooks: {
+      fightEnd(scene, a) { bank(a, 'paid', scene.gainChips(WOODEN_NICKEL_CHIPS, null, { quiet: true })); },
+    },
+    liveDesc(a) { return `Currently: ${a.state.paid ?? 0} chips paid out`; },
+  },
+  {
+    id: 'tinCup', name: 'Tin Cup', rarity: 'common', price: 55,
+    icon: 'icon_coins', tint: 0x9aa0a8,
+    desc: `Win a fight with 0 hands left: +${TIN_CUP_CHIPS} chips.`,
+    hooks: {
+      fightEnd(scene, a) {
+        if ((scene.handsLeft ?? 0) > 0) return;
+        bank(a, 'won');
+        bank(a, 'paid', scene.gainChips(TIN_CUP_CHIPS, 'LAST HAND!'));
+      },
+    },
+    liveDesc(a) {
+      const n = a.state.won ?? 0;
+      return `Currently: ${a.state.paid ?? 0} chips paid out  (${n} photo finish${n === 1 ? '' : 'es'})`;
+    },
+  },
+  {
+    id: 'beggarsBowl', name: "Beggar's Bowl", rarity: 'common', price: 50,
+    icon: 'icon_coins', tint: 0xc8a860,
+    desc: `Skip a shelf of booster packs: +${BEGGARS_BOWL_CHIPS} chips.`,
+    props: { skipChips: BEGGARS_BOWL_CHIPS },
+    liveDesc(a) {
+      const n = a.state.begged ?? 0;
+      return `Currently: ${a.state.paid ?? 0} chips paid out  (${n} shelf${n === 1 ? '' : 's'} walked past)`;
+    },
+  },
+  {
+    // Rides run.shopPrice, the one till every price on the merchant's table
+    // goes through, so the mat, the bottles, the removal ladder, the booster
+    // ladder and the restock dig all quote it without a line changing.
+    id: 'hagglersTongue', name: "Haggler's Tongue", rarity: 'common', price: 60,
+    icon: 'icon_coins', tint: 0xe07aa0,
+    desc: `Everything the merchant sells is ${Math.round(HAGGLER_DISCOUNT * 100)}% cheaper.`,
+    props: { shopDiscount: HAGGLER_DISCOUNT },
+  },
+  {
+    id: 'rainyDayJar', name: 'Rainy-Day Jar', rarity: 'common', price: 60,
+    icon: 'icon_coins', tint: 0x8fd8ff,
+    desc: `Walking into a shop: +1 chip per ${RAINY_DAY_STEP} chips you are holding, up to +${RAINY_DAY_CAP}. Once each visit.`,
+    props: { shopEntryStep: RAINY_DAY_STEP, shopEntryCap: RAINY_DAY_CAP },
+    liveDesc(a, run) {
+      const owed = Math.min(RAINY_DAY_CAP, Math.floor((run?.chips ?? 0) / RAINY_DAY_STEP));
+      return `Currently: +${owed} chips at the next shop  (${a.state.paid ?? 0} paid out so far)`;
+    },
+  },
+  {
+    // A DELIBERATE DUD (JC). Twenty value is a real number in Act I and it is
+    // meant to be, and then it is a stone in your pocket for two more acts.
+    id: 'kindling', name: 'Kindling', rarity: 'common', price: 50,
+    icon: 'icon_fire', tint: 0xd07028,
+    desc: `Hands are worth +${KINDLING_VALUE} value during Act I. After that it does nothing.`,
+    mods(a, run) {
+      return (run?.actIndex ?? 0) === KINDLING_ACT ? { flatValue: KINDLING_VALUE } : {};
+    },
+    liveDesc(a, run) {
+      return (run?.actIndex ?? 0) === KINDLING_ACT
+        ? `Currently: +${KINDLING_VALUE} value`
+        : 'Currently: BURNED OUT.';
+    },
+  },
+  {
+    // A DELIBERATE DUD (JC). It pays you to never thin your deck, which is the
+    // strongest thing you can buy. Two mult does not cover that and must not.
+    id: 'trainingWheels', name: 'Training Wheels', rarity: 'common', price: 50,
+    icon: 'icon_refresh', tint: 0x8fd8ff,
+    desc: `+${TRAINING_WHEELS_MULT} mult while your deck holds ${TRAINING_WHEELS_DECK} cards or more.`,
+    mods(a, run) {
+      return (run?.runDeck?.length ?? 0) >= TRAINING_WHEELS_DECK ? { flatMult: TRAINING_WHEELS_MULT } : {};
+    },
+    liveDesc(a, run) {
+      const n = run?.runDeck?.length ?? 0;
+      return n >= TRAINING_WHEELS_DECK
+        ? `Currently: +${TRAINING_WHEELS_MULT} mult  (${n} cards)`
+        : `Currently: nothing  (${n} cards, ${TRAINING_WHEELS_DECK} needed)`;
+    },
+  },
+  {
+    /**
+     * THE POSITION RELICS (the two Bookends and the Moon Dial).
+     *
+     * They read the PHYSICAL BELT — beltArtifacts(), which is run.artifacts with
+     * the glove nook stripped out and is exactly the row the drag-reorder moves.
+     * So the answer changes the instant you drag, and the nook relic that sits
+     * off the row cannot accidentally be your leftmost anything.
+     *
+     * MIRRORS AND POSITION (the ruling, 2026-08-10). collectMods calls
+     * `mods(a, run)` with the SOURCE INSTANCE, so a Forgery aimed at a Bookend
+     * asks the BOOKEND where it is standing, not the Forgery. That means:
+     * a mirror beside a Bookend that IS on its end doubles the bonus, and a
+     * mirror beside a Bookend that is NOT copies nothing, twice. Position is a
+     * property of the relic, not of whoever is looking at it, and it is the only
+     * reading under which dragging the pair around behaves the way it looks.
+     */
+    id: 'leftBookend', name: 'Left Bookend', rarity: 'common', price: 60,
+    icon: 'icon_anvil', tint: 0x9aa0a8,
+    desc: `+${LEFT_BOOKEND_MULT} mult while this is the LEFTMOST relic on your belt.`,
+    mods(a, run) {
+      const belt = beltArtifacts(run ?? undefined);
+      return belt[0] === a ? { flatMult: LEFT_BOOKEND_MULT } : {};
+    },
+    liveDesc(a, run) {
+      const belt = beltArtifacts(run ?? undefined);
+      return belt[0] === a
+        ? `Currently: +${LEFT_BOOKEND_MULT} mult  (leftmost)`
+        : 'Currently: nothing. Drag it to the left end of the belt.';
+    },
+  },
+  {
+    id: 'solitaire', name: 'Solitaire', rarity: 'common', price: 55,
+    icon: 'icon_star', tint: 0x3fa64b,
+    desc: `High Card hands gain +${SOLITAIRE_MULT} mult.`,
+    mods: { handMult: { highCard: SOLITAIRE_MULT } },
+  },
+  {
+    id: 'matchedSet', name: 'Matched Set', rarity: 'common', price: 55,
+    icon: 'icon_heart_small', tint: 0xd8c8b0,
+    desc: `Two Pair hands gain +${MATCHED_SET_MULT} mult.`,
+    mods: { handMult: { twoPair: MATCHED_SET_MULT } },
+  },
+  {
+    id: 'steppingStones', name: 'Stepping Stones', rarity: 'common', price: 55,
+    icon: 'icon_lucky', tint: 0x88b0c8,
+    desc: `Straight hands gain +${STEPPING_STONES_MULT} mult.`,
+    mods: { handMult: { straight: STEPPING_STONES_MULT } },
+  },
+  {
+    // mods.faceValue is the generic J/Q/K channel scoring.js has carried since
+    // the beginning with nothing writing to it. This is the relic it was for.
+    id: 'signetRing', name: 'Signet Ring', rarity: 'common', price: 60,
+    icon: 'icon_star', tint: 0xd8b830,
+    desc: `J, Q and K are worth +${SIGNET_FACE_VALUE} value when they score.`,
+    mods: { faceValue: SIGNET_FACE_VALUE },
+  },
+  {
+    // Lands in applyPlayerDebuff beside the immunity charms, on the FREEZE
+    // branch only: the count comes down, it is never taken to nothing. It
+    // stacks with CARD_DENIAL_CAP rather than replacing it (the cap trims the
+    // rank-and-file's number first, the mittens then take one off whatever is
+    // left), so on a capped 2 it is a 1 and on a boss's 3 it is a 2.
+    id: 'woolenMittens', name: 'Woolen Mittens', rarity: 'common', price: 55,
+    icon: 'icon_shield', tint: 0xbfd8ff,
+    desc: `FREEZE reaches ${MITTEN_CARDS} fewer of your cards, from any source.`,
+    props: { freezeReduce: MITTEN_CARDS },
+  },
+  {
+    /**
+     * THE CAMPSTOOL. The rest site's HONE raises a card by two RANKS; the stool
+     * files an extra +CAMPSTOOL_VALUE of pure VALUE onto the same card and keeps
+     * the receipt on its own instance, so the bonus travels through
+     * mods.cardValue (the per-card channel run.collectMods already merges) and
+     * leaves with the stool if you ever sell it.
+     */
+    id: 'campstool', name: 'Campstool', rarity: 'common', price: 55,
+    icon: 'icon_anvil', tint: 0xb87838,
+    desc: `Resting and HONING a card also makes it worth +${CAMPSTOOL_VALUE} more value, permanently.`,
+    props: { honeValue: CAMPSTOOL_VALUE },
+    mods(a) {
+      const ids = a?.state?.honed ?? [];
+      if (!ids.length) return {};
+      return { cardValue: Object.fromEntries(ids.map(id => [id, CAMPSTOOL_VALUE])) };
+    },
+    liveDesc(a) {
+      const n = (a.state.honed ?? []).length;
+      return n
+        ? `Currently: +${CAMPSTOOL_VALUE} value on ${n} card${n === 1 ? '' : 's'}`
+        : 'Currently: nothing honed yet';
+    },
+  },
+  {
+    // handCommit on hand ONE, which is the same latch THE FORGE ETERNAL uses
+    // and for the same reason: it fires once per hand committed, whatever the
+    // cards inside it do. A mirrored buckler plates twice, deliberately.
+    id: 'dentedBuckler', name: 'Dented Buckler', rarity: 'common', price: 60,
+    icon: 'icon_shield', tint: 0x8898b8,
+    desc: `The first hand of every fight also grants +${BUCKLER_SHIELD} Shield.`,
+    hooks: {
+      handCommit(scene, a) {
+        if (scene.handsThisFight !== 1) return;
+        const gained = scene.addShield(BUCKLER_SHIELD) ?? 0;
+        bank(a, 'plated', gained);
+      },
+    },
+    liveDesc(a) { return `Currently: ${a.state.plated ?? 0} Shield raised`; },
+  },
+  {
+    // Banks on the INSTANCE and is wiped at the opening bell, exactly like the
+    // Turncoat Banner's suit: the corks come off the string every fight.
+    id: 'corkCollector', name: 'Cork Collector', rarity: 'common', price: 55,
+    icon: 'icon_drop', tint: 0xb87333,
+    desc: `Drinking a potion: +${CORK_MULT} mult for the rest of that fight. It stacks.`,
+    mods(a) { return { flatMult: a.state.corks ?? 0 }; },
+    hooks: {
+      fightStart(scene, a) { if (a?.state) a.state.corks = 0; },
+      potion(scene, a) { bank(a, 'corks', CORK_MULT); },
+    },
+    liveDesc(a) {
+      const c = a.state.corks ?? 0;
+      return `Currently: +${c} mult  (${c / CORK_MULT} bottle${c / CORK_MULT === 1 ? '' : 's'} this fight)`;
+    },
+  },
+  {
+    // Cardsharp's Ring's pattern exactly: granted at pickup, revoked on sale,
+    // uncopyable because a mirror has nothing left to re-read.
+    id: 'dogEaredGuide', name: 'Dog-Eared Guide', rarity: 'common', price: 60,
+    icon: 'icon_trash', tint: 0xc8a860,
+    desc: `+${GUIDE_DISCARDS} Discard in every fight.`,
+    uncopyable: true,
+    onAcquire(run) { run.discardsPerFightBonus += GUIDE_DISCARDS; },
+    onSell(run) { run.discardsPerFightBonus -= GUIDE_DISCARDS; },
+  },
+  {
+    id: 'threadbareBanner', name: 'Threadbare Banner', rarity: 'common', price: 60,
+    icon: 'icon_volume', tint: 0x9a4030,
+    desc: `Every fight won: +${BANNER_VALUE_PER_FIGHT} value on this artifact, forever.`,
+    mods(a) { return { flatValue: a.state.value ?? 0 }; },
+    hooks: {
+      fightEnd(scene, a) { bank(a, 'value', BANNER_VALUE_PER_FIGHT); },
+    },
+    liveDesc(a) {
+      const v = a.state.value ?? 0;
+      // The bank holds VALUE; the divisor recovers the tally, the same
+      // read-the-rate-backwards rule the grinders and the Matchmaker use.
+      const n = Math.round(v / BANNER_VALUE_PER_FIGHT);
+      return `Currently: +${v} value  (${n} fight${n === 1 ? '' : 's'} won)`;
+    },
+  },
+  {
+    id: 'seedling', name: 'Seedling', rarity: 'common', price: 60,
+    icon: 'icon_lucky', tint: 0x60a848,
+    desc: `After ${SEEDLING_FIGHTS} fights it blooms: hands are worth +${SEEDLING_VALUE} value.`,
+    mods(a) { return a.state.bloomed ? { flatValue: SEEDLING_VALUE } : {}; },
+    hooks: {
+      fightEnd(scene, a) {
+        bank(a, 'fights');
+        if (a?.state?.bloomed || (a?.state?.fights ?? 0) < SEEDLING_FIGHTS) return;
+        bloomSeedling(a);
+        scene.relicTransformed?.(a, 'IT BLOOMS!');
+      },
+    },
+    liveDesc(a) {
+      if (a.state.bloomed) return `Currently: +${SEEDLING_VALUE} value  (in bloom)`;
+      const left = Math.max(0, SEEDLING_FIGHTS - (a.state.fights ?? 0));
+      return `Currently: ${left} fight${left === 1 ? '' : 's'} until it blooms`;
+    },
+  },
+  {
+    // The Collector's Kerchief's channel, so the merchant's mat and the
+    // Curator's case both widen and neither needed a line changed.
+    id: 'biggerWagon', name: 'Bigger Wagon', rarity: 'common', price: 60,
+    icon: 'icon_help', tint: 0x8a6a3c,
+    desc: `Vendors and the Curator show ${WAGON_STOCK} more artifact.`,
+    props: { extraStock: WAGON_STOCK },
+  },
+
+  // -------------------------- RARE (12) ------------------------------------
+  {
+    // See LEFT BOOKEND for the position ruling. The right-hand twin is a
+    // FACTOR rather than an add, which is the whole reason it is a tier up:
+    // the belt's rightmost cell is the last thing the ordered walk touches, so
+    // a x1.5 there multiplies everything every relic to its left just built.
+    id: 'rightBookend', name: 'Right Bookend', rarity: 'rare', price: 120,
+    icon: 'icon_anvil', tint: 0xd8b830,
+    desc: `x${RIGHT_BOOKEND_FACTOR} mult while this is the RIGHTMOST relic on your belt.`,
+    mods(a, run) {
+      const belt = beltArtifacts(run ?? undefined);
+      return belt[belt.length - 1] === a ? { globalMultFactor: RIGHT_BOOKEND_FACTOR } : {};
+    },
+    liveDesc(a, run) {
+      const belt = beltArtifacts(run ?? undefined);
+      return belt[belt.length - 1] === a
+        ? `Currently: x${RIGHT_BOOKEND_FACTOR} mult  (rightmost)`
+        : 'Currently: nothing. Drag it to the right end of the belt.';
+    },
+  },
+  {
+    id: 'twinLockets', name: 'Twin Lockets', rarity: 'rare', price: 125,
+    icon: 'icon_heart_small', tint: 0xe0434f,
+    desc: `Two Pair hands strike at x${TWIN_LOCKETS_FACTOR} mult.`,
+    mods: { handFactor: { twoPair: TWIN_LOCKETS_FACTOR } },
+  },
+  {
+    /**
+     * THE WEATHERCOCK. It banks the LAST hand type on its own instance in
+     * handCommit and pays on every OTHER type, which is why its mods are a
+     * function: the table is "every hand in the ladder except that one".
+     *
+     * THE FIRST HAND OF A FIGHT PAYS NOTHING (the ruling, 2026-08-10). There is
+     * no previous hand to differ from, and a relic that paid for the absence of
+     * a thing would make the opening hand of every fight free money for a relic
+     * about CHANGING YOUR MIND. state.last is cleared at the bell.
+     */
+    id: 'weathercock', name: 'Weathercock', rarity: 'rare', price: 110,
+    icon: 'icon_refresh', tint: 0xc8a860,
+    desc: `Play a different hand type than your last: +${WEATHERCOCK_MULT} mult. The first hand of a fight pays nothing.`,
+    mods(a) {
+      const last = a?.state?.last;
+      if (!last) return {};
+      return {
+        handMult: Object.fromEntries(
+          HAND_TYPES.filter(t => t !== last).map(t => [t, WEATHERCOCK_MULT])),
+      };
+    },
+    hooks: {
+      fightStart(scene, a) { if (a?.state) { a.state.last = null; a.state.streak = 0; } },
+      handCommit(scene, a, ctx) {
+        const type = ctx?.ev?.type ?? null;
+        if (!a?.state) return;
+        if (a.state.last && type !== a.state.last) bank(a, 'spun');
+        a.state.streak = (a.state.last && type !== a.state.last) ? (a.state.streak ?? 0) + 1 : 0;
+        a.state.last = type;
+      },
+    },
+    liveDesc(a) {
+      const streak = a.state.streak ?? 0;
+      const spun = a.state.spun ?? 0;
+      return a.state.last
+        ? `Currently: ${streak} hand${streak === 1 ? '' : 's'} in a row changed  (${spun} all run)`
+        : `Currently: the next hand pays nothing  (${spun} changes all run)`;
+    },
+  },
+  {
+    /**
+     * THE LOAN SHARK'S LEDGER. Hooked on `kill`, not on the reward flow, which
+     * is the whole point of JC's ruling: it PAYS ON DIAMOND+ BOSSES despite the
+     * no-reward rule, because the ledger does not care what the house pays, it
+     * cares that the body is on the floor.
+     */
+    id: 'loanSharksLedger', name: "Loan Shark's Ledger", rarity: 'rare', price: 130,
+    icon: 'icon_skull', tint: 0x2a2a34,
+    desc: `Kill a boss: +${LOAN_BOSS_CHIPS} chips. Kill an elite: +${LOAN_ELITE_CHIPS}. It collects even where the house pays nothing.`,
+    hooks: {
+      kill(scene, a, enemy) {
+        const owed = enemy?.def?.boss ? LOAN_BOSS_CHIPS : enemy?.def?.elite ? LOAN_ELITE_CHIPS : 0;
+        if (owed <= 0) return;
+        bank(a, enemy?.def?.boss ? 'bosses' : 'elites');
+        bank(a, 'paid', scene.gainChips(owed, 'COLLECTED!'));
+      },
+    },
+    liveDesc(a) {
+      const b = a.state.bosses ?? 0, e = a.state.elites ?? 0;
+      return `Currently: ${a.state.paid ?? 0} chips collected  (${b} boss${b === 1 ? '' : 'es'}, ${e} elite${e === 1 ? '' : 's'})`;
+    },
+  },
+  {
+    // One free thing per VISIT, and the visit is the shop's own closure — the
+    // same per-visit scope the restock ladder and the removal latch already
+    // live in, so walking out and back in is what re-arms it, exactly like
+    // everything else on his table.
+    id: 'merchantsScale', name: "Merchant's Scale", rarity: 'rare', price: 130,
+    icon: 'icon_coins', tint: 0xd8b830,
+    desc: 'At every shop, one BOOSTER PACK or one CARD REMOVAL is free. You choose which by taking it.',
+    props: { merchantScale: 1 },
+    liveDesc(a) {
+      const n = a.state.used ?? 0;
+      return `Currently: ${n} free service${n === 1 ? '' : 's'} taken`;
+    },
+  },
+  {
+    /**
+     * THE PILGRIM'S FLASK. It catches what would otherwise be POURED AWAY: the
+     * heal a full hero cannot hold. Capped per FIGHT (FLASK_CHIP_CAP), banked on
+     * the instance, and paid through gainGold like every other chip in the game.
+     *
+     * ZELUS: FLAG (documented, 2026-08-10). His overheal is not wasted, it banks
+     * as ZEAL, which is his whole kit and is not the flask's to take. So the
+     * flask reads what is left AFTER Zeal has taken its fill: with Zeal uncapped
+     * (zealCapFor, 2026-08-04) that is nothing at all, and the flask is dead
+     * weight in his hands. That is the honest reading of "would be WASTED", and
+     * it is the one that leaves his hero exclusive alone.
+     */
+    id: 'pilgrimsFlask', name: "Pilgrim's Flask", rarity: 'rare', price: 115,
+    icon: 'icon_drop', tint: 0x58c0a8,
+    desc: `Healing you cannot hold becomes chips instead, 1 for 1, up to ${FLASK_CHIP_CAP} a fight.`,
+    props: { overhealChips: 1, overhealChipCap: FLASK_CHIP_CAP },
+    liveDesc(a) {
+      const fight = a.state.fight ?? 0;
+      return `Currently: ${a.state.paid ?? 0} chips caught  (${fight}/${FLASK_CHIP_CAP} this fight)`;
+    },
+  },
+  {
+    /**
+     * THE BREWER'S THUMB. Rolled at the DRINK, inside consumePotion, which is
+     * the one door every bottle in the game goes through: the belt, the confirm
+     * box, the shop's drink and POTION WITHIN A POTION's refill all arrive there.
+     *
+     * THE FAIRY IS OUT (the ruling, 2026-08-10). The revive is spliced in
+     * defeat() and never reaches consumePotion, and that is the right answer on
+     * feel as well as on plumbing: a 25% chance to keep the bottle that just
+     * un-killed you is a second life on a coin flip, on a RARE.
+     */
+    id: 'brewersThumb', name: "Brewer's Thumb", rarity: 'rare', price: 125,
+    icon: 'icon_drop', tint: 0xd8c8b0,
+    desc: `${oneIn(BREWER_KEEP_CHANCE)} chance a potion you drink is not used up.`,
+    props: { potionKeep: BREWER_KEEP_CHANCE },
+    liveDesc(a) {
+      const n = a.state.kept ?? 0;
+      return `Currently: ${n} bottle${n === 1 ? '' : 's'} saved`;
+    },
+  },
+  {
+    id: 'ragpickersHook', name: "Ragpicker's Hook", rarity: 'rare', price: 110,
+    icon: 'icon_trash', tint: 0x9a4030,
+    desc: `Every discard you spend: +${RAGPICKER_MULT} mult for the rest of that fight.`,
+    mods(a) { return { flatMult: a.state.picked ?? 0 }; },
+    hooks: {
+      fightStart(scene, a) { if (a?.state) a.state.picked = 0; },
+      discard(scene, a) { bank(a, 'picked', RAGPICKER_MULT); },
+    },
+    liveDesc(a) {
+      const m = a.state.picked ?? 0;
+      const n = Math.round(m / RAGPICKER_MULT);
+      return `Currently: +${m} mult  (${n} discard${n === 1 ? '' : 's'} this fight)`;
+    },
+  },
+  {
+    /**
+     * THE STRAY KITTEN. A SECOND SECRET IN THE POTATO'S SHAPE, except this one
+     * is a bargain rather than a surprise: the rules text says what it wants and
+     * what it becomes, and the price is three cards off your deck forever.
+     *
+     * The meal goes through run.destroyRunCard, the one card-destruction door,
+     * so THE GRAVE ROBBER'S SPADE pays for feeding the cat without either relic
+     * knowing the other exists.
+     */
+    id: 'strayKitten', name: 'Stray Kitten', rarity: 'rare', price: 120,
+    icon: 'icon_heart_small', tint: 0xc8a860,
+    desc: `At rest sites you may FEED THE KITTEN a card, destroying it. After ${KITTEN_MEALS} meals it becomes something else.`,
+    props: { kittenFeed: 1 },
+    mods(a) {
+      return (a?.state?.meals ?? 0) >= KITTEN_MEALS ? { globalMultFactor: BLACK_CAT_FACTOR } : {};
+    },
+    liveDesc(a) {
+      const m = a.state.meals ?? 0;
+      if (m >= KITTEN_MEALS) return `Currently: x${BLACK_CAT_FACTOR} mult  (${m} meals)`;
+      return `Currently: ${m}/${KITTEN_MEALS} meals`;
+    },
+  },
+  {
+    id: 'sourdoughStarter', name: 'Sourdough Starter', rarity: 'rare', price: 115,
+    icon: 'icon_lucky', tint: 0xd8c8b0,
+    desc: `Every fight won: +${SOURDOUGH_VALUE_PER_FIGHT} value on this artifact, forever. Resting feeds it +${SOURDOUGH_REST_VALUE} more.`,
+    props: { restFed: SOURDOUGH_REST_VALUE },
+    mods(a) { return { flatValue: a.state.value ?? 0 }; },
+    hooks: {
+      fightEnd(scene, a) { bank(a, 'value', SOURDOUGH_VALUE_PER_FIGHT); bank(a, 'fights'); },
+      rest(scene, a) { bank(a, 'value', SOURDOUGH_REST_VALUE); bank(a, 'rests'); },
+    },
+    liveDesc(a) {
+      const v = a.state.value ?? 0;
+      const f = a.state.fights ?? 0, r = a.state.rests ?? 0;
+      return `Currently: +${v} value  (${f} fight${f === 1 ? '' : 's'}, ${r} rest${r === 1 ? '' : 's'})`;
+    },
+  },
+  {
+    /**
+     * THE CARTOGRAPHER'S QUILL. A ? room deals TWO events and you take one.
+     *
+     * ONLY THE ONE YOU TAKE IS MARKED SEEN (the ruling, 2026-08-10). The
+     * no-repeat bag (run.seenEvents) exists so a run does not show you the same
+     * fork twice; burning the road you did NOT walk down would make the quill a
+     * relic that spends your remaining events twice as fast, which is the exact
+     * opposite of what a map-maker's tool should do. The rejected event goes
+     * back in the bag.
+     */
+    id: 'cartographersQuill', name: "Cartographer's Quill", rarity: 'rare', price: 105,
+    icon: 'icon_help', tint: 0x88b0c8,
+    desc: `? rooms deal ${QUILL_EVENT_CHOICES} events. You take one; the other goes back on the map.`,
+    props: { eventChoices: QUILL_EVENT_CHOICES },
+    liveDesc(a) {
+      const n = a.state.forks ?? 0;
+      return `Currently: ${n} fork${n === 1 ? '' : 's'} drawn`;
+    },
+  },
+  {
+    // Reads state.shield ONLY: the wall you were ALREADY standing behind when
+    // you chose the hand. The plate the hand is about to lay is not standing
+    // yet, and counting it would let a Diamond hand pay for its own bonus.
+    id: 'tortoiseStandard', name: 'Tortoise Standard', rarity: 'rare', price: 120,
+    icon: 'icon_shield', tint: 0x60a848,
+    desc: `+${TORTOISE_VALUE} value for every ${SHIELD_VALUE_STEP} Shield you are standing behind when you play a hand.`,
+    mods: { shieldValue: TORTOISE_VALUE },
+  },
+
+  // ------------------------ VERY RARE (12) ---------------------------------
+  {
+    /**
+     * THE BROKEN COMPASS. See poker.js flushMin() for the whole rule. The
+     * bonus JC named is the KICKER RULE's: a flush scores every card played, so
+     * a four-card flush scores four cards and leaves the fifth in your hand,
+     * where the leftover bench (Court in Session, the Rigged Wheel, the
+     * Voidcaller) is waiting for it.
+     */
+    id: 'brokenCompass', name: 'Broken Compass', rarity: 'veryRare', price: 210,
+    icon: 'icon_dice', tint: 0x8fd8ff,
+    desc: 'Flushes can be made with 4 cards.',
+    mods: { flushMinus1: 1 },
+  },
+  {
+    id: 'ropeLadder', name: 'Rope Ladder', rarity: 'veryRare', price: 210,
+    icon: 'icon_refresh', tint: 0xb87838,
+    desc: 'Straights can be made with 4 cards.',
+    mods: { straightMinus1: 1 },
+  },
+  {
+    // The Collector's Ledger's channel. It STACKS with the Ledger (props are
+    // summed), so holding both is five options and not four.
+    id: 'fourthOption', name: 'The Fourth Option', rarity: 'veryRare', price: 200,
+    icon: 'icon_help', tint: 0xc060c0,
+    desc: 'Booster packs deal 4 options instead of 3.',
+    props: { packExtra: 1 },
+  },
+  {
+    id: 'goldenGoose', name: 'Golden Goose', rarity: 'veryRare', price: 200,
+    icon: 'icon_coins', tint: 0xffd23e,
+    desc: `+${GOOSE_CHIPS} chips every map node you set foot in.`,
+    props: { nodeChips: GOOSE_CHIPS },
+    liveDesc(a) { return `Currently: ${a.state.laid ?? 0} chips laid`; },
+  },
+  {
+    // Ties resolve exactly as the WORN ANVIL's promise does — toward the
+    // higher-mult hand, then up the ladder (poker.mostPlayedHandType) — so the
+    // podium and the Smith can never disagree about which hand is yours.
+    id: 'winnersPodium', name: "Winner's Podium", rarity: 'veryRare', price: 215,
+    icon: 'icon_star', tint: 0xd8b830,
+    desc: `Your most-played hand type this run strikes at x${PODIUM_FACTOR} mult.`,
+    mods(a, run) {
+      const t = mostPlayedHandType(run ?? undefined);
+      return t ? { handFactor: { [t]: PODIUM_FACTOR } } : {};
+    },
+    liveDesc(a, run) {
+      const t = mostPlayedHandType(run ?? undefined);
+      return t
+        ? `Currently: x${PODIUM_FACTOR} on ${HAND_DEF_NAME(t)}`
+        : 'Currently: nothing. Play a hand and it takes first place.';
+    },
+  },
+  {
+    // See LEFT BOOKEND for the position ruling. UNCOPYABLE, which on a position
+    // relic is not the usual "there is nothing to re-read" reason: it is that a
+    // mirror reads the DIAL's cell, so a Forgery beside a rightmost Moon Dial
+    // would be a second x2 bought for a Legendary's price and paid at the
+    // mirror's cell, which is the one place the row's order stops mattering.
+    id: 'moonDial', name: 'Moon Dial', rarity: 'veryRare', price: 220,
+    icon: 'icon_hourglass', tint: 0xbfd8ff,
+    desc: `x${MOON_DIAL_FACTOR} mult while this is the RIGHTMOST relic on your belt. It cannot be copied.`,
+    uncopyable: true,
+    mods(a, run) {
+      const belt = beltArtifacts(run ?? undefined);
+      return belt[belt.length - 1] === a ? { globalMultFactor: MOON_DIAL_FACTOR } : {};
+    },
+    liveDesc(a, run) {
+      const belt = beltArtifacts(run ?? undefined);
+      return belt[belt.length - 1] === a
+        ? `Currently: x${MOON_DIAL_FACTOR} mult  (rightmost)`
+        : 'Currently: nothing. Drag it to the right end of the belt.';
+    },
+  },
+  {
+    /**
+     * THE GLASS GAVEL. The roll happens in `afterHand` and NEVER in the preview
+     * — the same rule the Chaos Orb, the Pan and the Stamper follow, for the
+     * same reason: a preview that rolls leaks the outcome and then desyncs from
+     * the play that follows. A shattered gavel is gone from the belt for good,
+     * which is why it can never be sold for value it no longer has.
+     */
+    id: 'glassGavel', name: 'Glass Gavel', rarity: 'veryRare', price: 185,
+    icon: 'icon_anvil', tint: 0xbfd8ff,
+    desc: `High Card hands strike at x${GAVEL_FACTOR} mult. Each time, ${Math.round(GAVEL_SHATTER_CHANCE * 100)}% chance the gavel shatters forever.`,
+    mods: { handFactor: { highCard: GAVEL_FACTOR } },
+    hooks: {
+      afterHand(scene, a, ctx) {
+        if (ctx?.res?.handType !== 'highCard') return;
+        bank(a, 'rulings', handActivations(ctx));
+        const chance = scene?._gavelForce ?? GAVEL_SHATTER_CHANCE;
+        if (Math.random() >= chance) return;
+        scene.shatterRelic?.(a);
+      },
+    },
+    liveDesc(a) {
+      const n = a.state.rulings ?? 0;
+      return `Currently: ${n} ruling${n === 1 ? '' : 's'} survived`;
+    },
+  },
+  {
+    /**
+     * THE GRAVE ROBBER'S SPADE. `props.destroyMult` is read in exactly ONE
+     * place — run.noteCardsDestroyed, the bell at the bottom of the
+     * card-destruction funnel — so every path in the game that takes a card
+     * away forever pays it, including any added later.
+     *
+     * SELLING IT REVOKES NOTHING (flagged for JC). The mult it dug up is on the
+     * instance and leaves with the instance, which is the ordinary rule for
+     * every scaler in the pool. It is worth saying out loud only because the
+     * spade is the one scaler you can feed on purpose.
+     */
+    id: 'graveRobbersSpade', name: "Grave Robber's Spade", rarity: 'veryRare', price: 205,
+    icon: 'icon_trash', tint: 0x6a5a3c,
+    desc: `Any card destroyed, by anything: +${SPADE_MULT_PER_CARD} mult on this artifact, forever.`,
+    props: { destroyMult: SPADE_MULT_PER_CARD },
+    mods(a) { return { flatMult: a.state.mult ?? 0 }; },
+    liveDesc(a) {
+      const m = a.state.mult ?? 0;
+      const n = a.state.dug ?? 0;
+      return `Currently: +${m} mult  (${n} card${n === 1 ? '' : 's'} buried)`;
+    },
+  },
+  {
+    // Rides the same all-enemy lane the Meteor Sigil and the Hallowed Boulder
+    // use (CombatScene.deliverStrike), so it obeys brittle, shields, EXECUTE
+    // and the kill ledger exactly like any other blow.
+    id: 'thunderheadBanner', name: 'Thunderhead Banner', rarity: 'veryRare', price: 215,
+    icon: 'icon_volume', tint: 0x5878e8,
+    desc: `Every ${THUNDER_EVERY}rd hand each fight strikes EVERY enemy for full damage.`,
+    props: { thunderEvery: THUNDER_EVERY },
+    liveDesc(a) {
+      const n = a.state.struck ?? 0;
+      return `Currently: ${n} storm${n === 1 ? '' : 's'} called`;
+    },
+  },
+  {
+    /**
+     * COMET IN A JAR. Charges bank across the whole RUN (one per hand played),
+     * and the button only lights at COMET_CHARGES. Spending it empties the jar,
+     * so the second comet costs another twenty-five hands.
+     */
+    id: 'cometInAJar', name: 'Comet in a Jar', rarity: 'veryRare', price: 220,
+    icon: 'icon_star', tint: 0x8fd8ff,
+    desc: `+1 charge every hand you play. USE at ${COMET_CHARGES} charges: x${COMET_FACTOR} mult for the rest of the fight.`,
+    uncopyable: true,
+    mods(a) { return a?.state?.lit ? { globalMultFactor: COMET_FACTOR } : {}; },
+    hooks: {
+      fightStart(scene, a) { if (a?.state) a.state.lit = false; },
+      handCommit(scene, a, ctx) { bank(a, 'charges', handActivations(ctx)); },
+    },
+    active: {
+      label: 'RELEASE', hint: `x${COMET_FACTOR} mult for the rest of the fight`,
+      use(scene, a) { return scene.useCometInAJar(a); },
+    },
+    liveDesc(a) {
+      if (a.state.lit) return `Currently: x${COMET_FACTOR} mult, this fight`;
+      const c = Math.min(COMET_CHARGES, a.state.charges ?? 0);
+      return `Currently: ${c}/${COMET_CHARGES} charges`;
+    },
+  },
+  {
+    /**
+     * HOURGLASS OF THE SECOND SUN. Re-executes the LAST hand you played through
+     * the ordinary scoring path, as a fresh play that does NOT tick the hand
+     * clock — the Chrono Elixir's echo machinery, on a button.
+     *
+     * IT DOES NOT SPEND A HAND, so it does not interact with the hands-left
+     * warning at all: `handsLeft` is unchanged by it, the warning fires off the
+     * clock, and THE DEAD MAN'S HAND (which reads the clock at BUILD time) is
+     * therefore not re-armed by an hourglass replay. Playing your last hand and
+     * then turning the glass gives you the Dead Man's Hand once, on the hand
+     * that was genuinely your last, and a free encore of it that is not.
+     */
+    id: 'secondSunHourglass', name: 'Hourglass of the Second Sun', rarity: 'veryRare', price: 220,
+    icon: 'icon_hourglass', tint: 0xffc542,
+    desc: 'ONCE PER FIGHT: play your last hand again, for free. It does not use a hand.',
+    uncopyable: true,
+    active: {
+      label: 'TURN', hint: 'Replay your last hand. It costs no hand.',
+      use(scene, a) { return scene.useSecondSunHourglass(a); },
+    },
+    liveDesc(a) {
+      const n = a.state.turned ?? 0;
+      return `Currently: ${n} hand${n === 1 ? '' : 's'} lived twice`;
+    },
+  },
+  {
+    /**
+     * COLD SNAP CHARM. Armed, not fired: the NEXT hand you play comes back to
+     * your hand instead of going to the discard pile.
+     *
+     * A CARD THAT IS GONE IS STILL GONE. Ethereal's vanish, the FADE's vanish
+     * and the ALL-IN VISOR all remove their card BEFORE the stow, so the charm
+     * returns whatever survived and never resurrects anything. A HYPNOTIZED card
+     * that comes back is simply in your hand again and can be marked again,
+     * which is the boss doing its job.
+     */
+    id: 'coldSnapCharm', name: 'Cold Snap Charm', rarity: 'veryRare', price: 205,
+    icon: 'icon_gem', tint: 0xbfd8ff,
+    desc: 'ONCE PER FIGHT: your next played hand comes back to your hand instead of being discarded.',
+    uncopyable: true,
+    active: {
+      label: 'ARM', hint: 'The next hand you play returns to your hand',
+      use(scene, a) { return scene.useColdSnapCharm(a); },
+    },
+    liveDesc(a) {
+      if (a.state.armed) return 'Currently: ARMED. The next hand comes home.';
+      const n = a.state.saved ?? 0;
+      return `Currently: ${n} hand${n === 1 ? '' : 's'} kept`;
+    },
+  },
+
+  // ------------------------ LEGENDARY (5) ----------------------------------
+  {
+    /**
+     * THE UNDERSTUDY. One card makes a Pair, two make Three of a Kind, three
+     * make Four of a Kind, four make Five of a Kind, and five of a rank make
+     * SIX OF A KIND — the secret hand that squares your mult (poker.js
+     * HAND_DEFS.sixOfAKind, scoring.js step 8b). Flush Five routes to SIX OF A
+     * KIND too; there is no Flush Six, by design.
+     *
+     * THE BROADER CONSEQUENCE, said out loud because JC has been flagged and
+     * asked for it as-is: a PAIR plus one other card is a FULL HOUSE, and a
+     * three-card hand of two matching ranks is Four of a Kind. The relic does
+     * not make big hands easier, it makes SMALL hands enormous, and every
+     * of-a-kind relic in the pool (the Echo Bell, the Ace's Legacy, Matchmaker)
+     * is louder in its company.
+     */
+    id: 'understudy', name: 'The Understudy', rarity: 'legendary', price: 340,
+    icon: 'icon_magic', tint: 0xff8c28,
+    desc: 'Of-a-kind hands can be made with one fewer card. One card is a Pair.',
+    mods: { ofAKindMinus1: 1 },
+  },
+  {
+    // Both halves ride chokepoints: the price through run.shopPrice (the one
+    // till), the free dig through props.freeRestock at the restock button.
+    id: 'royalCharter', name: 'Royal Charter', rarity: 'legendary', price: 320,
+    icon: 'icon_coins', tint: 0xffd23e,
+    desc: `Everything the merchant sells is ${Math.round(CHARTER_DISCOUNT * 100)}% off, and RESTOCK is free, forever.`,
+    props: { shopDiscount: CHARTER_DISCOUNT, freeRestock: 1 },
+  },
+  {
+    /**
+     * THE DEAD MAN'S HAND. On the hand you play with the clock reading ONE, the
+     * hand is REPLAYED ONCE (JC's retrigger ruling: "replayed once" is two total
+     * activations, i.e. handRepeat 2, which is the Pocketwatch's own number and
+     * therefore stacks ADDITIVELY with it through handRepeatAdd) and the whole
+     * thing lands at x4 mult.
+     *
+     * Read at BUILD time off the hand clock, so it is the last hand you are
+     * ENTITLED to and not merely the last one you happen to play. The Hourglass
+     * does not spend a hand and therefore cannot re-arm it.
+     */
+    id: 'deadMansHand', name: "The Dead Man's Hand", rarity: 'legendary', price: 340,
+    icon: 'icon_skull', tint: 0xff8c28,
+    desc: `Your LAST hand of a fight is replayed once and strikes at x${DEAD_MANS_FACTOR} mult.`,
+    props: { deadMansHand: 1, deadMansRepeat: DEAD_MANS_REPEAT, deadMansFactor: DEAD_MANS_FACTOR },
+  },
+  {
+    /**
+     * SHIP IN A BOTTLE. A mast every SHIP_FIGHTS_PER_MAST fights won, three at
+     * most, and the rigging is PAINTED FROM THE COUNT rather than banked — so a
+     * save written at two masts comes back at two masts without a migration.
+     * At full sail it is x4 on everything, and every ACT CLEARED ceremony pays
+     * SHIP_ACT_CHIPS through gainGold, where the ledger can see it.
+     */
+    id: 'shipInABottle', name: 'Ship in a Bottle', rarity: 'legendary', price: 330,
+    icon: 'icon_drop', tint: 0x3f8fd0,
+    desc: `A mast every ${SHIP_FIGHTS_PER_MAST} fights won, up to ${SHIP_MAX_MASTS}. At full sail: x${SHIP_FULL_FACTOR} mult and +${SHIP_ACT_CHIPS} chips at every act ceremony.`,
+    mods(a) {
+      return shipMasts(a?.state?.fights ?? 0) >= SHIP_MAX_MASTS
+        ? { globalMultFactor: SHIP_FULL_FACTOR } : {};
+    },
+    // No onAcquire: a fresh ship is at zero masts and artifactArtKey's fallback
+    // ('art_' + id) is already the bare-hull texture, so there is nothing to
+    // grant at pickup and therefore nothing to revoke on sale.
+    hooks: {
+      fightEnd(scene, a) {
+        const before = shipMasts(a?.state?.fights ?? 0);
+        bank(a, 'fights');
+        const after = riggShip(a);
+        if (after > before) scene.relicTransformed?.(a, after >= SHIP_MAX_MASTS ? 'FULL SAIL!' : 'A MAST RISES');
+      },
+      actCleared(scene, a) {
+        if (shipMasts(a?.state?.fights ?? 0) < SHIP_MAX_MASTS) return 0;
+        const paid = scene.gainChips(SHIP_ACT_CHIPS, 'FULL SAIL!');
+        bank(a, 'paid', paid);
+        return paid;
+      },
+    },
+    liveDesc(a) {
+      const masts = shipMasts(a.state.fights ?? 0);
+      if (masts >= SHIP_MAX_MASTS) {
+        return `Currently: FULL SAIL. x${SHIP_FULL_FACTOR} mult  (${a.state.paid ?? 0} chips in port)`;
+      }
+      const left = SHIP_FIGHTS_PER_MAST - ((a.state.fights ?? 0) % SHIP_FIGHTS_PER_MAST);
+      return `Currently: ${masts} mast${masts === 1 ? '' : 's'}  (${left} fight${left === 1 ? '' : 's'} to the next)`;
+    },
+  },
+  {
+    /**
+     * TRUE COLORS. See scoring.ruleSuitOf for the whole rule and why it touches
+     * exactly two lines. Per hero, because each suit's RULE is a different
+     * sentence and the relic reads whichever one is yours:
+     *
+     *   DEXTRA   {swords}   every scoring card deals DOUBLE damage.
+     *   ZELUS    {hearts}   every scoring card heals its full value as well as
+     *                       striking, so a sword hand banks Zeal like a heart one.
+     *   THE BULL {gems}     every scoring card deals damage AND plates you, and
+     *                       his passive doubles the damage half of all of it.
+     *   OPHELIA  {clubs}    every scoring card splashes a quarter of what it
+     *                       dealt onto every other body, and her poison follows.
+     *   DRUSKY   {gems}     the Bull's rule without the doubling: damage + plate.
+     *
+     * WHAT IT DOES NOT DO: rewrite a single card's suit. Keeper seals, the four
+     * suit grinders, Whetstone, Prayer Beads, the aura on the card and every
+     * suit-keyed relic in the pool read `breakdown.suit`, which is untouched.
+     */
+    id: 'trueColors', name: 'True Colors', rarity: 'legendary', price: 340,
+    icon: 'icon_gem', tint: 0xff8c28,
+    desc: "Every scoring card fights as {SUIT}: your suit's rule, whatever the card shows. What the card IS never changes.",
+    mods: { trueColors: 1 },
+  },
+
+  // ------------------------- MYTHICAL (1) ----------------------------------
+  {
+    /**
+     * SOVEREIGN'S WRIT. Boss and elite SIGNATURE mechanics do not affect you.
+     *
+     * THE RULING (2026-08-10), and it is one sentence: A SIGNATURE IS NULLIFIED
+     * WHEN IT LANDS ON YOU. Your hero, your hand, your deck, your relics, your
+     * Shield, your HP, your right to play a hand. A signature that only ever
+     * changes the ENEMY is untouched, because the writ's own words are "do not
+     * affect YOU" and a bear healing itself is not something happening to you.
+     *
+     * SO: SHATTERGUARD, DREAD GRIP, RIME THORNS, TALON GRIP's suit lock,
+     * MOONGLARE, SCALE DUST, THE COURT SLEEPS, HE SEES IT COMING, AS YOU DID,
+     * UNSINGING, REWEAVE, WEIGHTLESS, CONDEMNED, PYRE TAX, DOUBLE JEOPARDY,
+     * STRUCK FROM THE RECORD, THE QUEUE, ROOTED, HOPQUAKE, WINTER'S FORCE,
+     * AGATHA'S SLICE, ETERNAL KEEP and the HYPNOTIC GAZE all stop.
+     * FEAST, CALL OF THE PACK, GLACIAL AEGIS, WAKING WRATH, SILKBOUND, THE HUNT,
+     * REFLECTION, STILLNESS, SCAFFOLD, NOTHING TWICE, the FROZEN RITE, the
+     * SISTERS' WARD and the VOID SHELL all keep working: those are their bodies,
+     * their allies and their armour, and none of them is an effect on you.
+     *
+     * Generic attacks and plain debuffs land as always, from bosses included.
+     * The writ answers SIGNATURES, not violence.
+     */
+    id: 'sovereignsWrit', name: "Sovereign's Writ", rarity: 'mythical', price: 0,
+    icon: 'icon_star', tint: 0xe03040,
+    desc: 'Boss and elite SIGNATURE mechanics do not affect you. Their attacks still do.',
+    props: { sovereignWrit: 1 },
+    liveDesc(a) {
+      const n = a.state.struck ?? 0;
+      return `Currently: ${n} signature${n === 1 ? '' : 's'} struck down`;
+    },
+  },
 ];
+
+/** A hand type's printed name, for the Podium's live line. */
+function HAND_DEF_NAME(type) {
+  return HAND_DEFS[type]?.name ?? String(type ?? '');
+}
 
 /**
  * The Wheel of Divinity's face, in wheel order. Uniform odds (the spin picks an

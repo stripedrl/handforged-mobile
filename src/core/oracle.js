@@ -51,7 +51,7 @@ import { rollEliteDrop, rollOfRarity } from './artifacts.js';
 import { MAX_POTIONS, rollDistinctPotions } from './potions.js';
 import { forceMythicNode } from './map.js';
 import { ETHEREAL_VANISH_CHANCE, MOD_MULT_FACTOR, VALUE_BONUS_BY_MOD } from './scoring.js';
-import { run, gainGold } from './run.js';
+import { run, gainGold, noteCardsDestroyed } from './run.js';
 
 // ---------------------------------------------------------------------------
 // THE NUMBERS. Every one of them is quoted by the copy below through a template
@@ -105,11 +105,21 @@ function freshCards(deck, n, rng) {
   return out;
 }
 
-/** Every card of these ranks, gone from the run deck. Returns how many left. */
+/**
+ * Every card of these ranks, gone from the run deck. Returns how many left.
+ *
+ * THE ONE FILTER THAT DOES NOT USE run.destroyRunCard. This deletes a whole
+ * RANK BAND in one sweep — four to sixteen cards — and a per-card splice would
+ * walk the deck once per card for no gain. So it keeps the filter and RINGS THE
+ * BELL ONCE for the whole count (run.noteCardsDestroyed), which is the identical
+ * arithmetic THE GRAVE ROBBER'S SPADE would have banked card by card.
+ */
 function stripRanks(r, ranks) {
   const before = r.runDeck.length;
   r.runDeck = r.runDeck.filter(c => !ranks.includes(c.rank));
-  return before - r.runDeck.length;
+  const gone = before - r.runDeck.length;
+  noteCardsDestroyed(gone, r);
+  return gone;
 }
 
 // ---------------------------------------------------------------------------

@@ -27,7 +27,11 @@ import { ORACLE_OPTIONS } from './oracle.js';
 // ENDLESS clamp only (the Smith's double-tempering ladder tops out at Act IV).
 // Safe edge: acts.js reaches enemies/map/progress and none of them reach back.
 import { ACTS } from './acts.js';
-import { run as liveRun, effectiveArtifacts, gainGold } from './run.js';
+// THE ONE CARD-DESTRUCTION DOOR (run.destroyRunCard). Seven rites on this table
+// take a card off the deck forever and every one of them goes through it, so
+// THE GRAVE ROBBER'S SPADE is paid without a single pack knowing it exists.
+// Deliberately NOT through it: LOADED DEAL, which REPLACES a card in place.
+import { run as liveRun, effectiveArtifacts, gainGold, destroyRunCard } from './run.js';
 
 /**
  * The relic belt to read for pack-time props. For the LIVE run that means the
@@ -374,10 +378,7 @@ const WITCH_RITES = [
     desc: 'Destroy up to 2 chosen cards.',
     ui: 'pickCards', pick: 2, optional: true,
     apply(run, { cards }) {
-      for (const c of cards) {
-        const i = run.runDeck.indexOf(c);
-        if (i >= 0) run.runDeck.splice(i, 1);
-      }
+      for (const c of cards) destroyRunCard(c, run);
     },
   },
   {
@@ -470,10 +471,7 @@ const WITCH_RITES = [
     // IN PLACE and splice the front, which silently reordered the master deck
     // as a side effect of casting a spell.)
     apply(run) {
-      for (const c of lowest(run.runDeck, DESTRUCTION_COUNT)) {
-        const i = run.runDeck.indexOf(c);
-        if (i >= 0) run.runDeck.splice(i, 1);
-      }
+      for (const c of lowest(run.runDeck, DESTRUCTION_COUNT)) destroyRunCard(c, run);
     },
   },
   {
@@ -711,18 +709,18 @@ export const DEALER_DEALS = [
         cards: doomed,
         apply(run) {
           run.player.handSize += 1;
-          for (const c of doomed) {
-            const i = run.runDeck.indexOf(c);
-            if (i >= 0) run.runDeck.splice(i, 1);
-          }
+          for (const c of doomed) destroyRunCard(c, run);
         },
       };
     },
     available: r => r.runDeck.length >= 20,
+    // THE BLIND PATH — the deal applied without a resolve() having named the
+    // three first. Same rolls in the same order as before; the splice is now the
+    // one door's splice, so the spade is paid either way you got here.
     apply(r) {
       r.player.handSize += 1;
       for (let i = 0; i < 3 && r.runDeck.length; i++) {
-        r.runDeck.splice(Math.floor(Math.random() * r.runDeck.length), 1);
+        destroyRunCard(r.runDeck[Math.floor(Math.random() * r.runDeck.length)], r);
       }
     },
   },
@@ -745,10 +743,7 @@ export const DEALER_DEALS = [
       r.bonusMods.suitValue[suit] = (r.bonusMods.suitValue[suit] ?? 0) + RACKET_SUIT_VALUE;
       // Same three cards resolve() named, taken out by identity rather than by
       // sorting the master deck in place.
-      for (const c of highest(r.runDeck, 3)) {
-        const i = r.runDeck.indexOf(c);
-        if (i >= 0) r.runDeck.splice(i, 1);
-      }
+      for (const c of highest(r.runDeck, 3)) destroyRunCard(c, r);
     },
   },
   {
@@ -789,10 +784,7 @@ export const DEALER_DEALS = [
     available: r => r.chips >= 60,
     apply(r, { cards }) {
       r.chips -= 60;
-      for (const c of cards) {
-        const i = r.runDeck.indexOf(c);
-        if (i >= 0) r.runDeck.splice(i, 1);
-      }
+      for (const c of cards) destroyRunCard(c, r);
     },
   },
   {
@@ -812,6 +804,10 @@ export const DEALER_DEALS = [
     // Uses the SAME helpers resolve() used, so the cards the tooltip named are
     // exactly the cards that change — ties included (an ascending sort's last
     // element and a descending sort's first are different cards when ranks tie).
+    //
+    // DELIBERATELY NOT run.destroyRunCard: this REPLACES a card in place. The
+    // deck never gets shorter, nothing is destroyed, and THE GRAVE ROBBER'S
+    // SPADE is owed nothing for a card that was rewritten rather than burned.
     apply(r) {
       r.chips -= 50; r.player.hp -= 5;
       const low = lowest(r.runDeck, 2);
@@ -944,10 +940,7 @@ function forgePool(chrSuit) {
       desc: 'Burn 3 chosen cards forever. EVERY hand type gains +3 mult, permanently.',
       ui: 'pickCards', pick: 3,
       apply(r, { cards }) {
-        for (const c of cards) {
-          const i = r.runDeck.indexOf(c);
-          if (i >= 0) r.runDeck.splice(i, 1);
-        }
+        for (const c of cards) destroyRunCard(c, r);
         r.bonusMods.handMult ??= {};
         for (const t of HAND_TYPES) r.bonusMods.handMult[t] = (r.bonusMods.handMult[t] ?? 0) + 3;
       },
@@ -1133,10 +1126,7 @@ export const BOUNTY_REWARDS = [
     desc: 'Remove 2 cards from your deck, free.',
     ui: 'pickCards', pick: 2, optional: true, sample: 0,
     apply(r, { cards }) {
-      for (const c of cards) {
-        const i = r.runDeck.indexOf(c);
-        if (i >= 0) r.runDeck.splice(i, 1);
-      }
+      for (const c of cards) destroyRunCard(c, r);
     },
   },
   {

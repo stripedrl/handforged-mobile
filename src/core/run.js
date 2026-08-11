@@ -151,9 +151,35 @@ export function handsPerFight(r = run) {
  * never meet. Floored at 1: a discount must never make a thing free.
  */
 export function shopPrice(base, r = run) {
-  const factor = r?.oracleMods?.shopPriceFactor ?? 1;
+  const factor = (r?.oracleMods?.shopPriceFactor ?? 1) * shopDiscountFactor(r);
   if (factor === 1) return base;
   return Math.max(1, Math.round(base * factor));
+}
+
+/**
+ * THE RELIC DISCOUNTS (2026-08-10) — `props.shopDiscount`, a FRACTION OFF.
+ *
+ * ROYAL CHARTER writes 0.5 and THE HAGGLER'S TONGUE writes 0.1, and they ride
+ * the till above rather than any one price, which is what makes "everything"
+ * mean everything: the relics on the mat, the bottles, the removal ladder, the
+ * booster ladder and the restock dig.
+ *
+ * MULTIPLICATIVE, PER RELIC, and multiplicative again against THE ORACLE'S
+ * NEGOTIATOR (which writes oracleMods.shopPriceFactor). Charter + Tongue is
+ * x0.5 * x0.9 = x0.45, and with the Negotiator's x0.9 on top, x0.405. Summing
+ * them would let three discounts reach free, and the floor of 1 chip in
+ * shopPrice is a guard, not a design.
+ *
+ * Deliberately NOT the sell-back price (sellFraction owns that) and
+ * deliberately not anything you EARN (gainGold owns that).
+ */
+export function shopDiscountFactor(r = run) {
+  let f = 1;
+  for (const a of effectiveArtifacts(r)) {
+    const d = a.props?.shopDiscount ?? 0;
+    if (d > 0) f *= Math.max(0, 1 - d);
+  }
+  return f;
 }
 
 /**
@@ -642,6 +668,79 @@ export function payEncounterInterest(r = run) {
 }
 
 /**
+ * THE ARRIVAL PURSE (THE GOLDEN GOOSE, 2026-08-10) — `props.nodeChips`.
+ *
+ * Summed across the effective belt and paid ONCE per node you commit to, from
+ * the same door the Banker's Vault's dividend hangs off, so fights, elites,
+ * bosses, events, rests and the merchant all pay and no future room type can
+ * forget to. Through gainGold, so the difficulty factor and every chip-gain
+ * relic apply exactly as they do everywhere else.
+ */
+export function payNodeArrival(r = run) {
+  const holders = effectiveArtifacts(r).filter(a => (a.props?.nodeChips ?? 0) > 0);
+  if (!holders.length) return 0;
+  const owed = holders.reduce((s, a) => s + a.props.nodeChips, 0);
+  const paid = gainGold(owed, r);
+  if (paid > 0) {
+    for (const a of holders) {
+      if (a.state) a.state.laid = (a.state.laid ?? 0) + Math.round(paid / holders.length);
+    }
+  }
+  return paid;
+}
+
+/**
+ * THE CARD-DESTRUCTION FUNNEL (2026-08-10).
+ *
+ * THE GRAVE ROBBER'S SPADE pays for every card destroyed, and before this
+ * existed "destroyed" was a verb spelled fifteen different ways: a splice in
+ * the rest overlay, a splice in the merchant's tent, a splice in four Witch
+ * rites, a splice in three Dealer deals, a splice in the Forge's Ritual of Ash,
+ * a splice in CLEAN SWEEP, two splices in events, and CombatScene's own
+ * burnCardForever. A relic that had to be remembered at fifteen call sites is a
+ * relic that is wrong the first time a sixteenth is written.
+ *
+ * So there is one door now. `destroyRunCard` removes the card from the run deck
+ * and RINGS THE BELL; `noteCardsDestroyed` is the bell on its own, for the one
+ * path (CombatScene.burnCardForever) that must also sweep the draw pile, the
+ * discard pile and a live sprite and therefore owns its own removal.
+ *
+ * DELIBERATELY NOT COUNTED: an onSell revocation (the Star Chart's stars, THE
+ * JOKER). Those cards are not destroyed, they are UN-GRANTED, and paying the
+ * spade for them would make buy-relic-sell-relic a mult engine.
+ *
+ * THE BANK IS NEVER REVOKED. Selling the spade leaves the mult it already dug
+ * up on the instance and the instance leaves with it, which is the ordinary
+ * rule for every scaler in the pool: what a relic banked, it banked.
+ */
+export function noteCardsDestroyed(n = 1, r = run) {
+  const count = Math.max(0, Math.round(n));
+  if (count <= 0) return 0;
+  let banked = 0;
+  for (const a of effectiveArtifacts(r)) {
+    const rate = a.props?.destroyMult ?? 0;
+    if (rate <= 0 || !a.state) continue;
+    a.state.dug = (a.state.dug ?? 0) + count;
+    a.state.mult = (a.state.mult ?? 0) + count * rate;
+    banked += count * rate;
+  }
+  return banked;
+}
+
+/**
+ * Take a card off the run deck FOREVER, through the one door. Accepts a card
+ * object or an id. Returns the card that left, or null when it was not there.
+ */
+export function destroyRunCard(card, r = run) {
+  const id = typeof card === 'string' ? card : card?.id;
+  const i = (r.runDeck ?? []).findIndex(c => c.id === id);
+  if (i < 0) return null;
+  const [gone] = r.runDeck.splice(i, 1);
+  noteCardsDestroyed(1, r);
+  return gone;
+}
+
+/**
  * THE ONE DOOR ONTO A NODE. map.enterNode is the chokepoint every advance goes
  * through — MapScene.tryEnter is its only production caller, and fights, events,
  * rests and the merchant all branch AFTER it — so this wraps it once and hangs
@@ -653,7 +752,7 @@ export function payEncounterInterest(r = run) {
  */
 export function enterMapNode(nodeId, r = run, force = false) {
   const node = enterNode(r.map, nodeId, force);
-  return { node, interest: payEncounterInterest(r) };
+  return { node, interest: payEncounterInterest(r), arrival: payNodeArrival(r) };
 }
 
 /**
@@ -929,6 +1028,11 @@ export function collectMods() {
     // added to any hand that already grants Shield, upstream of Aegis Core.
     flatValue: 0,
     flatShield: 0,
+    // THE TORTOISE STANDARD (2026-08-10): flat PRE-MULT value per whole
+    // SHIELD_VALUE_STEP points of Shield you are standing behind when the hand
+    // is played. Reads the wall, never the hand's own plate, which is what
+    // "standing" means and what keeps it from feeding itself.
+    shieldValue: 0,
     handFactor: {},        // handType -> multiplicative factor (×1.5 straights...)
     globalMultFactor: 1,   // multiplies effMult
     modCardFactor: 1,      // × per scoring MODDED card, compounding (the Still)
@@ -968,6 +1072,15 @@ export function collectMods() {
     // boolean so a mirrored copy is countable instead of silently swallowed;
     // scoring.js reads it as truthy, so two Understudies are not two shifts.
     ofAKindMinus1: 0,
+    // THE BROKEN COMPASS / THE ROPE LADDER (2026-08-10). Same shape and the
+    // same reason: counts rather than booleans, so a mirrored copy is countable
+    // instead of silently swallowed, and poker.js reads them as truthy so two
+    // Compasses are not a three-card flush.
+    flushMinus1: 0,
+    straightMinus1: 0,
+    // TRUE COLORS (2026-08-10). Every scoring card follows YOUR suit's RULE.
+    // A count for the same reason; scoring.js reads it as truthy.
+    trueColors: 0,
     handLevels: run.handLevels,
   };
   for (const s of Object.keys(run.bonusMods?.suitValue ?? {})) {
@@ -982,10 +1095,16 @@ export function collectMods() {
     if (m.suitValue) for (const s of Object.keys(m.suitValue)) mods.suitValue[s] += m.suitValue[s];
     if (m.suitMult) for (const s of Object.keys(m.suitMult)) mods.suitMult[s] += m.suitMult[s];
     if (m.modValue) for (const k of Object.keys(m.modValue)) mods.modValue[k] = (mods.modValue[k] ?? 0) + m.modValue[k];
+    // PER-CARD VALUE, FROM A RELIC (2026-08-10). The channel existed for the
+    // scene's own per-hand grants; THE CAMPSTOOL is the first relic to write it,
+    // and it writes one entry per card it has ever honed. Selling the stool
+    // takes the sharpening with it, because the map lives on the instance.
+    if (m.cardValue) for (const k of Object.keys(m.cardValue)) mods.cardValue[k] = (mods.cardValue[k] ?? 0) + m.cardValue[k];
     if (m.handMult) for (const h of Object.keys(m.handMult)) mods.handMult[h] = (mods.handMult[h] ?? 0) + m.handMult[h];
     if (m.flatMult) mods.flatMult += m.flatMult;
     if (m.flatValue) mods.flatValue += m.flatValue;
     if (m.flatShield) mods.flatShield += m.flatShield;
+    if (m.shieldValue) mods.shieldValue += m.shieldValue;
     if (m.handValue) for (const h of Object.keys(m.handValue)) mods.handValue[h] = (mods.handValue[h] ?? 0) + m.handValue[h];
     if (m.handFactor) for (const h of Object.keys(m.handFactor)) mods.handFactor[h] = (mods.handFactor[h] ?? 1) * m.handFactor[h];
     if (m.globalMultFactor) mods.globalMultFactor *= m.globalMultFactor;
@@ -1014,6 +1133,9 @@ export function collectMods() {
     if (m.cloverDamageOff) mods.cloverDamageOff += m.cloverDamageOff;
     if (m.gemDamageFactor) mods.gemDamageFactor += m.gemDamageFactor;
     if (m.ofAKindMinus1) mods.ofAKindMinus1 += m.ofAKindMinus1;
+    if (m.flushMinus1) mods.flushMinus1 += m.flushMinus1;
+    if (m.straightMinus1) mods.straightMinus1 += m.straightMinus1;
+    if (m.trueColors) mods.trueColors += m.trueColors;
     if (m.faceValue) mods.faceValue += m.faceValue;
     if (m.faceMult) mods.faceMult += m.faceMult;
   }

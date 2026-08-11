@@ -38,6 +38,15 @@ import {
 } from '../core/run.js';
 import { autosave } from '../core/save.js';
 import { reachable, eliteNodes, FORGED_HP_MULT, FORGED_DMG_MULT } from '../core/map.js';
+// THE BOARD'S GEOMETRY IS THE GENERATOR'S (2026-08-11). This scene used to hold
+// its own copy of the layout arithmetic and its own opinion about how far a leap
+// arc bows, which is precisely how a leap came to be drawn straight over a room
+// it does not connect to: nothing upstream could see where the trail would land.
+// core/map.js owns all of it now — it has to, because clearance is a generation
+// invariant — and this file reads the same answers the generator vetted.
+import {
+  ROW_GAP, mapLayout, leapBulge, edgeAt, edgePoints, edgeLength, mapPathAudit,
+} from '../core/map.js';
 import {
   actVariants, bossEntry, bossRoster,
   // ENDLESS: the per-loop hue, and the lap number the act plate prints.
@@ -106,8 +115,6 @@ import {
   eventBg, packCards, MERCHANT_BG, boardKeyFor, BANNER_BY_AMBIENCE, heroCardfaces,
 } from '../core/lazyload.js';
 import { gateOn } from '../ui/loadingVeil.js';
-
-const ROW_GAP = 150;
 
 /**
  * THE PHONE'S TOP CORNERS ARE NOT SQUARE (JC, 2026-08-06: "map HUD pinched
@@ -250,7 +257,8 @@ export const SHOP_RELIC_STOCK = 2;
 // node band off its own frame. (One of the two lines in the tree that genuinely
 // meant "the wide canvas"; the other is core/lazyload.js's boardKeyFor.)
 const BOARD_W = WIDE ? GAME_W : 1920;
-const W_USE = 1500;        // band the nodes actually occupy (clear of frame art)
+// (the node band itself is core/map.js's NODE_BAND now — the generator lays the
+// board out, because it has to measure the trails it is about to authorise)
 
 /**
  * HOW HARD THE INK HAS TO PUSH ON THIS WORLD'S BOARD (JC, 2026-08-06: the
@@ -435,6 +443,39 @@ export class MapScene extends Phaser.Scene {
         const p = this.nodePos(run.map.nodes[id]);
         return { x: p.x, y: p.y + this.mapLayer.y };
       },
+      /**
+       * =====================================================================
+       * THE BOARD'S PATHS, MEASURED (2026-08-11) — the map's half of JC's
+       * "paths overlap and look jank"
+       * =====================================================================
+       * A screenshot cannot prove a negative and a person cannot eyeball 90px
+       * across six painted boards at three canvas widths. This hands back every
+       * room, every trail, and — crucially — the SAMPLED POLYLINE each trail's
+       * dots are actually laid along, so a driver can recompute clearance from
+       * the drawn geometry itself instead of trusting the number this page
+       * arrived at. (tools/verify_map_paths.py does exactly that, and its
+       * assertion is its own arithmetic, not `clearance` below.)
+       *
+       * Coordinates are THIS SCENE'S: x is screen-space (board space plus
+       * GAME_W/2), y is board-space — add `layerY` for a screen y. Node centres
+       * and trail points are in the same space as each other, which is the only
+       * thing a distance measurement needs.
+       *
+       *   violations  trails passing within `clearRadius` of a room they do not
+       *               connect to. ASSERT []. This is the invariant.
+       *   crossings   NORMAL trails whose drawn lines intersect. ASSERT [].
+       *               Leaps are exempt by construction: an arc that skips a
+       *               floor must get past that floor's trails, and it now does
+       *               so wide of every room rather than through them.
+       */
+      mapGeometry: () => ({
+        ...mapPathAudit(run.map, this.layout),
+        contentH: this.contentH,
+        layerY: this.mapLayer?.y ?? 0,
+        gameW: GAME_W,
+        ambience: this.act.ambience,
+        actIndex: run.actIndex,
+      }),
       // Deterministic room access for autonomous playtests.
       openRest: () => this.runRest(),
       openShop: () => this.runShop(),
@@ -1143,27 +1184,18 @@ export class MapScene extends Phaser.Scene {
    * Organic layout: each floor's rooms are spread from the CENTER outward —
    * sparse floors sit wide and lonely, busy floors bunch up, everything
    * funnels toward the centered boss. No strict columns.
+   *
+   * THE ARITHMETIC LIVES IN core/map.js NOW (mapLayout), and this is the only
+   * thing left of it: the generator's board space is centred on 0 and the screen
+   * is centred on GAME_W/2, so the board slides across by half a canvas and
+   * nothing else changes. It matters that this is a pure TRANSLATION — every
+   * clearance number below is measured in this scene's own coordinates and has
+   * to mean exactly what the generator meant by it.
    */
   computeLayout() {
-    const map = run.map;
+    const { pos } = mapLayout(run.map);
     this.layout = {};
-    for (let row = 0; row < map.rows; row++) {
-      const rowNodes = Object.values(map.nodes)
-        .filter(n => n.row === row && n.id !== map.bossId)
-        .sort((a, b) => a.col - b.col);
-      const n = rowNodes.length;
-      const gap = Math.min(430, W_USE / Math.max(n, 2));
-      rowNodes.forEach((node, i) => {
-        this.layout[node.id] = {
-          x: GAME_W / 2 + (i - (n - 1) / 2) * gap + node.jx,
-          y: this.contentH - 280 - row * ROW_GAP + node.jy,
-        };
-      });
-    }
-    this.layout[map.bossId] = {
-      x: GAME_W / 2,
-      y: this.contentH - 280 - map.rows * ROW_GAP - 78,
-    };
+    for (const [id, p] of Object.entries(pos)) this.layout[id] = { x: GAME_W / 2 + p.x, y: p.y };
   }
 
   nodePos(node) { return this.layout[node.id]; }
@@ -1231,14 +1263,37 @@ export class MapScene extends Phaser.Scene {
   /** What this world's ground does to the four marks drawn on it. See BOARD_INK. */
   get boardInk() { return BOARD_INK[this.act.ambience] ?? INK_DEFAULT; }
 
-  /** Dotted ink trails between connected nodes; taken path glows gold. */
+  /**
+   * Dotted ink trails between connected nodes; taken path glows gold.
+   *
+   * ===========================================================================
+   * THE LEAP ARC IS THE GENERATOR'S, RE-DERIVED — NOT THIS FILE'S GUESS
+   * ===========================================================================
+   * (JC, 2026-08-11: "two paths starting from one element ... both connect
+   * vertically over the same elements. If I have to path through an element, I
+   * shouldn't be able to skip it since a different element has a path that
+   * stretches right over it and above it.")
+   *
+   * The shipped bulge was `a.x <= GAME_W/2 ? -74 : 74` — a side picked off which
+   * half of the canvas the trail started in, and a magnitude picked out of the
+   * air. A quadratic Bezier's apex sits HALF the control offset off the chord,
+   * so that arc bowed by 37px against a 150px floor pitch: a leap did not fly
+   * WIDE of the floor it skipped, it went straight down the middle of it.
+   *
+   * `leapBulge` is the whole fix and it lives in core/map.js because the
+   * GENERATOR has to be able to ask the same question — a leap now only exists
+   * when some arc between its two ends clears every room it flies over by
+   * NODE_CLEAR_RADIUS. Calling it again HERE is the second line of defence and
+   * costs nothing: it is pure geometry over the same positions, so on a board
+   * this build generated it returns the arc that was vetted, and on a board an
+   * OLDER build left in a save (whose leaps were never vetted at all) it still
+   * picks the roomiest arc available instead of drawing through a room.
+   */
   drawPaths() {
     const map = run.map;
     const ink = this.boardInk;
     const takenEdges = new Set();
     for (let i = 0; i < map.taken.length - 1; i++) takenEdges.add(`${map.taken[i]}>${map.taken[i + 1]}`);
-    const fromCurrent = new Set((map.currentId ? map.nodes[map.currentId].next : map.starts)
-      .map(id => `${map.currentId ?? 'start'}>${id}`));
 
     for (const node of Object.values(map.nodes)) {
       const a = this.nodePos(node);
@@ -1247,25 +1302,38 @@ export class MapScene extends Phaser.Scene {
         const taken = takenEdges.has(`${node.id}>${nextId}`);
         const live = map.currentId === node.id;
         const isLeap = node.leaps?.includes(nextId);
-        // Leaps arc wide of the floor they skip — reads as a detour trail.
-        const bulge = isLeap ? (a.x <= GAME_W / 2 ? -74 : 74) : 0;
-        const mx = (a.x + b.x) / 2 + bulge, my = (a.y + b.y) / 2;
-        const dist = Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y);
-        const steps = Math.floor(dist / (isLeap ? 32 : 26));
+        const arc = isLeap ? leapBulge(this.layout, node.id, nextId) : null;
+        const bulge = arc?.bulge ?? 0;
+        // Along the ARC, not along the chord: a 300-unit bulge adds real length,
+        // and dividing the chord by the dot pitch would space a leap's dots out
+        // as the arc widened. edgeLength walks the same curve edgeAt lays on.
+        const arcLen = edgeLength(edgePoints(a, b, bulge, 24));
+        const steps = Math.max(3, Math.round(arcLen / (isLeap ? 30 : 26)));
         for (let s = 1; s < steps; s++) {
           const t = s / steps;
-          const omt = 1 - t;
-          const qx = omt * omt * a.x + 2 * omt * t * mx + t * t * b.x;
-          const qy = omt * omt * a.y + 2 * omt * t * my + t * t * b.y;
+          // A BREAK IN THE TRAIL FOR THE CHEVRON. The glyph sits ON the apex, so
+          // without this the dots run straight through it and both marks turn to
+          // mud; a clean gap reads as a waypoint pinned to the path.
+          if (isLeap && Math.abs(t - 0.5) * arcLen < 30) continue;
+          const q = edgeAt(a, b, bulge, t);
           // The trail is pushed on the two dark boards (see BOARD_INK): the
           // untaken dots take a paler ink, everything takes more opacity, and
           // the dot itself grows by half the difference so a brighter mark is
           // not also a smaller one.
-          const baseTint = isLeap ? 0xc09040 : taken ? 0xb8862c : live ? 0x8a6a3c : 0x9a835e;
-          const dot = this.add.image(qx + Math.sin(s * 2.1) * 3, qy, 'map_dot')
+          //
+          // A LEAP IS LOUDER THAN THE ROAD (2026-08-11). It was 0.7 alpha of a
+          // muddy 0xc09040 at the same size as an ordinary dot, which on the
+          // Nightwood's canopy is indistinguishable from the ink trail it is
+          // supposed to be an exception to. It is now bright forge-gold, nearly
+          // opaque and a size class up — and unlike every other trail on the
+          // board it does not take the hand-drawn wobble, because a leap reads
+          // as a deliberate arc and a wobbling arc reads as a mistake.
+          const baseTint = isLeap ? 0xffc94a : taken ? 0xb8862c : live ? 0x8a6a3c : 0x9a835e;
+          const wobble = isLeap ? 0 : Math.sin(s * 2.1) * 3;
+          const dot = this.add.image(q.x + wobble, q.y, 'map_dot')
             .setTint(!taken && !live && !isLeap && ink.dot != null ? ink.dot : baseTint)
-            .setAlpha(Math.min(1, (taken ? 0.95 : live ? 0.9 : isLeap ? 0.7 : 0.55) * ink.trail))
-            .setScale((taken || live ? 1.1 : isLeap ? 1.0 : 0.85) * (1 + (ink.trail - 1) * 0.5));
+            .setAlpha(isLeap ? 0.92 : Math.min(1, (taken ? 0.95 : live ? 0.9 : 0.55) * ink.trail))
+            .setScale(isLeap ? 1.15 : (taken || live ? 1.1 : 0.85) * (1 + (ink.trail - 1) * 0.5));
           this.mapLayer.add(dot);
           if (live) {
             this.tweens.add({
@@ -1274,8 +1342,26 @@ export class MapScene extends Phaser.Scene {
             });
           }
         }
+        // ...AND A CHEVRON AT THE APEX, so a leap is legible as a leap without
+        // having to trace the dots. The tangent of a quadratic at t=0.5 is
+        // parallel to its own chord, so the glyph simply points the way the
+        // trail is going and needs no derivative.
+        if (isLeap) this.drawLeapGlyph(a, b, bulge);
       }
     }
+  }
+
+  /** The gold double-chevron pinned to a leap arc's apex. See drawPaths. */
+  drawLeapGlyph(a, b, bulge) {
+    const apex = edgeAt(a, b, bulge, 0.5);
+    const angle = Math.atan2(b.y - a.y, b.x - a.x) + Math.PI / 2;
+    const glyph = this.add.image(apex.x, apex.y, 'map_leap')
+      .setRotation(angle).setAlpha(0.95).setScale(1);
+    this.mapLayer.add(glyph);
+    this.tweens.add({
+      targets: glyph, alpha: 0.55, scale: 0.9,
+      duration: 1300, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+    });
   }
 
   /** The act boss looms at the summit. Hover for its signature cruelty. */

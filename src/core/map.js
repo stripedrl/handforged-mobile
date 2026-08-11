@@ -22,6 +22,336 @@ const WALKS = 5;
 const LEAP_CHANCE = 0.16;     // per eligible node
 const MAX_LEAPS = 3;
 
+// ---------------------------------------------------------------------------
+// THE BOARD'S GRAMMAR (JC, 2026-08-11)
+// ---------------------------------------------------------------------------
+/**
+ * "If I have to path through an element, I shouldn't be able to skip it since a
+ * different element has a path that stretches right over it and above it."
+ *
+ * That is the whole rule the map is read by, and it had never been written
+ * down: A TRAIL THAT TOUCHES A ROOM IS A TRAIL THAT GOES THROUGH IT. Every
+ * other promise the board makes — that a route is a route, that a leap is a
+ * shortcut PAST something — is parasitic on it, and a single arc drawn over a
+ * room it does not connect to breaks all of them at once.
+ *
+ * Enforcing it means the GENERATOR has to know where its own nodes will be
+ * DRAWN, which it previously did not: the layout lived in MapScene (and a
+ * second copy of it in ui/mapPeek). A leap was created purely from row/column
+ * adjacency and only later discovered, on screen, to be arcing through the
+ * middle of the floor it skipped. Measured over 8,000 shipped boards: 60.0% of
+ * leap arcs came within 90px of a room they did not connect to, 81.6% of boards
+ * had at least one, and the worst passed through a node's exact centre.
+ *
+ * So the layout moved DOWN here, the generator computes it, and clearance is
+ * now a generation invariant rather than a drawing accident. MapScene and
+ * mapPeek both read `mapLayout` and both draw leaps on the arc `leapBulge`
+ * picked, so the board that is checked is the board that is painted.
+ */
+
+/** Vertical pitch between floors, in board units. */
+export const ROW_GAP = 150;
+/** The horizontal band the rooms occupy (clear of the painted frame). */
+export const NODE_BAND = 1500;
+/** ...and the widest a sparse floor is allowed to spread. */
+export const MAX_COL_GAP = 430;
+/** How far a room may wander off its lattice point, so no floor reads as a row of pegs. */
+export const JITTER_X = 46;
+export const JITTER_Y = 30;
+
+/**
+ * NO TRAIL COMES WITHIN THIS OF A ROOM IT DOES NOT CONNECT TO.
+ *
+ * 90 board units, and it is sized off the biggest thing that stands on a node:
+ * a FORGED elite draws at r=68 with its icon scaled to 2.2r, so its painted
+ * half-extent is ~75px. 90 clears that, plus the ±3px hand-drawn wobble
+ * MapScene gives each dot, with a few pixels to spare — which is the difference
+ * between "the trail passes near that room" and "the trail is touching it".
+ */
+export const NODE_CLEAR_RADIUS = 90;
+/**
+ * ...and no two rooms are drawn closer than this, centre to centre. The shipped
+ * board bottomed out at 91.2 (two floors 150 apart, both nodes jittered the full
+ * 30 toward each other); the jitter is now tidied until this holds.
+ */
+export const NODE_MIN_SPACING = 94;
+
+/**
+ * THE ARCS A LEAP IS ALLOWED TO TAKE, smallest first.
+ *
+ * A quadratic Bezier's apex sits HALF the control offset off the chord, so the
+ * shipped ±74 bulge bowed a leap by 37px — against a 150px floor pitch, that is
+ * a straight line with a kink in it, and it is why leaps read as passing
+ * THROUGH the floor they skip. The smallest rung here is 150 (a 75px bow), so
+ * every leap visibly leaves the chord; the ladder climbs to 300 (150px) for the
+ * arcs that have to get around a busy floor.
+ */
+export const LEAP_BULGES = [150, 195, 245, 300];
+/**
+ * Clearance at which a leap stops shopping for a wider arc. Above this the arc
+ * is unmistakably clear of the floor it skips, so taking a bigger swing buys
+ * nothing but a wilder line.
+ */
+export const LEAP_CLEAR_GOOD = 140;
+
+/** How many times the generator may re-roll a crowded board's jitter. */
+const JITTER_PASSES = 14;
+
+/**
+ * WHERE EVERY ROOM ON THIS BOARD IS DRAWN, in board space (x centred on 0, y
+ * growing downward with row 0 at the bottom). MapScene adds GAME_W/2; mapPeek
+ * scales the whole thing into a frame. Pure arithmetic over the map, so the
+ * generator, both boards and the tests all read one answer.
+ */
+export function mapLayout(map) {
+  return layoutOf(map.nodes, map.rows ?? MAP_ROWS, map.bossId ?? 'boss');
+}
+
+function layoutOf(nodes, rows, bossId) {
+  const contentH = 300 + rows * ROW_GAP + 300;
+  const pos = {};
+  const all = Object.values(nodes);
+  for (let row = 0; row < rows; row++) {
+    const rowNodes = all.filter(n => n.row === row && n.id !== bossId).sort((a, b) => a.col - b.col);
+    const n = rowNodes.length;
+    const gap = Math.min(MAX_COL_GAP, NODE_BAND / Math.max(n, 2));
+    rowNodes.forEach((node, i) => {
+      pos[node.id] = {
+        x: (i - (n - 1) / 2) * gap + (node.jx ?? 0),
+        y: contentH - 280 - row * ROW_GAP + (node.jy ?? 0),
+      };
+    });
+  }
+  if (nodes[bossId]) pos[bossId] = { x: 0, y: contentH - 280 - rows * ROW_GAP - 78 };
+  return { pos, contentH };
+}
+
+/**
+ * The polyline a trail is actually drawn along: a straight chord when `bulge` is
+ * 0, and otherwise the quadratic Bezier whose control point is pushed `bulge`
+ * sideways off the chord's midpoint — exactly the curve both boards paint their
+ * dots on. Endpoints included, so the caller can measure the whole thing.
+ */
+export function edgePoints(a, b, bulge = 0, steps = 28) {
+  if (!bulge) return [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+  const out = [];
+  for (let s = 0; s <= steps; s++) out.push(edgeAt(a, b, bulge, s / steps));
+  return out;
+}
+
+/** One point on that same curve — what the boards walk to lay their dots down. */
+export function edgeAt(a, b, bulge, t) {
+  const mx = (a.x + b.x) / 2 + bulge, my = (a.y + b.y) / 2;
+  const omt = 1 - t;
+  return {
+    x: omt * omt * a.x + 2 * omt * t * mx + t * t * b.x,
+    y: omt * omt * a.y + 2 * omt * t * my + t * t * b.y,
+  };
+}
+
+/** How long that polyline is — what the dot spacing is divided into. */
+export function edgeLength(points) {
+  let len = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    len += Math.hypot(points[i + 1].x - points[i].x, points[i + 1].y - points[i].y);
+  }
+  return len;
+}
+
+function distToSegment(p, a, b) {
+  const vx = b.x - a.x, vy = b.y - a.y;
+  const L = vx * vx + vy * vy;
+  let t = L ? ((p.x - a.x) * vx + (p.y - a.y) * vy) / L : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return Math.hypot(p.x - (a.x + t * vx), p.y - (a.y + t * vy));
+}
+
+/** The closest any point on `points` comes to any node in `pos` bar the two it joins. */
+export function pathClearance(points, pos, skip) {
+  let worst = Infinity, node = null;
+  for (const key of Object.keys(pos)) {
+    if (skip.includes(key)) continue;
+    const p = pos[key];
+    let d = Infinity;
+    for (let i = 0; i < points.length - 1; i++) {
+      const seg = distToSegment(p, points[i], points[i + 1]);
+      if (seg < d) d = seg;
+    }
+    if (d < worst) { worst = d; node = key; }
+  }
+  return { clearance: worst, node };
+}
+
+/**
+ * The trail from `aId` to `bId` on the given arc, and the nearest FOREIGN room
+ * it passes. `clearance` below NODE_CLEAR_RADIUS is a trail that is touching a
+ * room it does not connect to — which is the one thing the board may never do.
+ */
+export function edgeClearance(pos, aId, bId, bulge = 0) {
+  const points = edgePoints(pos[aId], pos[bId], bulge);
+  return { ...pathClearance(points, pos, [aId, bId]), points, bulge };
+}
+
+/**
+ * THE ARC A LEAP TAKES: the smallest bow that gets visibly clear of everything
+ * it flies over. Walks the ladder from the tightest arc up, tries BOTH sides of
+ * the chord at each rung and keeps the roomier one, and stops the moment a rung
+ * reads unmistakably clear (LEAP_CLEAR_GOOD).
+ *
+ * Returns the best it found either way — the caller decides whether that is good
+ * enough. The GENERATOR refuses to create a leap whose best arc still fails
+ * NODE_CLEAR_RADIUS; the two boards call this same function at DRAW time, so a
+ * board built by an older build (whose leaps were never vetted) is still painted
+ * on the roomiest arc available rather than straight through a room.
+ *
+ * Deterministic: no rng, ties resolved toward the left-hand arc, so the picture
+ * cannot change between a scene restart and a save/resume.
+ */
+export function leapBulge(pos, aId, bId) {
+  let best = null;
+  for (const mag of LEAP_BULGES) {
+    let rung = null;
+    for (const sign of [-1, 1]) {
+      const r = edgeClearance(pos, aId, bId, mag * sign);
+      if (!rung || r.clearance > rung.clearance) rung = r;
+    }
+    if (!best || rung.clearance > best.clearance) best = rung;
+    if (rung.clearance >= LEAP_CLEAR_GOOD) return rung;
+  }
+  return best;
+}
+
+/** Do two drawn segments cross, other than by sharing an end? */
+function segmentsCross(p1, p2, p3, p4) {
+  const d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+  if (Math.abs(d) < 1e-9) return false;
+  const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
+  const u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+  return t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6;
+}
+
+/**
+ * THE BOARD, MEASURED — one answer for the tests, the statistical sweep and the
+ * live `__hf.mapGeometry()` hook alike, so a driver and a unit test can never
+ * disagree about what "this trail is touching that room" means.
+ *
+ * `pos` defaults to the pure board layout; MapScene passes its own screen-space
+ * copy (the same points, translated by GAME_W/2 — every number below is
+ * translation-invariant).
+ *
+ *   violations  every trail that comes within NODE_CLEAR_RADIUS of a room it
+ *               does not connect to. ASSERT [].
+ *   crossings   every pair of NORMAL trails whose drawn lines intersect.
+ *               ASSERT []. Leaps are exempt by definition: an arc that skips a
+ *               floor has to get past that floor's trails, and it does it in
+ *               plain sight, wide of every room on the way.
+ */
+export function mapPathAudit(map, pos = null) {
+  const p = pos ?? mapLayout(map).pos;
+  const nodes = Object.values(map.nodes);
+  const edges = [];
+  for (const n of nodes) {
+    for (const to of n.next) {
+      if (!p[to]) continue;
+      const leap = !!n.leaps?.includes(to);
+      const arc = leap ? leapBulge(p, n.id, to) : edgeClearance(p, n.id, to, 0);
+      edges.push({
+        from: n.id, to, leap, bulge: arc.bulge,
+        points: arc.points, clearance: arc.clearance, worstNode: arc.node,
+      });
+    }
+  }
+  const violations = edges.filter(e => e.clearance < NODE_CLEAR_RADIUS)
+    .map(e => ({ from: e.from, to: e.to, leap: e.leap, clearance: e.clearance, worstNode: e.worstNode }));
+
+  const straight = edges.filter(e => !e.leap);
+  const crossings = [];
+  for (let i = 0; i < straight.length; i++) {
+    for (let j = i + 1; j < straight.length; j++) {
+      const A = straight[i], B = straight[j];
+      if (A.from === B.from || A.to === B.to || A.from === B.to || A.to === B.from) continue;
+      if (segmentsCross(p[A.from], p[A.to], p[B.from], p[B.to])) {
+        crossings.push({ a: [A.from, A.to], b: [B.from, B.to] });
+      }
+    }
+  }
+
+  let minNodeSpacing = Infinity;
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = p[nodes[i].id], b = p[nodes[j].id];
+      if (!a || !b) continue;
+      minNodeSpacing = Math.min(minNodeSpacing, Math.hypot(a.x - b.x, a.y - b.y));
+    }
+  }
+  return {
+    clearRadius: NODE_CLEAR_RADIUS, minSpacing: NODE_MIN_SPACING,
+    nodes: nodes.map(n => ({
+      id: n.id, row: n.row, col: n.col, type: n.type,
+      forged: !!n.forged, mythic: !!n.mythic, x: p[n.id]?.x ?? null, y: p[n.id]?.y ?? null,
+    })),
+    edges, violations, crossings, minNodeSpacing,
+    minClearance: edges.reduce((m, e) => Math.min(m, e.clearance), Infinity),
+    leaps: edges.filter(e => e.leap).length,
+  };
+}
+
+/**
+ * TIDY THE JITTER UNTIL THE BOARD READS (JC, 2026-08-11).
+ *
+ * Every room wanders off its lattice point so no floor looks like a row of pegs,
+ * and it is that wander — not the topology — that pushes two rooms to 91px apart
+ * or slides a room under a straight trail it has nothing to do with (1.28% of
+ * shipped trails, on 26.6% of shipped boards).
+ *
+ * So the FIRST move is on the jitter and not on the board: re-roll the
+ * offenders and look again. Topology, room types, shop guarantees and every
+ * pacing number are untouched by construction, which is why this is not a
+ * regenerate — a rejection sampler on the BOARD would quietly bias the mix the
+ * pacing pass spent a week tuning.
+ *
+ * SOME BOARDS CANNOT BE TIDIED, and the reason is worth writing down because it
+ * is the OTHER half of what JC saw. Every floor is spread from ITS OWN centre by
+ * row-local INDEX, not by column — that is the deliberate "no strict columns"
+ * look — so a walk that drifts one column can land two INDEX slots over when the
+ * two floors hold different rooms, and the trail then stretches clean across the
+ * floor past a room it does not connect to. That is a topology problem wearing a
+ * layout costume, and no amount of jitter fixes ~0.4% of them. Those boards are
+ * refused (this returns null) and generateMap rolls another, exactly the way it
+ * already does for the merchant contract.
+ */
+function tidyJitter(nodes, rows, bossId, rng) {
+  const list = Object.values(nodes);
+  for (let pass = 0; pass < JITTER_PASSES; pass++) {
+    const { pos } = layoutOf(nodes, rows, bossId);
+    const bad = new Set();
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = pos[list[i].id], b = pos[list[j].id];
+        if (Math.hypot(a.x - b.x, a.y - b.y) < NODE_MIN_SPACING) { bad.add(list[i].id); bad.add(list[j].id); }
+      }
+    }
+    for (const n of list) {
+      for (const nx of n.next) {
+        const r = edgeClearance(pos, n.id, nx, 0);
+        if (r.clearance < NODE_CLEAR_RADIUS) { bad.add(n.id); bad.add(nx); if (r.node) bad.add(r.node); }
+      }
+    }
+    bad.delete(bossId);          // pinned dead centre; it has no jitter to re-roll
+    if (!bad.size) return pos;
+    // FULL amplitude every pass. An early cut of this shrank the re-roll toward
+    // the bare lattice as the passes ran out, on the theory that a flat board is
+    // provably clear — and it is exactly backwards: the lattice is where the
+    // index-skip above is at its WORST (73.9px), so shrinking walked the
+    // stubborn boards INTO the failure it was trying to escape.
+    for (const key of bad) {
+      nodes[key].jx = (rng() * 2 - 1) * JITTER_X;
+      nodes[key].jy = (rng() * 2 - 1) * JITTER_Y;
+    }
+  }
+  return null;   // this board cannot be tidied — roll another
+}
+
 /**
  * Chance the act spawns a red MYTHIC event node, per act index.
  *
@@ -284,7 +614,36 @@ export function generateMap(actIndex = 0, rng = Math.random, attempt = 0) {
     }
   }
 
+  // ---- THE BOARD IS TIDIED BEFORE ANYTHING IS ROUTED OVER IT ----------------
+  // Rooms stop being too close together and straight trails stop grazing rooms
+  // they do not connect to. Positions are final after this line, which is what
+  // lets the leap block below vet its own arcs. See tidyJitter.
+  // ...and a board whose floors are laid out so that a trail HAS to stretch past
+  // a room it does not connect to is thrown away and rolled again, the same way
+  // a board that misses the merchant contract is. ~0.4% of rolls.
+  let pos = tidyJitter(nodes, MAP_ROWS, bossId, rng);
+  if (!pos) {
+    if (attempt < MAX_MAP_ATTEMPTS) return generateMap(actIndex, rng, attempt + 1);
+    // Out of attempts (never observed): flatten onto the bare lattice, which is
+    // at least a legible board, and let mapPathAudit report what is left.
+    for (const n of all) { n.jx = 0; n.jy = 0; }
+    pos = mapLayout({ nodes, rows: MAP_ROWS, bossId }).pos;
+  }
+
   // ---- LEAP EDGES: skip a floor; shortcuts favor the dangerous & the strange ----
+  //
+  // CLEARANCE IS PART OF WHETHER THE LEAP EXISTS (JC, 2026-08-11), not a note
+  // for the renderer. A leap is only created when there is an arc between its
+  // two ends that stays NODE_CLEAR_RADIUS clear of every room it flies over —
+  // otherwise the board would be drawing a trail that touches a room the leap
+  // does not connect to, and the one rule the map is read by ("a trail that
+  // touches a room goes through it") would be broken by the very edge whose
+  // whole point is that it does NOT go through that room.
+  //
+  // A refused target is simply not leapt to: we walk the rest of the candidates
+  // in the same juiciest-first order, and a donor with no clear arc anywhere
+  // spends nothing out of the ≤3 budget. Elite/event targeting and the budget
+  // are exactly as they were.
   let leaps = 0;
   const leapDonors = all.filter(n => n.row <= MAP_ROWS - 3).sort(() => rng() - 0.5);
   for (const n of leapDonors) {
@@ -299,10 +658,14 @@ export function generateMap(actIndex = 0, rng = Math.random, attempt = 0) {
       const juicy = t => (t.type === 'elite' ? 0 : t.type === 'event' ? 1 : 2);
       return juicy(a) - juicy(b) || rng() - 0.5;
     });
-    const t = targets[0];
-    n.next = [...n.next, t.id].sort();
-    n.leaps.push(t.id);
-    leaps++;
+    for (const t of targets) {
+      const arc = leapBulge(pos, n.id, t.id);
+      if (!arc || arc.clearance < NODE_CLEAR_RADIUS) continue;   // no clear corridor: no leap here
+      n.next = [...n.next, t.id].sort();
+      n.leaps.push(t.id);
+      leaps++;
+      break;
+    }
   }
 
   // ---- The red one ----

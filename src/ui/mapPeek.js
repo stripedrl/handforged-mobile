@@ -32,7 +32,11 @@ import { GAME_W, GAME_H, DEPTH, COLORS, MOBILE, SAFE } from '../config.js';
 import { woodPanel } from './panels.js';
 import { run, actOf } from '../core/run.js';
 import { bossEntry } from '../core/acts.js';
-import { reachable } from '../core/map.js';
+// The layout and the leap arcs are the GENERATOR'S (see core/map.js): this file
+// used to hold its own copy of both, which is two places for a leap to be drawn
+// through a room it does not connect to. It now reads the same vetted answers
+// the real board does, so the planning view and the board it plans agree.
+import { reachable, mapLayout, leapBulge, edgeAt, edgePoints, edgeLength } from '../core/map.js';
 import { sfx } from '../core/sfx.js';
 import { tapBind } from './touch.js';
 
@@ -68,10 +72,6 @@ export const FORGED_STYLE = {
   caption: '#ffb04a',
 };
 
-/** The real board's floor pitch and node band. Kept in step with MapScene. */
-const ROW_GAP = 150;
-const W_USE = 1500;
-
 /** The peek's own frame: the box the whole act is scaled down into. */
 const VIEW = { top: 186, bottom: GAME_H - 118 };
 
@@ -79,24 +79,12 @@ const VIEW = { top: 186, bottom: GAME_H - 118 };
  * The act's chart in ONE screen: node positions in board space, plus the scale
  * that fits them into VIEW. Pure arithmetic over `map`, so a test can assert
  * the shape without a canvas.
+ *
+ * The positions themselves are `mapLayout`'s — the generator's own — and the
+ * only thing left here is the fitting.
  */
 export function peekLayout(map) {
-  const contentH = 300 + map.rows * ROW_GAP + 300;
-  const pos = {};
-  for (let row = 0; row < map.rows; row++) {
-    const rowNodes = Object.values(map.nodes)
-      .filter(n => n.row === row && n.id !== map.bossId)
-      .sort((a, b) => a.col - b.col);
-    const n = rowNodes.length;
-    const gap = Math.min(430, W_USE / Math.max(n, 2));
-    rowNodes.forEach((node, i) => {
-      pos[node.id] = {
-        x: (i - (n - 1) / 2) * gap + node.jx,
-        y: contentH - 280 - row * ROW_GAP + node.jy,
-      };
-    });
-  }
-  pos[map.bossId] = { x: 0, y: contentH - 280 - map.rows * ROW_GAP - 78 };
+  const { pos, contentH } = mapLayout(map);
 
   const ys = Object.values(pos).map(p => p.y);
   const xs = Object.values(pos).map(p => p.x);
@@ -172,18 +160,28 @@ export function mapPeekOverlay(scene, { depth = null } = {}) {
       const taken = takenEdges.has(`${node.id}>${nextId}`);
       const live = map.currentId === node.id;
       const isLeap = node.leaps?.includes(nextId);
-      const bulge = isLeap ? (a.x <= 0 ? -74 : 74) : 0;
-      const mx = (a.x + b.x) / 2 + bulge, my = (a.y + b.y) / 2;
-      const dist = Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y);
-      const steps = Math.max(2, Math.floor(dist / (isLeap ? 32 : 26)));
+      // The generator's vetted arc, not a side picked off which half of the
+      // board the trail starts in — see core/map.js leapBulge, and MapScene's
+      // drawPaths for why the old ±74 drew a leap through the floor it skips.
+      const bulge = isLeap ? (leapBulge(pos, node.id, nextId)?.bulge ?? 0) : 0;
+      const arcLen = edgeLength(edgePoints(a, b, bulge, 24));
+      const steps = Math.max(3, Math.round(arcLen / (isLeap ? 30 : 26)));
       for (let s = 1; s < steps; s++) {
-        const t = s / steps, omt = 1 - t;
-        const qx = omt * omt * a.x + 2 * omt * t * mx + t * t * b.x;
-        const qy = omt * omt * a.y + 2 * omt * t * my + t * t * b.y;
-        board.add(scene.add.image(qx, qy, 'map_dot')
-          .setTint(isLeap ? 0xc09040 : taken ? 0xb8862c : live ? 0x8a6a3c : 0x9a835e)
-          .setAlpha(taken ? 0.95 : live ? 0.9 : isLeap ? 0.7 : 0.55)
-          .setScale((taken || live ? 1.1 : 0.85) * 1.6));   // 1.6: the chart is shrunk, the ink is not
+        const t = s / steps;
+        if (isLeap && Math.abs(t - 0.5) * arcLen < 30) continue;   // gap for the chevron
+        const q = edgeAt(a, b, bulge, t);
+        board.add(scene.add.image(q.x, q.y, 'map_dot')
+          .setTint(isLeap ? 0xffc94a : taken ? 0xb8862c : live ? 0x8a6a3c : 0x9a835e)
+          .setAlpha(isLeap ? 0.92 : taken ? 0.95 : live ? 0.9 : 0.55)
+          .setScale((isLeap ? 1.15 : taken || live ? 1.1 : 0.85) * 1.6));   // 1.6: the chart is shrunk, the ink is not
+      }
+      // ...and the chevron the real board pins to a leap's apex, so the planning
+      // view answers "that one skips a floor" with the same mark.
+      if (isLeap) {
+        const apex = edgeAt(a, b, bulge, 0.5);
+        board.add(scene.add.image(apex.x, apex.y, 'map_leap')
+          .setRotation(Math.atan2(b.y - a.y, b.x - a.x) + Math.PI / 2)
+          .setAlpha(0.95).setScale(1.6));
       }
     }
   }
@@ -339,8 +337,13 @@ function closeChrome(scene, ov, dim) {
  * by both builds, which meant a 19px label on a 50px plate was the phone's
  * smallest labelled button (JC's 2026-08-10 readability pass). Touch gets a
  * thumb-sized one; desktop's numbers are the ones it has always had.
+ *
+ * EXPORTED (2026-08-11) because ui/rewards.js was carrying a hand-copied `mapW`
+ * beside its own INFO_PLATE sizes, with a comment promising to keep the two in
+ * step. A mirror that has to be remembered is a mirror that goes stale; the row
+ * that plants this plate now reads the plate's own width.
  */
-const MAP_PLATE = {
+export const MAP_PLATE = {
   w: MOBILE ? 172 : 140,
   h: MOBILE ? 62 : 50,
   font: MOBILE ? 24 : 19,

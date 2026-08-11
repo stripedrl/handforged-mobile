@@ -52,7 +52,7 @@ import { ensure, missingKeys, packCovers, packCards } from '../core/lazyload.js'
 import { gateOn } from './loadingVeil.js';
 // THE ROAD AHEAD, read-only, from any overlay. mapPeek imports config + core
 // only, so this edge never closes a cycle back through MapScene.
-import { viewMapButton, hasMapToPeek } from './mapPeek.js';
+import { viewMapButton, hasMapToPeek, MAP_PLATE } from './mapPeek.js';
 
 const OV_DEPTH = DEPTH.overlay + 5;
 
@@ -408,16 +408,15 @@ export function typeRibbon(scene, x, y, kind, accent = 0x8a6a3c) {
  * 200px plate centred on 150 has its left edge at 50 — inside config.SAFE.x,
  * which is the frame everything interactive was pulled behind on 2026-08-10.
  *
- * `mapW` MIRRORS ui/mapPeek.js MAP_PLATE.w and must move with it. It is a
- * mirror rather than an import only because that file is another workstream's
- * this week; the layout is deliberately built so a stale mirror cannot break
- * anything — MAP is planted LAST, so the only thing a wrong width changes is
- * the size of the gap to its left.
+ * THERE IS NO `mapW` HERE ANY MORE (2026-08-11). It was a hand-copy of
+ * mapPeek's MAP_PLATE.w carrying a comment that said it "must move with it",
+ * which is a maintenance promise rather than a mechanism. MAP_PLATE is exported
+ * now and the row below measures the real plate, so the last number in this
+ * table that could go quietly stale is gone.
  */
 const INFO_PLATE = {
   deckW: TOUCH ? 200 : 170,
   handsW: TOUCH ? 156 : 132,
-  mapW: TOUCH ? 172 : 140,
   h: TOUCH ? 62 : 50,
   font: TOUCH ? 24 : 19,
   gap: TOUCH ? 16 : 12,
@@ -484,8 +483,8 @@ export function viewDeckButton(scene, ov, run, x = INFO_PLATE.x0, y = GAME_H - 6
     plate(P.handsW, 'HANDS',
       () => handChartOverlay(scene, run, { depth: (ov.depth ?? OV_DEPTH) + 6 }));
   }
-  // LAST, so a stale `mapW` mirror can only widen its own gap.
-  if (hasMapToPeek()) viewMapButton(scene, ov, left + P.mapW / 2, y);
+  // LAST, and off the plate's OWN width rather than a copy of it.
+  if (hasMapToPeek()) viewMapButton(scene, ov, left + MAP_PLATE.w / 2, y);
   return deck;
 }
 

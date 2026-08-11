@@ -546,6 +546,25 @@ export class BootScene extends Phaser.Scene {
     g.generateTexture('map_dot', 12, 14);
     g.clear();
 
+    // THE LEAP CHEVRON (JC, 2026-08-11), pinned to the apex of a leap arc so a
+    // shortcut is legible as a shortcut without tracing its dots. A double
+    // chevron, drawn pointing UP — MapScene rotates it onto the arc's own
+    // direction — in the same dark-outline-over-gold idiom as target_arrow, so
+    // it survives all six painted boards including the two dark ones.
+    // A STROKED caret, not a filled triangle: Graphics fills are additive, so
+    // "big triangle then small triangle" paints a solid arrowhead rather than
+    // cutting a V out of it. Two passes of the same path, dark then gold.
+    const caret = (dy, w, colour, alpha) => {
+      g.lineStyle(w, colour, alpha);
+      g.beginPath();
+      g.moveTo(4, 20 + dy); g.lineTo(18, 5 + dy); g.lineTo(32, 20 + dy);
+      g.strokePath();
+    };
+    for (const dy of [0, 14]) caret(dy, 10, 0x2a1a06, 0.9);
+    for (const dy of [0, 14]) caret(dy, 5, 0xffd25a, 1);
+    g.generateTexture('map_leap', 36, 40);
+    g.clear();
+
     // (the rest-site campfire is painted art now — see preload's icon_campfire)
 
     // Padlock for locked content.

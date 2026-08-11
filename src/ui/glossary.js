@@ -40,7 +40,7 @@ import { ARTIFACT_RARITY, RARITY_ORDER, BASE_ARTIFACT_SLOTS } from '../core/arti
 import { MAX_POTIONS, POTION_SELL_FRACTION } from '../core/potions.js';
 import { CHIPS_PER_HAND_LEFT, SELL_FRACTION } from '../core/run.js';
 import { ROOTED_STRENGTH } from '../core/statuses.js';
-import { MAX_HAND_CARDS } from '../core/biomes.js';
+import { MAX_HAND_CARDS, BLIND_CHANCE } from '../core/biomes.js';
 
 const GOLD = '#ffd23e';
 const GOLD_TINT = 0xffd23e;
@@ -116,7 +116,7 @@ export function indexGroups() {
         ['COURT ADJOURNED', 'J, Q and K cannot be PLAYED. You may still discard them.'],
         ['SPIKES N', 'Every hand you play costs HP equal to your Spikes. Spikes never fade on their own.'],
         ['HYPNOTIZED', 'A card is marked and must be played with your next hand. Discarding it only marks another.'],
-        ['BLIND', 'Cards arrive face down. They are still playable.'],
+        ['BLIND', `About ${Math.round(BLIND_CHANCE * 100)}% of the cards you DRAW arrive face down. They are still playable.`],
         ['BURNED', 'A burned card cannot be played again this fight, even after the discard pile reshuffles.'],
         ['CONDEMNED', 'A branded card must be PLAYED before its clock runs out or it leaves your deck for good. Discarding does not save it.'],
       ],

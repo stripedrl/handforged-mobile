@@ -23,7 +23,7 @@ import { woodPanel } from '../ui/panels.js';
 import {
   shuffle, cardValue, scrambleSuits, restoreSuits, pickSliceVictims, rankLabel,
 } from '../core/deck.js';
-import { evaluateHand, bestHandOf, HAND_DEFS } from '../core/poker.js';
+import { evaluateHand, bestHandOf, evalOptsFrom, HAND_DEFS } from '../core/poker.js';
 import {
   scoreHand, rollRouletteFor, MOD_MULT_FACTOR,
   ZEAL_CAP, ZEAL_DAMAGE_PCT, zealCapFor, SHIELD_MULT_PCT,
@@ -58,12 +58,12 @@ import {
 // the theatre and the wiring, exactly as it does for the debuff wave above.
 import {
   BIOME_EFFECTS, BIOME_EFFECT_TYPES, BLIND_TURNS, CONDEMN_TURNS,
-  CARD_TAX_PER_CARD, MIRROR_HAND_PCT, DEMAND_HAND_DAMAGE, SHRINK_HAND_STEP,
+  CARD_TAX_PER_CARD, DEMAND_HAND_DAMAGE, SHRINK_HAND_STEP, BLIND_CHANCE,
   freshBiomeLedgers, isBurned, burnCards, purgeBurned,
   recordHandType, handTypeSpent, mistrialDue, declareMistrial, remainingHandTypes,
   nextHungRelic, hangArtifacts,
   damageGate, forgetSuitFactor, pickForgottenSuit,
-  cardTaxFor, demandVerdict, mirrorDamage, healMirrorAmount,
+  cardTaxFor, demandVerdict, mirrorHandDamage, healMirrorAmount,
   condemnTick, dischargeBrands, brandTurns,
   pickBlindTargets, pickFadeTargets, fadedSet,
 } from '../core/biomes.js';
@@ -1101,11 +1101,28 @@ export class CombatScene extends Phaser.Scene {
    * committed play, the dev hook — has to hand them the same options bag or the
    * hand you are shown and the hand you play can be two different hands. One
    * method, read four times.
+   *
+   * THE PREVIEW BUG (JC, 2026-08-10, fixed in alpha 0.30c). It WAS two different
+   * hands. This method hand-rolled its bag and copied exactly ONE of the three
+   * classification channels across — ofAKindMinus1 — while scoreHand read all
+   * three off state.mods. So a BROKEN COMPASS player selecting four suited cards
+   * was told "High Card" by the live equation and then watched a FLUSH score.
+   * The cure is that neither side rolls its own bag any more: both call
+   * evalOptsFrom (poker.js) on a mods bag, so a fourth relic on this channel is
+   * one line in one file and cannot desynchronise the preview again.
+   *
+   * ...AND IT READS THE SAME BELT scoring will read: through withHungRelics, so
+   * a relic THE ROPEMAKER'S NOOSE has hung is silent in the preview exactly as
+   * it will be silent in the score.
    */
   handEvalOpts() {
-    return {
-      ofAKindMinus1: !!(this._forceOfAKindMinus1 || collectMods().ofAKindMinus1),
-    };
+    const mods = this.withHungRelics(() => collectMods());
+    return evalOptsFrom({
+      ...mods,
+      // The driver/dev forcing switch for THE UNDERSTUDY's rule, on the same
+      // channel the relic itself writes (see buildScoreState).
+      ofAKindMinus1: this._forceOfAKindMinus1 || mods.ofAKindMinus1,
+    });
   }
 
   buildScoreState(cards = null) {
@@ -1312,7 +1329,9 @@ export class CombatScene extends Phaser.Scene {
     if (this._forceOfAKindMinus1) mods.ofAKindMinus1 = (mods.ofAKindMinus1 ?? 0) + 1;
 
     if (this.potionIceValue > 0 && cards?.length) {
-      const iced = bestHandOf(cards, { ofAKindMinus1: !!mods.ofAKindMinus1 }).type;
+      // ...classified through the ONE derivation, like the preview and the
+      // score. A hand-rolled bag here is the exact bug 0.30c fixed above.
+      const iced = bestHandOf(cards, evalOptsFrom(mods)).type;
       mods.handValue[iced] = (mods.handValue[iced] ?? 0) + this.potionIceValue;
     }
 
@@ -1741,6 +1760,10 @@ export class CombatScene extends Phaser.Scene {
         mistrials: this._mistrials ?? 0,
         burnLog: this._burnLog ?? 0, condemnLog: this._condemnLog ?? 0, dropLog: this._dropLog ?? 0,
         lastHandDamage: this._lastHandDamage ?? 0,
+        // AS YOU DID reads the TYPE now, and this is the exact blow it would
+        // land if the mirror's intent came up on this tick.
+        lastHandType: this._lastHandType ?? null,
+        mirrorAnswer: this.mirrorAnswerNow(),
         handSize: this.effectiveHandSize, handCount: this.handCards?.length ?? 0,
         deck: this.deck.length, discard: this.discardPile.length,
         hp: this.player.hp, shield: this.player.shield,
@@ -2273,6 +2296,14 @@ export class CombatScene extends Phaser.Scene {
       /** ...and the FADE's own coin, which is a separate mechanic since 0804. */
       forceFade: (v) => { this._fadeForce = v ?? null; return this._fadeForce; },
       /**
+       * ...and the MOONLIGHT's coin, which became a coin on 2026-08-10 (blind
+       * takes BLIND_CHANCE of what you draw now, not all of it). true = every
+       * drawn card goes dark, false = none, null = fair.
+       */
+      forceBlind: (v) => { this._blindForce = v ?? null; return this._blindForce; },
+      /** What AS YOU DID would answer with right now, and off which hand. */
+      mirrorAnswer: () => this.mirrorAnswerNow(),
+      /**
        * Grant a relic MID-COMBAT, the way the elite shelf's ceremony does —
        * acquire, then tell the scene the belt moved. This is the exact path
        * the 2026-08-01 panel bug lived on, so the verification run drives it.
@@ -2529,6 +2560,18 @@ export class CombatScene extends Phaser.Scene {
           // THE THREE LAYERS per scoring card, so a driver can prove an ECHO
           // card resolved onto the STAMP layer whichever spelling it carried.
           layers: r.breakdown.map(b => ({ id: b.id, mod: b.layerMod, stamp: b.stamp, wrap: b.wrap })),
+          // THE KICKER RULE, AS NUMBERS (alpha 0.30c). Which of the cards you
+          // played actually FORMED the hand, and what each one contributed. A
+          // four-card flush played with a fifth stranger has to prove the
+          // stranger reached the score with nothing, so a driver reads this
+          // rather than trying to photograph a grey card.
+          cards: r.breakdown.map(b => ({
+            id: b.id, suit: b.suit, rank: b.rank,
+            scoring: !!b.scoring, value: b.value ?? 0,
+            rawDamage: b.rawDamage ?? 0, damage: b.damage ?? 0, times: b.times ?? 1,
+          })),
+          scoringIds: r.breakdown.filter(b => b.scoring).map(b => b.id),
+          kickerIds: r.breakdown.filter(b => !b.scoring).map(b => b.id),
           // --- THE REPEAT (2026-08-04) --------------------------------------
           // How many times each card actually fired, and what the wheel landed
           // on each of those times. This is the only way a driver can prove
@@ -2553,6 +2596,23 @@ export class CombatScene extends Phaser.Scene {
           multOrder: r.multOrder ?? [],
           residualAdd: r.residualAdd ?? 0, residualFactor: r.residualFactor ?? 1,
         };
+      },
+      /**
+       * THE ROW OF PLAYED CARDS AND WHAT THE KICKER RULE DID TO IT (alpha
+       * 0.30c). One entry per card the last hand committed, in the order it
+       * landed. `grayed` is read off the GREY LEDGER — the record the cascade
+       * writes the instant the fade finishes — and NOT off the live sprite,
+       * because the row is swept into the discard the moment the hand ends and
+       * a driver reading the sprite afterwards is reading the sweep.
+       */
+      playedRow: () => {
+        const gray = new Map((this._grayLedger ?? []).map(g => [g.id, g]));
+        return (this._playedSprites ?? []).map(cs => ({
+          id: cs.card?.id, rank: cs.card?.rank, suit: cs.card?.suit,
+          grayed: gray.has(cs.card?.id),
+          fadedTo: gray.get(cs.card?.id)?.alpha ?? null,
+          tint: gray.get(cs.card?.id)?.tint ?? null,
+        }));
       },
       // --- ARTIFACT ORDER (2026-08-02) -------------------------------------
       /** The row, left to right, plus the chain scoring would walk right now. */
@@ -6398,6 +6458,19 @@ export class CombatScene extends Phaser.Scene {
     return this.pstat.blind;
   }
 
+  /**
+   * DOES THIS DRAWN CARD GO DARK? One fair coin per card at BLIND_CHANCE.
+   *
+   * `_blindForce` pins it for a driver or a test — true = always, false =
+   * never, null = fair — exactly like the ethereal vanish coin and the fade
+   * coin, because a probabilistic mechanic that cannot be pinned cannot be
+   * verified except by farming it.
+   */
+  blindRoll() {
+    if (this._blindForce != null) return !!this._blindForce;
+    return Math.random() < BLIND_CHANCE;
+  }
+
   /** Cold light sweeps the fan: the DECK goes dark for `turns` turns. */
   moonGlare(turns) {
     const moon = this.add.image(ARENA_CX, CARD.fanY - 210, 'fx_glow_circle')
@@ -6413,8 +6486,9 @@ export class CombatScene extends Phaser.Scene {
     popMessage(this, ARENA_CX, 396, 'BLINDED', { color: '#aebeff', size: 46, rise: 54 });
     popMessage(this, ARENA_CX, 452,
       turns === Infinity
-        ? 'every card you draw arrives FACE DOWN, all fight'
-        : `cards you draw arrive FACE DOWN for ${turns} turn${turns === 1 ? '' : 's'}. Playable, unread`,
+        ? `${Math.round(BLIND_CHANCE * 100)}% of the cards you draw arrive FACE DOWN, all fight`
+        : `${Math.round(BLIND_CHANCE * 100)}% of the cards you draw arrive FACE DOWN for `
+          + `${turns} turn${turns === 1 ? '' : 's'}. Playable, unread`,
       { color: '#d0d8ff', size: 24, rise: 34, delay: 260 });
   }
 
@@ -6903,19 +6977,50 @@ export class CombatScene extends Phaser.Scene {
     return this.handShrink;
   }
 
-  /** AS YOU DID: the Mirrorwalker plays your last hand back at you. */
-  mirrorLastHand(enemy, pct = MIRROR_HAND_PCT) {
-    const dmg = mirrorDamage(this._lastHandDamage ?? 0, pct);
+  /**
+   * AS YOU DID — THE HAND-TIER MIRROR (JC, 2026-08-10).
+   *
+   * IT ANSWERS THE HAND TYPE, NOT THE NUMBER. The old rule threw back 100% of
+   * the DAMAGE your last hand dealt, which on a 100 HP hero and an Act II score
+   * was an instant kill for playing well; the only counter was to never let it
+   * take a turn. It now answers with flat damage set by the hand's own rung on
+   * the ladder — see biomes.mirrorHandDamage, where the whole table is derived
+   * from HAND_DEFS so a new hand type is covered the day it ships.
+   *
+   * THE TRIGGER IS UNCHANGED, and it is worth saying plainly because the copy
+   * says "answers your hand": this is an INTENT on the Mirrorwalker's rotation
+   * (two of its six), and when that intent comes up it answers the last hand
+   * you hit it with. It has always worked that way; only the number moved.
+   * SOVEREIGN'S WRIT still strikes it down like any other elite signature, and
+   * it is ordinary damage, so Shield eats it.
+   *
+   * `bonus` is a flat add for a future act/elite scaling to ride. The intent
+   * carries no value at all now — it is a switch, not a quantity.
+   */
+  mirrorLastHand(enemy, bonus = 0) {
+    const type = this._lastHandType ?? null;
+    const dmg = mirrorHandDamage(type, bonus);
     popMessage(this, ARENA_CX, 396, 'AS YOU DID', { color: '#e8eefc', size: 46, rise: 54 });
     if (dmg <= 0) {
       popMessage(this, ARENA_CX, 452, 'it has nothing of yours to copy. Not yet',
         { color: '#cfd8ee', size: 24, rise: 34, delay: 240 });
       return 0;
     }
-    popMessage(this, ARENA_CX, 452, `your own hand, thrown back: ${fmtNum(dmg)}`,
+    popMessage(this, ARENA_CX, 452,
+      `it answers your ${HAND_DEFS[type]?.name ?? 'hand'}: ${fmtNum(dmg)}`,
       { color: '#cfd8ee', size: 24, rise: 34, delay: 240 });
     this.damagePlayer(dmg, enemy);
     return dmg;
+  }
+
+  /**
+   * WHAT THE MIRROR WOULD ANSWER RIGHT NOW, for the intent tooltip. Null when
+   * nothing has been played yet, which is exactly what the tooltip should say.
+   */
+  mirrorAnswerNow() {
+    const type = this._lastHandType ?? null;
+    if (!type) return null;
+    return { type, name: HAND_DEFS[type]?.name ?? type, damage: mirrorHandDamage(type) };
   }
 
   /** FORGET SUIT: one suit means nothing to it, rerolled and announced each turn. */
@@ -6942,7 +7047,7 @@ export class CombatScene extends Phaser.Scene {
       case 'wall': return this.raiseWall(enemy, eff.handType ?? eff.value ?? null);
       case 'unusedOnly': return this.armUnusedOnly(enemy);
       case 'forgetSuit': return this.rerollForgottenSuit(enemy);
-      case 'mirrorHand': return this.mirrorLastHand(enemy, eff.value ?? MIRROR_HAND_PCT);
+      case 'mirrorHand': return this.mirrorLastHand(enemy, eff.value ?? 0);
       case 'shrinkHand': return this.shrinkHandSize(eff.value ?? SHRINK_HAND_STEP);
       case 'dropHand': return this.armDropHand(enemy);
       case 'healMirror': return this.armHealMirror(enemy);
@@ -9334,7 +9439,8 @@ export class CombatScene extends Phaser.Scene {
     this._blindIds = new Set();   // which cards the moonlight is holding
     this._handCtx = null;         // the biome gates only apply inside a hand
     this._mistrials = 0;          // how many times the docket has been wiped
-    this._lastHandDamage = 0;     // what the Mirrorwalker has to throw back
+    this._lastHandDamage = 0;     // (legacy reading, still reported by the hooks)
+    this._lastHandType = null;    // what the Mirrorwalker actually answers now
     this._burnLog = 0; this._condemnLog = 0; this._dropLog = 0;
     this.bannedSuit = null;
     this.hypnoActive = false;
@@ -9869,10 +9975,14 @@ export class CombatScene extends Phaser.Scene {
     if (isBurned(this.burnedCards, cs.card)) cs.setBurnedLook();
     this.resyncFade(cs);
     // THE MOONLIGHT FALLS ON THE DECK (JC, 2026-08-04): while the blind clock
-    // holds, every card DRAWN joins the darkness — the hand you had already
-    // read stays face up. This is the one funnel every fresh sprite passes
-    // through, so the bell deal and a mid-fight draw go dark by one clause.
-    if ((this.pstat?.blind ?? 0) > 0) this._blindIds.add(cs.card.id);
+    // holds, cards DRAWN join the darkness — the hand you had already read
+    // stays face up. This is the one funnel every fresh sprite passes through,
+    // so the bell deal and a mid-fight draw go dark by one clause.
+    //
+    // ...AND IT TAKES HALF OF THEM, NOT ALL (JC, 2026-08-10: "too strong"). One
+    // coin per card at BLIND_CHANCE. The clocks did not move — a Blind 2 is
+    // still two turns — only the rate did, which turns a blindfold into a fog.
+    if ((this.pstat?.blind ?? 0) > 0 && this.blindRoll()) this._blindIds.add(cs.card.id);
     this.resyncBlind(cs);
     return cs;
   }
@@ -11102,6 +11212,11 @@ export class CombatScene extends Phaser.Scene {
     }
 
     const n = played.length;
+    // Kept for __hfCombat.playedRow(): the kicker rule is VISIBLE (a grey,
+    // shrunken, tinted card) and a driver has to be able to read the sprite
+    // rather than take the breakdown's word for it.
+    this._playedSprites = played;
+    this._grayLedger = [];
     const startX = ARENA_CX - ((n - 1) / 2) * (CARD.w + 18);
     played.forEach((cs, i) => {
       this.handCards = this.handCards.filter(c => c !== cs);
@@ -11172,7 +11287,20 @@ export class CombatScene extends Phaser.Scene {
 
       this.time.delayedCall(popAt, () => {
         if (!b.scoring) {
-          this.tweens.add({ targets: cs, alpha: 0.35, scale: 0.92, duration: 160 });
+          this.tweens.add({
+            targets: cs, alpha: 0.35, scale: 0.92, duration: 160,
+            // THE KICKER RULE, WITNESSED (alpha 0.30c). The cards are swept off
+            // the row the moment the hand finishes, so a driver that reads the
+            // sprite afterwards reads the discard sweep instead. The ledger
+            // records what the GREY BEAT actually did, at the instant it
+            // finished doing it — see __hfCombat.playedRow().
+            onComplete: () => (this._grayLedger ??= []).push({
+              id: cs.card.id, rank: cs.card.rank, suit: cs.card.suit,
+              alpha: Math.round(cs.alpha * 100) / 100,
+              scale: Math.round(cs.scale * 100) / 100,
+              tint: cs.list?.find(ch => ch.tintTopLeft != null)?.tintTopLeft ?? null,
+            }),
+          });
           cs.each?.(child => child.setTint?.(0x999999));
           return;
         }
@@ -11316,8 +11444,11 @@ export class CombatScene extends Phaser.Scene {
     for (const e of this.enemies ?? []) e._gateSaid = false;
     // A CONDEMNED card that is PLAYED is saved. Discarding never was.
     this.condemnBrands = dischargeBrands(this.condemnBrands, playedIds);
-    // ...and what the Mirrorwalker gets to throw back at you next turn.
+    // ...and what the Mirrorwalker gets to answer next turn. The HAND TYPE is
+    // the mirror's whole input since 2026-08-10 (see mirrorLastHand); the
+    // damage is kept because the recap and the verification hooks read it.
     this._lastHandDamage = Math.max(this._lastHandDamage ?? 0, res.damage ?? 0);
+    this._lastHandType = res.handType ?? this._lastHandType;
     let shieldThisHand = 0;   // RECAP: every point of shield this one hand made
     if (res.shield) {
       // SHATTERGUARD: addShield returns 0 and plays its own shatter beat, so the
@@ -13944,9 +14075,22 @@ export class CombatScene extends Phaser.Scene {
     // THE SIGNATURE COMES FIRST. It is a passive — it never appears in the
     // effect list — so without this line the one rule that shapes the whole
     // fight would be the only thing the intent hover did not explain.
+    // AS YOU DID, PRICED FOR THIS TICK (2026-08-10). describeEffect is pure and
+    // knows nothing about the fight, so the general sentence ("bigger hands hit
+    // back harder") comes from there and the ACTUAL NUMBER — the answer to the
+    // hand you last played — is appended here, where the scene is. A mirror you
+    // cannot price before you commit is a coin flip, not a decision.
+    const mirror = this.mirrorAnswerNow();
+    const priced = (e) => {
+      const line = '•  ' + describeEffect(e);
+      if (e.type !== 'mirrorHand') return line;
+      return mirror
+        ? `${line}\n    you last played a ${mirror.name}: it answers for ${mirror.damage}`
+        : `${line}\n    you have played nothing yet: it has nothing to answer`;
+    };
     const lines = [
       ...(sig ? [`◆  ${sig.rule}`, ''] : []),
-      ...intent.effects.map(e => '•  ' + describeEffect(e)),
+      ...intent.effects.map(priced),
     ].join('\n');
     const tip = this.add.container(0, 0).setDepth(DEPTH.overlay + 3);
     const title = this.add.text(0, 0, sig ? `${intent.label}   (${sig.name})` : intent.label, {

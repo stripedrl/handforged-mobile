@@ -52,7 +52,7 @@
 
 import {
   BIOME_EFFECT_TYPES, CARD_TAX_PER_CARD, CONDEMN_TURNS, DEMAND_HAND_DAMAGE,
-  MIRROR_HAND_PCT, SHRINK_HAND_STEP,
+  SHRINK_HAND_STEP, BLIND_CHANCE, MIRROR_HAND_CAP, mirrorHandDamage,
 } from './biomes.js';
 import { bossDamageFactor, enemyHpFactor } from './difficulty.js';
 // The one number the FADE tooltips quote; scoring.js is a leaf, so this edge is free.
@@ -1265,10 +1265,10 @@ export const ENEMY_DEFS = {
     maxHp: 300, chips: 70,
     special: 'asYouDid',
     intents: [
-      { label: 'AS YOU DID', effects: [FX('mirrorHand', MIRROR_HAND_PCT)] },
+      { label: 'AS YOU DID', effects: [BFX('mirrorHand')] },
       { label: 'Attack', effects: [A(14)] },
       { label: 'Strengthen', effects: [FX('buff', 3)] },
-      { label: 'AS YOU DID', effects: [FX('mirrorHand', MIRROR_HAND_PCT)] },
+      { label: 'AS YOU DID', effects: [BFX('mirrorHand')] },
       { label: 'Standing as you stand...', effects: [FX('charge')] },
       { label: 'YOUR OWN EDGE', effects: [A(26)] },
     ],
@@ -1985,7 +1985,7 @@ export function describeEffect(e) {
     // Every one of these is a TELEGRAPH: the intent icon shows the glyph, this
     // sentence is what the hover says, and the signature blurb shouts the
     // headline at the opening bell. A mechanic with no telegraph does not ship.
-    case 'blind': return `Blind ${e.value}: for ${e.value} turn${e.value > 1 ? 's' : ''}, cards you DRAW arrive FACE DOWN. Still playable`;
+    case 'blind': return `Blind ${e.value}: for ${e.value} turn${e.value > 1 ? 's' : ''}, ${Math.round(BLIND_CHANCE * 100)}% of the cards you DRAW arrive FACE DOWN. Still playable`;
     case 'fade': return `Fade ${e.value}: ${e.value} card${e.value > 1 ? 's start' : ' starts'} FADING for this fight. A fading card scores no bonus and has a ${Math.round(FADE_VANISH_CHANCE * 100)}% chance to leave your deck forever each time it scores`;
     case 'condemn': return `Condemned: ${e.value} card${e.value > 1 ? 's are' : ' is'} branded. PLAY ${e.value > 1 ? 'them' : 'it'} within ${turnWord(CONDEMN_TURNS)} or ${e.value > 1 ? 'they leave' : 'it leaves'} your deck for good. Discarding does not save it`;
     case 'burnPlayed': return 'Struck From The Record: every card you play is BURNED and cannot be played again this fight, even after a reshuffle';
@@ -1995,7 +1995,8 @@ export function describeEffect(e) {
     case 'wall': return 'Scaffold: it raises a wall and shows the ONE hand type that breaks it. Your damage does not reach it until the wall is down';
     case 'unusedOnly': return 'Nothing Twice: she takes damage only from hand types you have NOT played yet this fight';
     case 'forgetSuit': return 'Silkbound: she names a suit and that suit deals her NOTHING, until she names a new one';
-    case 'mirrorHand': return `As You Did: it plays your last hand back at you, for ${MIRROR_HAND_PCT}% of what it dealt`;
+    case 'mirrorHand': return 'As You Did: it answers the hand you played. Bigger hands hit back harder'
+      + ` (${mirrorHandDamage('pair')} for a Pair, ${mirrorHandDamage('flush')} for a Flush, up to ${MIRROR_HAND_CAP})`;
     case 'shrinkHand': return `Reweave: your HAND SIZE drops by ${SHRINK_HAND_STEP} for the rest of the fight`;
     case 'dropHand': return 'Weightless: cards left in your hand at the end of the turn drift away and are gone for this fight';
     case 'healMirror': return 'Reflection: every point of HP you heal, it heals too';
@@ -2255,8 +2256,13 @@ export const SIGNATURES = {
   // ---- THE ETHEREAL PLAINS (alternate Act II) ------------------------------
   asYouDid: {
     tier: 'elite', name: 'AS YOU DID', ink: '#bcd0ff', icon: 'icon_sword_small',
-    blurb: 'AS YOU DID: it plays your last hand back at you',
-    rule: `AS YOU DID: it throws your own last hand back at you for ${MIRROR_HAND_PCT}% of the damage it dealt.`,
+    blurb: 'AS YOU DID: it answers your hand. Bigger hands hit back harder',
+    // THE REAL RULE, in the terse register, with the real numbers pulled out of
+    // the one derivation (biomes.mirrorHandDamage) rather than typed here.
+    rule: `AS YOU DID: every hand you hit it with is answered by FLAT damage set by the HAND TYPE: `
+      + `${mirrorHandDamage('highCard')} for a High Card, ${mirrorHandDamage('pair')} for a Pair, `
+      + `${mirrorHandDamage('flush')} for a Flush, ${mirrorHandDamage('quads')} for Four of a Kind, `
+      + `capped at ${MIRROR_HAND_CAP}. It is damage: Shield eats it.`,
   },
   unsinging: {
     tier: 'elite', name: 'UNSINGING', ink: '#ffce7a', icon: 'fx_dust',

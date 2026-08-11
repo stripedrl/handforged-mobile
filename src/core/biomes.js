@@ -32,7 +32,7 @@
  *   demandedHand   the hand type the player MUST play this turn, or null.
  */
 
-import { HAND_TYPES, evaluateHand } from './poker.js';
+import { HAND_TYPES, HAND_DEFS, evaluateHand } from './poker.js';
 
 // ---------------------------------------------------------------------------
 // THE NUMBERS. Every tunable the sixteen effects read, declared once, so a test
@@ -41,6 +41,19 @@ import { HAND_TYPES, evaluateHand } from './poker.js';
 
 /** BLIND, regular tier: how long the moonlight holds your cards face down. */
 export const BLIND_TURNS = 1;
+/**
+ * BLIND, PER CARD (JC, 2026-08-10: "blinding every card you draw is too
+ * strong"). The moonlight takes a COIN over each card it is offered rather than
+ * the whole deal: while the clock runs, every card DRAWN rolls this chance to
+ * arrive face down, and the rest arrive readable.
+ *
+ * ONLY THE RATE MOVED. The clocks are untouched — a Blind 2 is still two turns
+ * of dark draws, the elite's whole-fight version is still whole-fight, and the
+ * unblind still lets go of everything at once. What changed is that a blind
+ * turn now costs you about half a hand of information instead of all of it,
+ * which leaves the mechanic a fog rather than a blindfold.
+ */
+export const BLIND_CHANCE = 0.5;
 /** CONDEMN: turns a branded card has to be PLAYED before it burns for good. */
 export const CONDEMN_TURNS = 2;
 /**
@@ -75,8 +88,35 @@ export const CONDEMN_TURNS = 2;
  * expensive, 2 is the dial-back and it is this one number.
  */
 export const CARD_TAX_PER_CARD = 3;
-/** AS YOU DID: the Mirrorwalker throws back this % of your last hand's damage. */
-export const MIRROR_HAND_PCT = 100;
+/**
+ * AS YOU DID — THE HAND-TIER MIRROR (JC's design call, 2026-08-10).
+ *
+ * WHAT IT USED TO BE, and why it had to go: the Mirrorwalker threw back
+ * MIRROR_HAND_PCT (100%) of the DAMAGE your last hand dealt. That reads as a
+ * clean idea and is an unwinnable one — the hero has 100 HP and a scored hand
+ * passes a thousand points somewhere in Act II, so the mirror one-shot you for
+ * playing the game properly, and the only counter was to kill it before it ever
+ * took a turn. A mechanic whose only answer is "do not let it act" is not a
+ * mechanic.
+ *
+ * WHAT IT IS NOW: it answers the HAND TYPE, not the number. Flat damage, on a
+ * ladder — the bigger the hand you hit it with, the bigger the answer — and it
+ * is ordinary damage, so Shield eats it, the Bull walls it and a heal outruns
+ * it. Punishing and mimic-flavoured; survivable and blockable.
+ *
+ * DERIVED FROM HAND_DEFS, never tabled. `base + perMult × the hand's own mult`,
+ * capped, so a hand type added to poker.js tomorrow is already covered and no
+ * second copy of the ladder can drift from the first. See mirrorHandDamage.
+ */
+export const MIRROR_HAND_BASE = 4;
+/** ...and how hard one point of the hand's own MULT hits back. */
+export const MIRROR_HAND_PER_MULT = 3.2;
+/**
+ * THE LID. Without it FLUSH FIVE answers for 57 against a 100 HP hero, which is
+ * the old unwinnable shape wearing a new formula. Thirty is a third of the bar:
+ * brutal, and survivable twice.
+ */
+export const MIRROR_HAND_CAP = 30;
 /** THE SENTENCE: HP for ignoring a demanded hand type. */
 export const DEMAND_HAND_DAMAGE = 12;
 /** REWEAVE: cards off the deal per cast, for the rest of the fight. */
@@ -435,9 +475,46 @@ export function demandVerdict(demanded, played, damage = DEMAND_HAND_DAMAGE) {
   return { obeyed: false, damage: Math.max(0, Math.round(damage)) };
 }
 
-/** AS YOU DID: your own last hand, thrown back. */
-export function mirrorDamage(lastDamage = 0, pct = MIRROR_HAND_PCT) {
-  return Math.max(0, Math.round((Math.max(0, lastDamage) * Math.max(0, pct)) / 100));
+/**
+ * HOW BIG A HAND IS, for the mirror's purposes: its own base mult.
+ *
+ * SIX OF A KIND is the one hand this cannot read straight off. It carries
+ * `mult: 1` as a NEUTRAL ELEMENT — it brings no mult of its own and SQUARES the
+ * finished one instead (poker.js) — so taking that 1 at face value would have
+ * the top of the ladder answered by the mirror's softest blow. A hand that
+ * squares is the biggest hand in the game and is priced as such: the loudest
+ * mult on the chart. One flag, read here, so a future squaring hand needs
+ * nothing.
+ */
+export function mirrorHandStrength(type) {
+  const def = HAND_DEFS[type];
+  if (!def) return 0;
+  if (!def.squaresMult) return def.mult;
+  return Math.max(...Object.values(HAND_DEFS).map(d => d.mult));
+}
+
+/**
+ * AS YOU DID: the flat answer to the hand you played. `bonus` is a flat add for
+ * a future act/elite scaling to ride — nothing passes one today, and the intent
+ * carries no value at all (it is a SWITCH, not a quantity).
+ * @param {string} type a HAND_DEFS key, or null/unknown for "it has nothing of
+ *        yours to copy yet"
+ * @returns {number} HP, 0 when there is no hand to answer
+ */
+export function mirrorHandDamage(type, bonus = 0) {
+  const strength = mirrorHandStrength(type);
+  if (!strength) return 0;
+  const raw = MIRROR_HAND_BASE + MIRROR_HAND_PER_MULT * strength + Math.max(0, bonus);
+  return Math.max(0, Math.min(MIRROR_HAND_CAP, Math.round(raw)));
+}
+
+/**
+ * THE WHOLE LADDER, derived once — what the signature copy quotes and what the
+ * tests assert against, so the printed rule and the blow can never disagree.
+ * @returns {Object<string, number>} hand type -> HP it answers with
+ */
+export function mirrorHandTable() {
+  return Object.fromEntries(Object.keys(HAND_DEFS).map(t => [t, mirrorHandDamage(t)]));
 }
 
 /** REFLECTION: every point you heal, it heals. */

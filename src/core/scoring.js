@@ -81,7 +81,10 @@
 
 import { HOARD_CHIP_STEP, CHARACTERS } from '../config.js';
 import { cardValue } from './deck.js';
-import { evaluateHand, bestHandOf, scoringIds, handStats, WILD_MODS, HAND_DEFS } from './poker.js';
+import {
+  evaluateHand, bestHandOf, scoringIds, handStats, evalOptsFrom,
+  WILD_MODS, HAND_DEFS,
+} from './poker.js';
 
 /**
  * ============================== THE INFINITY CAP ==========================
@@ -665,11 +668,10 @@ export function scoreHand({ cards, character, state }) {
   // evaluation (THE UNDERSTUDY's of-a-kind shift, THE BROKEN COMPASS's four-card
   // flush, THE ROPE LADDER's four-card straight). All three are OFF by default,
   // and with all three off poker.js is byte-identical to what it always was.
-  const evalOpts = {
-    ofAKindMinus1: !!(state.mods ?? {}).ofAKindMinus1,
-    flushMinus1: !!(state.mods ?? {}).flushMinus1,
-    straightMinus1: !!(state.mods ?? {}).straightMinus1,
-  };
+  // ONE DERIVATION (evalOptsFrom, poker.js) — the same call the combat PREVIEW
+  // makes, so the hand you are shown and the hand you play can never be two
+  // different hands. See the alpha 0.30c note on evalOptsFrom.
+  const evalOpts = evalOptsFrom(state.mods ?? {});
   // GO-GO GOO can hand this more than five cards, and the best five-card hand
   // in the pile is what sets the type and the mult. Everything else in the game
   // plays 1-5 and goes through the ordinary evaluator, unchanged.

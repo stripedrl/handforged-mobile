@@ -4,7 +4,7 @@
    streams from the network every session by design. Navigation is
    network-first so an update is never shadowed by a stale index.html, and the
    cache falls back in only when the network is gone. */
-const CACHE = 'hf-shell-alpha-0-30-fd80c312';
+const CACHE = 'hf-shell-alpha-0-30c-fd80c312';
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./sw.js", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 const SCOPE = new URL('./', self.location).pathname;
 const SHELL_PATHS = new Set(SHELL.map(function (p) {

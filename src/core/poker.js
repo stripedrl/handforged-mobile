@@ -37,6 +37,10 @@ import { SUITS } from './deck.js';
  * @property {string} name - display name, e.g. 'Two Pair'
  * @property {number} mult - the base scoring multiplier for this hand type (level 0)
  * @property {number} base - the hand's own BASE VALUE at level 0 (score side)
+ * @property {number[]} [idx] - PRESENT ONLY when the hand formed from fewer
+ *   cards than were evaluated (a four-card flush inside a five-card selection).
+ *   The positions, in the evaluated array, of the cards that FORMED the hand;
+ *   scoringIds reads it and everything else greys out as a kicker.
  */
 
 /**
@@ -274,9 +278,11 @@ const shiftOf = (opts) => (opts?.ofAKindMinus1 ? 1 : 0);
  * still runs high or low.
  *
  * WHAT FALLS OUT OF IT, and none of it needed a line anywhere else:
- *   · THE KICKER RULE. scoringIds returns EVERY card for straight/flush/
- *     straightFlush, so a four-card flush scores four cards. One fewer card
- *     played for the same hand type is the whole reward.
+ *   · THE KICKER RULE, UNBROKEN. A four-card flush scores its four cards. Play
+ *     a FIFTH card of another suit alongside it and the hand is still a flush —
+ *     the best-forming SUBSET wins (see bestSubsetHand) — and that fifth card
+ *     is an ordinary kicker: grey, worth nothing, disposed of for free. One
+ *     fewer card needed, and a free slot to thin the deck with, is the reward.
  *   · A FOUR-CARD FLUSH IS A FLUSH. Same HAND_DEF, same base, same mult, same
  *     Smith level, same name. So the METEOR SIGIL's flush-or-better AOE, the
  *     RISING TIDE's isFlushHand count, the PAINTER'S PALETTE's handFactor and
@@ -292,8 +298,119 @@ const flushMin = (opts) => (opts?.flushMinus1 ? 4 : 5);
 const straightMin = (opts) => (opts?.straightMinus1 ? 4 : 5);
 
 /**
+ * THE THREE CLASSIFICATION FLAGS, DERIVED IN ONE PLACE (2026-08-10, alpha
+ * 0.30c). Every caller that has to classify a hand — scoreHand, the combat
+ * preview, the DOUBLE JEOPARDY gate, LIQUID ICE, the dev hooks — reads its
+ * options bag through THIS function, off the same merged mods bag the belt
+ * produces. That is the whole cure for the reported PREVIEW BUG: the preview
+ * had hand-rolled its own bag and only ever copied ONE of the three flags
+ * across, so a Broken Compass hand was named High Card on screen and scored as
+ * a Flush a heartbeat later. A fourth classification relic now needs exactly
+ * one line, here, and cannot desynchronise anything.
+ * @param {object} [mods] a merged mods bag (run.collectMods) or anything
+ *        carrying the same three channels
+ * @returns {{ofAKindMinus1: boolean, flushMinus1: boolean, straightMinus1: boolean}}
+ */
+export function evalOptsFrom(mods = {}) {
+  const m = mods ?? {};
+  return {
+    ofAKindMinus1: !!m.ofAKindMinus1,
+    flushMinus1: !!m.flushMinus1,
+    straightMinus1: !!m.straightMinus1,
+  };
+}
+
+/** Does this options bag bend classification at all? */
+function bendsClassification(opts) {
+  return !!(opts?.ofAKindMinus1 || opts?.flushMinus1 || opts?.straightMinus1);
+}
+
+/** hand type -> its rung on the ladder (HAND_TYPES order). */
+const LADDER_RANK = new Map(HAND_TYPES.map((t, i) => [t, i]));
+
+/**
+ * Every non-empty PROPER subset of `n` slots, as index arrays, BIGGEST FIRST
+ * and lexicographic within a size. The order is the tie-break: a tie between
+ * two subsets keeps the first one seen, so a bigger hand always wins a draw.
+ * n is never more than 5, so this is at most 30 entries; memoised per size
+ * because it is a constant.
+ */
+const PROPER_SUBSETS = [];
+function properSubsets(n) {
+  if (PROPER_SUBSETS[n]) return PROPER_SUBSETS[n];
+  const out = [];
+  for (let mask = 1; mask < (1 << n) - 1; mask++) {
+    const idx = [];
+    for (let i = 0; i < n; i++) if (mask & (1 << i)) idx.push(i);
+    out.push(idx);
+  }
+  // Two-key sort: size DESC, then the index list lexicographically ASC.
+  out.sort((a, b) => {
+    if (a.length !== b.length) return b.length - a.length;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
+    return 0;
+  });
+  PROPER_SUBSETS[n] = out;
+  return out;
+}
+
+/**
+ * THE BEST HAND INSIDE THE SELECTION — KICKER SUBSETS (JC spec, 2026-08-10).
+ *
+ * Four suited cards plus one stranger is still a FLUSH under the Broken
+ * Compass; the stranger is an ordinary KICKER — grey, worth nothing, and
+ * useful purely as a card you got to throw away. The same sentence for the
+ * Rope Ladder's four-card straight and for the Understudy's shifted rank
+ * groups. So evaluation stopped asking "what is this pile?" and started asking
+ * "what is the best hand ANY part of this pile makes?".
+ *
+ * THE PREFERENCE ORDER, exactly as specified:
+ *   (a) a strictly HIGHER hand type wins, from any subset or from the whole
+ *       selection. Four suited cards that happen to run 5-6-7-8 beat the
+ *       five-card flush they sit inside, because a straight flush outranks it.
+ *   (b) same type, MORE SCORING CARDS wins — five suited cards are a five-card
+ *       flush and that is strictly more value than the four-card flush hiding
+ *       inside it, so the compass never downgrades a hand you already had.
+ *   (c) otherwise the four-card hand, and the leftover is a kicker.
+ * A draw keeps the LARGER, EARLIER subset, which is why the whole selection is
+ * the incumbent: nothing can displace it without being genuinely better.
+ *
+ * ONLY RUNS UNDER A FLAG. With none of the three relics in play a proper subset
+ * can never win either test — the five-card-only types need all five cards, and
+ * dropping a card can only shrink an of-a-kind — so the search is skipped
+ * outright and evaluation is byte-identical to what it has always been. The
+ * 3,000-hand no-flag sweep in relics0810 is the proof.
+ */
+function bestSubsetHand(cards, full, opts) {
+  const n = cards.length;
+  let best = full;
+  let bestIdx = null;                       // null = the whole selection formed it
+  let bestRank = LADDER_RANK.get(full.type) ?? -1;
+  let bestScore = scoringIds(cards, full, opts).size;
+  for (const idx of properSubsets(n)) {
+    const sub = idx.map(i => cards[i]);
+    const hand = classifyExact(sub, opts);
+    const rank = LADDER_RANK.get(hand.type) ?? -1;
+    if (rank < bestRank) continue;
+    const score = scoringIds(sub, hand, opts).size;
+    if (rank > bestRank || score > bestScore) {
+      best = hand; bestIdx = idx; bestRank = rank; bestScore = score;
+    }
+  }
+  // `idx` NAMES THE FORMING CARDS, by position in the array that was evaluated,
+  // and is present ONLY when a proper subset won. scoringIds reads it and greys
+  // everything else, which is how the kicker rule survives the change intact.
+  return bestIdx ? { ...best, idx: bestIdx } : best;
+}
+
+/**
  * Evaluate a played hand of 1-5 cards and return the highest qualifying
  * hand type with its display name and base scoring multiplier.
+ *
+ * Under any of the three classification relics this returns the best hand over
+ * QUALIFYING SUBSETS of the selection (see bestSubsetHand), and the winning
+ * result carries `idx` — the positions of the cards that formed it — whenever
+ * the hand came from fewer cards than were played.
  * @param {Card[]} cards
  * @param {{ofAKindMinus1?: boolean, flushMinus1?: boolean, straightMinus1?: boolean}} [opts]
  * @returns {HandResult}
@@ -302,7 +419,20 @@ export function evaluateHand(cards, opts = {}) {
   if (!Array.isArray(cards) || cards.length < 1 || cards.length > 5) {
     throw new RangeError('evaluateHand: cards must be an array of 1-5 cards');
   }
+  const full = classifyExact(cards, opts);
+  if (cards.length < 2 || !bendsClassification(opts)) return full;
+  return bestSubsetHand(cards, full, opts);
+}
 
+/**
+ * THE CLASSIFIER PROPER: what this exact pile of cards is, with no subsets
+ * considered. Every word of the ladder below is unchanged from the day it
+ * shipped — evaluateHand simply asks it more than once now.
+ * @param {Card[]} cards
+ * @param {{ofAKindMinus1?: boolean, flushMinus1?: boolean, straightMinus1?: boolean}} opts
+ * @returns {HandResult}
+ */
+function classifyExact(cards, opts = {}) {
   const n = cards.length;
   const shift = shiftOf(opts);
   // Every rank group counts as `shift` larger. Sorted BEFORE the shift, which
@@ -338,7 +468,19 @@ export function evaluateHand(cards, opts = {}) {
   // and after flushFive above, because five of one rank in one suit is both a
   // flush five and (vacuously) not a full house at all. maxCount is already
   // known to be < 5 here, so `3 and 2` is an honest trips+pair.
-  if (isFlush && counts[0] === 3 && counts[1] === 2) return result('flushHouse');
+  //
+  // `>=` RATHER THAN `===` (alpha 0.30c). Found while proving the invariant
+  // "a classification relic may upgrade a hand but must never downgrade one":
+  // under THE UNDERSTUDY a suited trips+pair shifts to counts [4,3], which
+  // failed the `=== 3 && === 2` test and fell through to FOUR OF A KIND — three
+  // rungs BELOW the flush house the player actually held. A relic that makes
+  // your best hand worse is a bug however you spell it.
+  //
+  // IT CHANGES NOTHING WITHOUT THE FLAG. Five cards cannot hold a group of 4
+  // and a second group of 2 (that is six cards), so with shift 0 `>=` and `===`
+  // select exactly the same hands, and fewer than five cards can never satisfy
+  // 3+2 at all. The no-flag identity sweep is the proof.
+  if (isFlush && counts[0] >= 3 && counts[1] >= 2) return result('flushHouse');
   if (maxCount >= 4) return result('quads');
   if (hasFive && counts[0] === 3 && counts[1] === 2) return result('fullHouse');
   if (isFlush) return result('flush');
@@ -375,16 +517,24 @@ export function bestHandOf(cards, opts = {}) {
   if (cards.length <= 5) return evaluateHand(cards, opts);
   let best = null;
   let bestRank = -1;
-  const pick = [];
+  const pick = [];                          // INDICES into `cards`, not cards
   const walk = (start) => {
     if (pick.length === 5) {
-      const hand = evaluateHand(pick, opts);
+      const hand = evaluateHand(pick.map(i => cards[i]), opts);
       const rank = HAND_TYPES.indexOf(hand.type);
-      if (rank > bestRank) { bestRank = rank; best = hand; }
+      if (rank > bestRank) {
+        bestRank = rank;
+        // A hand out of eight cards ALWAYS forms from a subset, and evaluateHand
+        // may have narrowed it further (a four-card flush inside the five-card
+        // pick). Lift whatever it chose back onto the WHOLE pile so `idx` never
+        // names positions in an array the caller has never seen.
+        const inner = hand.idx ?? [0, 1, 2, 3, 4];
+        best = { ...hand, idx: inner.map(j => pick[j]) };
+      }
       return;
     }
     for (let i = start; i < cards.length; i++) {
-      pick.push(cards[i]);
+      pick.push(i);
       walk(i + 1);
       pick.pop();
     }
@@ -429,11 +579,27 @@ export function mostPlayedHandType(run) {
  * @param {HandResult} hand - result of evaluateHand(cards)
  * @param {{ofAKindMinus1?: boolean, flushMinus1?: boolean, straightMinus1?: boolean}} [opts]
  *        the SAME flags evaluateHand was given. The flush/straight relics need
- *        nothing here: those types already score every card played, so a
- *        four-card flush scores four cards for free.
+ *        nothing here beyond `hand.idx`: those types score every card that
+ *        FORMED them, so a four-card flush scores its four cards and the fifth
+ *        card in the selection greys out as an ordinary kicker.
  * @returns {Set<string>}
  */
 export function scoringIds(cards, hand, opts = {}) {
+  // THE FORMING SUBSET (2026-08-10, alpha 0.30c). When evaluateHand had to drop
+  // a card to make the hand — four suited cards inside a five-card selection —
+  // `hand.idx` names the cards that formed it, BY POSITION, and everything else
+  // is a kicker by definition: grey, worth nothing, thrown away for free.
+  //
+  // BY POSITION AND NOT BY ID on purpose: five stacked duplicates of one printed
+  // card (Mirror Image, the Crown's Aces) can share an id, and a filter on ids
+  // would quietly hand back more cards than formed the hand.
+  const idx = hand?.idx;
+  if (Array.isArray(idx) && idx.length && idx.length !== cards.length) {
+    const sub = idx.map(i => cards[i]).filter(Boolean);
+    // `idx: null` on the recursive call: the subset IS the whole hand now, so
+    // this can never loop.
+    return scoringIds(sub, { ...hand, idx: null }, opts);
+  }
   const all = () => new Set(cards.map((c) => c.id));
   switch (hand.type) {
     case 'straight':
